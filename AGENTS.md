@@ -22,3 +22,9 @@ publishing tickets, read `docs/agents/issue-tracker.md`.
 
 Single-context: root `GLOSSARY.md` and `docs/adr/`. Before exploring the
 codebase, read `docs/agents/domain.md`.
+
+## Git commits
+
+Commits carry only the user's identity from `git config`. Do not add
+`Co-authored-by`, `Signed-off-by`, or any other trailer that names an agent
+or tool, and do not override the author or committer.

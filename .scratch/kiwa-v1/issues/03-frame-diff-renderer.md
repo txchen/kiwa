@@ -1,6 +1,6 @@
 # 03 Frame composer, differ, and first benchmark
 
-Status: open
+Status: claimed
 Blocked by: 02
 
 ## Scope
