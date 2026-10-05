@@ -223,15 +223,27 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
   nearest pending deadline. Each wake drains each ready PTY up to a byte
   budget (256 KiB), then yields to other fds (ADR 0002).
 - **Rendering.** After any change, the server marks the client's frame
-  stale and arms the render deadline, unless it is already armed. The
-  deadline fires at most every 8 ms. On firing, the server composes a Frame,
-  diffs it row by row against `last_frame`, and writes cursor moves, SGR
-  changes, and text for changed cell runs. The output is wrapped in
-  synchronized output (`CSI ? 2026 h/l`). An unchanged frame emits zero
-  bytes. Pane cells come from `RenderState`. Rows that `RenderState` reports
-  clean are copied from the previous frame. Output in a hidden pane updates
-  its terminal state but marks no frame stale. It sets the workspace's
-  activity marker, which changes the frame once.
+  stale. At the end of that wake the server renders, unless a frame went
+  out less than 8 ms ago. In that case it arms the render deadline for the
+  rest of the 8 ms, so a burst of output ends in one frame. A render composes a Frame, diffs
+  it row by row against `last_frame`, and writes cursor moves, SGR changes,
+  and text for changed cell runs. Output that writes to more than one row
+  is wrapped in synchronized output (`CSI ? 2026 h/l`). An unchanged frame
+  emits zero bytes. Pane cells come from `RenderState`. Rows that
+  `RenderState` reports clean are copied from the previous frame. Output in
+  a hidden pane updates its terminal state but marks no frame stale. It
+  sets the workspace's activity marker, which changes the frame once.
+- **Scrolling.** Each pane keeps the `RenderState` row ids of the frame
+  that last drew it. When most of a visible pane's rows reappear `n` rows
+  higher or lower, the diff may scroll the outer terminal before the cell
+  diff. One candidate scrolls the pane's rows across the whole frame width
+  with `DECSTBM` and `SU`/`SD`, and then resets the margins. If the outer
+  terminal supports left and right margins, another candidate scrolls only
+  the pane's rect, with `CSI ? 69 h`, `DECSLRM`, and `DECSTBM`. The diff
+  applies each candidate to a copy of `last_frame`, counts the bytes of the
+  candidate and the cell diff after it, and sends the cheapest, which may
+  be no scroll. The cell diff then repaints whatever else the scroll moved,
+  such as the sidebar.
 - **Input.** The client sends raw input bytes. The server decodes them:
   prefix handling, SGR mouse reports (`CSI < … M/m`), bracketed paste,
   focus events, and legacy xterm keys. Keys meant for a pane are re-encoded
@@ -243,13 +255,15 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
   screen, SGR mouse with button motion (`1002` + `1006`), bracketed paste
   (`2004`), and focus events (`1004`). It does not enable any-motion
   tracking (`1003`), so moving the mouse without a button generates no
-  traffic. On attach the server also sends `CSI ? u` and then DA1
-  (`CSI c`) through the output stream. A kitty flags reply that arrives
-  before the DA1 reply means the outer terminal supports the kitty
+  traffic. On attach the server also sends `CSI ? u`, `CSI ? 69 $ p`, and
+  then DA1 (`CSI c`) through the output stream. A kitty flags reply that
+  arrives before the DA1 reply means the outer terminal supports the kitty
   keyboard protocol, and the server pushes the disambiguate flag
-  (`CSI > 1 u`). Probe replies never reach a pane. On detach, on error,
-  and on `SIGTERM`/`SIGHUP`, the client pops the kitty flags (`CSI < u`),
-  restores every mode it set, and leaves raw mode.
+  (`CSI > 1 u`). A DECRPM reply of 1, 2, or 3 for mode 69 before the DA1
+  reply means the outer terminal supports left and right margins. Probe
+  replies never reach a pane. On detach, on error, and on
+  `SIGTERM`/`SIGHUP`, the client pops the kitty flags (`CSI < u`), restores
+  every mode it set, and leaves raw mode.
 - **Terminal replies.** `write_pty` effects go straight to the pane's PTY.
   A DA query is answered as ghostty's default. OSC 52 writes from a pane are
   forwarded to the outer terminal. OSC 52 reads are refused.
