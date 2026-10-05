@@ -11,7 +11,8 @@ const chrome = @import("chrome.zig");
 const hit = @import("hit.zig");
 const mouse = @import("mouse.zig");
 const Menu = @import("menu.zig").Menu;
-const Pane = @import("pane.zig").Pane;
+const pane_mod = @import("pane.zig");
+const Pane = pane_mod.Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
 const vt = @import("ghostty-vt");
 
@@ -243,6 +244,7 @@ const Server = struct {
         if (events & EPOLL.OUT != 0) p.flushPending() catch |e| std.log.err("pane write: {t}", .{e});
         if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) != 0) {
             const d = p.drain();
+            if (p.clipboard.items.len > 0) try s.forwardClipboard(p);
             if (d.bytes > 0) {
                 // Output in a hidden pane changes nothing on screen, except
                 // the first time it marks its workspace.
@@ -660,15 +662,16 @@ const Server = struct {
         const text = try p.selectionText(s.gpa) orelse return;
         defer s.gpa.free(text);
         if (text.len == 0) return;
-        const b64 = std.base64.standard.Encoder;
-        const head = "\x1b]52;c;";
-        const tail = "\x1b\\";
-        const osc = try s.gpa.alloc(u8, head.len + b64.calcSize(text.len) + tail.len);
-        defer s.gpa.free(osc);
-        @memcpy(osc[0..head.len], head);
-        _ = b64.encode(osc[head.len..][0..b64.calcSize(text.len)], text);
-        @memcpy(osc[osc.len - tail.len ..], tail);
-        if (try s.pushTerminal(c, osc)) try s.flush(c);
+        s.scratch.clearRetainingCapacity();
+        try pane_mod.appendOsc52(s.gpa, &s.scratch, 'c', text);
+        if (try s.pushTerminal(c, s.scratch.items)) try s.flush(c);
+    }
+
+    /// Sends a pane program's clipboard write on to the outer terminal.
+    fn forwardClipboard(s: *Server, p: *Pane) !void {
+        defer p.clipboard.clearRetainingCapacity();
+        const c = s.client orelse return;
+        if (try s.pushTerminal(c, p.clipboard.items)) try s.flush(c);
     }
 
     fn menuKey(s: *Server, c: *Conn, k: input.Key) !void {

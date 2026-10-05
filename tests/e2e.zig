@@ -1835,6 +1835,22 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
 }
 
+fn paneClipboardWritesReachTheOuterTerminal(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("printf '\\033]52;c;aGVsbG8=\\a'; echo sent\r");
+    try o.waitLine("sent");
+    const deadline = now() + 5 * std.time.ns_per_s;
+    while (o.clipboard.items.len == 0 and now() < deadline) _ = try o.pump(50);
+    try expect(std.mem.eql(u8, o.clipboard.items, "hello"), "the outer terminal got the pane's clipboard write");
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(ctx.gpa);
+    o.capture = &seen;
+    try o.send("printf '\\033]52;c;?\\a'; echo asked\r");
+    try o.waitLine("asked");
+    _ = try o.pump(200);
+    try expect(std.mem.indexOf(u8, seen.items, "\x1b]52;") == null, "a clipboard read is not forwarded");
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
@@ -1886,6 +1902,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a program that tracks the mouse gets pane-local reports; the sidebar still switches", .run = mouseReachesTrackingPrograms },
     .{ .name = "a drag selects text and copies it with OSC 52", .run = dragSelectionCopies },
     .{ .name = "right-click menus split, zoom, and close, and esc closes them", .run = rightClickMenus },
+    .{ .name = "a pane's OSC 52 clipboard write reaches the outer terminal", .run = paneClipboardWritesReachTheOuterTerminal },
 };
 
 pub fn main(init: std.process.Init) !u8 {

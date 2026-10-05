@@ -14,6 +14,11 @@ pub const scrollback_lines = 10_000;
 /// Bytes read from the PTY per wake before the loop serves other fds.
 const read_budget = 256 * 1024;
 
+/// The largest clipboard write forwarded to the outer terminal, in base64
+/// bytes. It stays well under the client's output buffer, so one write
+/// never forces a redraw.
+pub const clipboard_limit = 512 * 1024;
+
 pub const Pane = struct {
     gpa: std.mem.Allocator,
     id: PaneId,
@@ -29,6 +34,9 @@ pub const Pane = struct {
     events: ?u32 = null,
     /// Set when output rang the bell; `drain` reports and clears it.
     rang: bool = false,
+    /// The OSC 52 sequence for the program's last clipboard write, waiting
+    /// to go to the outer terminal; empty when there is none.
+    clipboard: std.ArrayList(u8) = .empty,
 
     pub const SpawnOptions = struct {
         id: PaneId,
@@ -60,6 +68,7 @@ pub const Pane = struct {
         handler.effects.write_pty = &writePty;
         handler.effects.device_attributes = &deviceAttributes;
         handler.effects.bell = &bell;
+        handler.effects.clipboard_write = &clipboardWrite;
         p.stream = .init(.{ .allocator = gpa, .handler = handler });
         errdefer p.stream.deinit();
 
@@ -85,6 +94,7 @@ pub const Pane = struct {
     pub fn destroy(self: *Pane) void {
         sys.close(self.fd);
         self.pending.deinit(self.gpa);
+        self.clipboard.deinit(self.gpa);
         self.render.deinit(self.gpa);
         self.stream.deinit();
         self.terminal.deinit(self.gpa);
@@ -255,6 +265,45 @@ fn bell(h: *Handler) void {
     p.rang = true;
 }
 
+/// Keeps the program's clipboard write as OSC 52 for the outer terminal.
+/// Only text is forwarded; reads stay refused because no read effect is set.
+fn clipboardWrite(h: *Handler, w: vt.clipboard.Write) void {
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+    const p: *Pane = @fieldParentPtr("stream", stream);
+    // No contents clears the clipboard, which OSC 52 says with an empty payload.
+    const data: []const u8 = if (w.contents.len == 0) "" else for (w.contents) |c| {
+        if (vt.clipboard.isTextMime(c.mime)) break c.data;
+    } else return w.reply(.unsupported);
+    if (std.base64.standard.Encoder.calcSize(data.len) > clipboard_limit) {
+        std.log.err("dropped a {d}-byte clipboard write; the limit is {d} bytes of base64", .{ data.len, clipboard_limit });
+        return w.reply(.io_error);
+    }
+    const target: u8 = switch (w.location) {
+        .selection => 's',
+        .primary => 'p',
+        else => 'c',
+    };
+    p.clipboard.clearRetainingCapacity();
+    appendOsc52(p.gpa, &p.clipboard, target, data) catch {
+        std.log.err("dropped a clipboard write: out of memory", .{});
+        return w.reply(.io_error);
+    };
+    w.reply(.{ .success = .{} });
+}
+
+/// Appends an OSC 52 write of `data` to clipboard `target` (`c`, `s`, or `p`).
+pub fn appendOsc52(gpa: std.mem.Allocator, out: *std.ArrayList(u8), target: u8, data: []const u8) !void {
+    const b64 = std.base64.standard.Encoder;
+    const head = [_]u8{ 0x1b, ']', '5', '2', ';', target, ';' };
+    const tail = "\x1b\\";
+    const len = b64.calcSize(data.len);
+    try out.ensureUnusedCapacity(gpa, head.len + len + tail.len);
+    out.appendSliceAssumeCapacity(&head);
+    _ = b64.encode(out.unusedCapacitySlice()[0..len], data);
+    out.items.len += len;
+    out.appendSliceAssumeCapacity(tail);
+}
+
 /// The path in an OSC 7 report, `file://host/path` with percent escapes,
 /// decoded into `buf`. A bare absolute path is taken as is.
 fn pwdPath(url: []const u8, buf: []u8) ?[]const u8 {
@@ -278,6 +327,16 @@ fn pwdPath(url: []const u8, buf: []u8) ?[]const u8 {
         i += 1;
     }
     return buf[0..n];
+}
+
+test "OSC 52 writes carry the target and base64 payload" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendOsc52(std.testing.allocator, &out, 'c', "hello");
+    try std.testing.expectEqualStrings("\x1b]52;c;aGVsbG8=\x1b\\", out.items);
+    out.clearRetainingCapacity();
+    try appendOsc52(std.testing.allocator, &out, 'p', "");
+    try std.testing.expectEqualStrings("\x1b]52;p;\x1b\\", out.items);
 }
 
 test "OSC 7 paths are taken from file URLs and percent-decoded" {
