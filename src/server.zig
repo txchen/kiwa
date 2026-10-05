@@ -8,6 +8,7 @@ const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const session_mod = @import("session.zig");
 const names = @import("names.zig");
+const git = @import("git.zig");
 const chrome = @import("chrome.zig");
 const hit = @import("hit.zig");
 const mouse = @import("mouse.zig");
@@ -152,6 +153,7 @@ const Server = struct {
     listener: sys.fd_t,
     sigfd: sys.fd_t,
     timerfd: sys.fd_t,
+    git: git.Watcher,
     /// Monotonic nanoseconds; null when not armed.
     deadlines: std.EnumArray(Deadline, ?u64) = .initFill(null),
     session: Session,
@@ -190,6 +192,8 @@ const Server = struct {
                     try s.onSignals();
                 } else if (fd == s.timerfd) {
                     try s.onTimer();
+                } else if (fd == s.git.fd) {
+                    if (try s.git.onEvents(s.gpa)) try s.markStale();
                 } else if (s.pane_fds.get(fd)) |p| {
                     try s.onPane(p, ev.events);
                 } else if (s.findConn(fd)) |c| {
@@ -363,6 +367,7 @@ const Server = struct {
         inline for (@typeInfo(Stats).@"struct".fields) |f| {
             try s.scratch.print(s.gpa, "{s} {d}\n", .{ f.name, @field(s.stats, f.name) });
         }
+        try s.scratch.print(s.gpa, "head_reads {d}\n", .{s.git.head_reads});
         try s.answer(c);
     }
 
@@ -385,13 +390,20 @@ const Server = struct {
         c.keyboard = if (try s.pushTerminal(c, probe_seq)) .probing else .legacy;
         s.size = c.size;
         if (s.session.isEmpty()) {
-            try s.openPane(try s.session.newWorkspace(h.cwd), h.cwd);
+            try s.openPane(try s.newWorkspace(h.cwd), h.cwd);
             if (s.exit != null) return;
         } else {
             try s.relayout();
         }
         // Sends the probes, then the first frame once they are out.
         try s.flush(c);
+    }
+
+    /// Adds a workspace rooted at `root_dir` and watches its repository.
+    fn newWorkspace(s: *Server, root_dir: []const u8) !PaneId {
+        const pane = try s.session.newWorkspace(root_dir);
+        s.session.activeWorkspace().git = try s.git.watch(s.gpa, root_dir);
+        return pane;
     }
 
     /// The area the current tab owns in a frame of `size`.
@@ -492,6 +504,7 @@ const Server = struct {
             s.exit = .{ .reason = msg.exited, .hangup_child = false };
             return;
         }
+        if (closed == .workspace) s.git.prune(s.gpa, s.session.workspaces.items);
         try s.relayout();
         try s.markStale();
     }
@@ -589,7 +602,7 @@ const Server = struct {
             },
             .new_workspace => {
                 const cwd = s.focusedCwd(&cwd_buf);
-                return s.openPane(try ss.newWorkspace(cwd), cwd);
+                return s.openPane(try s.newWorkspace(cwd), cwd);
             },
             .split => |axis| {
                 const cwd = s.focusedCwd(&cwd_buf);
@@ -1064,6 +1077,7 @@ const Server = struct {
         s.chrome_workspaces.clearRetainingCapacity();
         for (ss.workspaces.items) |ws| try s.chrome_workspaces.append(s.gpa, .{
             .name = ws.name.text(),
+            .branch = s.git.branch(ws.git),
             .activity = ws.activity,
             .active = ws.id == ss.active,
         });
@@ -1167,6 +1181,7 @@ const Server = struct {
         s.chrome_workspaces.deinit(s.gpa);
         s.chrome_tabs.deinit(s.gpa);
         s.session.deinit();
+        s.git.deinit(s.gpa);
         s.scratch.deinit(s.gpa);
     }
 };
@@ -1202,6 +1217,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     try sys.epollCtl(ep, EPOLL.CTL_ADD, listener, EPOLL.IN);
     try sys.epollCtl(ep, EPOLL.CTL_ADD, sigfd, EPOLL.IN);
     try sys.epollCtl(ep, EPOLL.CTL_ADD, timerfd, EPOLL.IN);
+    const watcher: git.Watcher = try .init();
+    try sys.epollCtl(ep, EPOLL.CTL_ADD, watcher.fd, EPOLL.IN);
 
     if (ready_fd) |fd| _ = sys.write(fd, "1") catch {};
 
@@ -1217,6 +1234,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
         .listener = listener,
         .sigfd = sigfd,
         .timerfd = timerfd,
+        .git = watcher,
         .hostname = std.mem.sliceTo(&uts.nodename, 0),
         .session = .init(gpa, std.fs.path.basename(env.get("SHELL") orelse "/bin/sh")),
     };

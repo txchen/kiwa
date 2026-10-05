@@ -50,7 +50,17 @@ const Ctx = struct {
 
     /// Runs `kiwa <arg>` without a terminal and returns what it printed.
     fn output(ctx: *Ctx, arg: [:0]const u8) ![]u8 {
-        const argv = [_:null]?[*:0]const u8{ ctx.kiwa.ptr, arg.ptr, null };
+        return ctx.capture(&.{ ctx.kiwa.ptr, arg.ptr, null });
+    }
+
+    /// Runs a `/bin/sh` script in the case's directory and returns what it printed.
+    fn sh(ctx: *Ctx, script: [:0]const u8) ![]u8 {
+        return ctx.capture(&.{ "/bin/sh", "-c", script.ptr, null });
+    }
+
+    /// Runs `argv` in the case's directory without a terminal and returns
+    /// what it printed. Fails unless it exits 0.
+    fn capture(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8) ![]u8 {
         var pipe: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
         const pid = sys.fork();
@@ -59,7 +69,8 @@ const Ctx = struct {
             _ = linux.dup2(devnull, 0);
             _ = linux.dup2(pipe[1], 1);
             _ = linux.dup2(devnull, 2);
-            _ = linux.execve(ctx.kiwa, &argv, ctx.env.slice);
+            _ = linux.chdir(ctx.dir_z);
+            _ = linux.execve(argv[0].?, argv, ctx.env.slice);
             sys._exit(127);
         }
         sys.close(pipe[1]);
@@ -2092,6 +2103,83 @@ fn paneClipboardWritesReachTheOuterTerminal(ctx: *Ctx) !void {
     try expect(std.mem.indexOf(u8, seen.items, "\x1b]52;") == null, "a clipboard read is not forwarded");
 }
 
+const SidebarRow = struct { y: usize, text: []const u8 };
+
+/// Whether sidebar row `r.y` reads `r.text`, without trailing blanks.
+fn sidebarRowIs(o: *Outer, r: SidebarRow) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(o.gpa);
+    const row = try g.rowText(&buf, r.y, 0);
+    const end = std.mem.indexOf(u8, row, "\u{2502}") orelse return false;
+    return std.mem.eql(u8, std.mem.trimEnd(u8, row[0..end], " "), r.text);
+}
+
+fn waitSidebarRow(o: *Outer, y: usize, text: []const u8) !void {
+    return o.waitFor(text, SidebarRow{ .y = y, .text = text }, sidebarRowIs);
+}
+
+fn branchLineFollowsHead(ctx: *Ctx) !void {
+    ctx.gpa.free(try ctx.sh("git init -q -b main && git commit -q --allow-empty -m one"));
+    const id = try ctx.sh("git rev-parse HEAD | cut -c1-7");
+    defer ctx.gpa.free(id);
+    const o = try attachedWithPrompt(ctx);
+    try waitSidebarRow(o, 2, "   main");
+    try o.send("git switch -q -c feature/x\r");
+    const start = now();
+    try waitSidebarRow(o, 2, "   feature/x");
+    std.debug.print("    the branch line changed {d} ms after the switch was typed\n", .{(now() - start) / std.time.ns_per_ms});
+    try o.send("git switch -q --detach\r");
+    const detached = try std.fmt.allocPrint(ctx.gpa, "   {s}", .{std.mem.trimEnd(u8, id, "\n")});
+    defer ctx.gpa.free(detached);
+    try waitSidebarRow(o, 2, detached);
+}
+
+fn branchLinesBelongToRepositoryWorkspaces(ctx: *Ctx) !void {
+    ctx.gpa.free(try ctx.sh("mkdir -p repo/sub && cd repo && git init -q -b main"));
+    const o = try attachedWithPrompt(ctx);
+    try waitSidebarRow(o, 2, "");
+    try o.send("cd repo/sub && echo in-sub\r");
+    try o.waitLine("in-sub");
+    try prefixed(o, "N");
+    try waitSidebarRow(o, 2, " 2 sub");
+    try waitSidebarRow(o, 3, "   main");
+    try o.waitLine("$");
+    try o.send("cd .. && echo in-repo\r");
+    try o.waitLine("in-repo");
+    try prefixed(o, "N");
+    try waitSidebarRow(o, 4, " 3 repo");
+    try waitSidebarRow(o, 5, "   main");
+    // Workspace 2 still uses the watch that workspace 3 shared.
+    try prefixed(o, "D");
+    try waitSidebarRow(o, 4, "");
+    try o.waitLine("$");
+    try o.send("git switch -q -c next\r");
+    try waitSidebarRow(o, 3, "   next");
+}
+
+fn quietRepositoryReadsHeadOnlyAfterEvents(ctx: *Ctx) !void {
+    ctx.gpa.free(try ctx.sh("git init -q -b main"));
+    const o = try attachedWithPrompt(ctx);
+    try waitSidebarRow(o, 2, "   main");
+    _ = try o.pump(1200);
+    const reads = try ctx.counter("head_reads");
+    try expect(reads == 1, "HEAD was read once, when the workspace was created");
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    const before = try sample(ctx, pid);
+    const bytes = try o.pump(3000);
+    const after = try sample(ctx, pid);
+    const switches = after.switches - before.switches;
+    std.debug.print("    quiet 3 s in a repository: server context switches={d}, outer bytes={d}\n", .{ switches, bytes });
+    try expect(try ctx.counter("head_reads") == reads, "a quiet repository's HEAD is not read again");
+    try expect(switches <= 2, "at most 2 server context switches in 3 s");
+    try expect(bytes == 0, "no output reaches the outer terminal");
+    ctx.gpa.free(try ctx.sh("git switch -q -c outside"));
+    try waitSidebarRow(o, 2, "   outside");
+    try expect(try ctx.counter("head_reads") > reads, "a switch outside the pane reads HEAD again");
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
@@ -2150,6 +2238,9 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "quiet tabs trigger no name checks", .run = quietTabsAreNotChecked },
     .{ .name = "prefix shift+t renames the tab, esc and an outside click cancel, and an empty name restores it", .run = renameTabWithPrefix },
     .{ .name = "a workspace is renamed from its menu, to a Chinese name and back", .run = renameWorkspaceFromItsMenu },
+    .{ .name = "the branch line follows git switch and shows a detached commit's short id", .run = branchLineFollowsHead },
+    .{ .name = "only workspaces in a repository get a branch line, and a shared watch outlives a closed workspace", .run = branchLinesBelongToRepositoryWorkspaces },
+    .{ .name = "a quiet repository's HEAD is read only after an inotify event", .run = quietRepositoryReadsHeadOnlyAfterEvents },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -2203,6 +2294,13 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     const state = try std.fmt.allocPrint(gpa, "{s}/state", .{dir});
     defer gpa.free(state);
     try env.put("KIWA_STATE_DIR", state);
+    // Git in the case reads none of the user's configuration.
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_NOSYSTEM", "1");
+    try env.put("GIT_AUTHOR_NAME", "Kiwa Test");
+    try env.put("GIT_AUTHOR_EMAIL", "test@kiwa.invalid");
+    try env.put("GIT_COMMITTER_NAME", "Kiwa Test");
+    try env.put("GIT_COMMITTER_EMAIL", "test@kiwa.invalid");
 
     var ctx: Ctx = .{
         .gpa = gpa,

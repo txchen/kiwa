@@ -6,6 +6,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const names = @import("names.zig");
+const git = @import("git.zig");
 
 pub const PaneId = layout.PaneId;
 pub const Rect = layout.Rect;
@@ -41,8 +42,11 @@ pub const Tab = struct {
 pub const Workspace = struct {
     id: WorkspaceId,
     name: Name,
-    /// The start directory, used for the name.
+    /// The start directory, used for the name and Git.
     root_dir: []const u8,
+    /// The watch on the repository's `HEAD`; null outside a repository.
+    /// The server sets it.
+    git: ?git.Watch = null,
     /// Tab-row order.
     tabs: std.ArrayList(*Tab) = .empty,
     active: TabId,
