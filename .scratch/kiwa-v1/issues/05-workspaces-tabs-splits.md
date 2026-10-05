@@ -1,6 +1,6 @@
 # 05 Workspaces, tabs, and splits
 
-Status: claimed
+Status: resolved
 Blocked by: 03, 04
 
 ## Scope
@@ -29,3 +29,17 @@ Blocked by: 03, 04
   step.
 - 10 hidden producers at 30 lines/s cause no frames while the visible pane
   is idle.
+
+## Comments
+
+- 2026-10-05: Resolved by 74b8bca..deec354. Review rerun: `zig build test`
+  80/80, `zig build e2e` 35/35, quiet server 0 context switches, 10 hidden
+  producers 0 outer bytes in 3 s. A manual look through an isolated
+  `tmux -L kiwa-view-<pid> -f /dev/null` at 100x24 showed Herdr-style boxes
+  for a 3-pane split.
+- Accepted deviations: hidden output renders once when it changes a
+  workspace's activity marker; directional focus breaks ties top, then left
+  (no focus history); resize steps 5%; unfocused borders use palette 8.
+- Open gaps: the hidden-output test cannot see unneeded render wakes that
+  emit 0 bytes (add a render counter in ticket 12); a pane that never reads
+  input can grow its write queue; the quiet-server case uses one pane.
