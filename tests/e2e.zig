@@ -91,7 +91,6 @@ const Outer = struct {
     stream: vt.TerminalStream,
     eof: bool = false,
     status: ?u32 = null,
-    /// When set, every byte read from the client is appended here too.
     capture: ?*std.ArrayList(u8) = null,
 
     fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, cols: u16, rows: u16) !*Outer {

@@ -35,7 +35,6 @@ pub const Graphemes = struct {
     map: std.StringArrayHashMapUnmanaged(void) = .empty,
     scratch: std.ArrayList(u8) = .empty,
 
-    /// 0 means no extra codepoints; otherwise the map index plus one.
     pub const Id = enum(u32) { none = 0, _ };
 
     /// Ids are never freed one by one. Past this many entries the client

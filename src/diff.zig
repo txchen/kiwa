@@ -15,6 +15,7 @@ const sync_begin = "\x1b[?2026h";
 const sync_end = "\x1b[?2026l";
 const erase_line = "\x1b[K";
 const reset_pen = "\x1b[0m";
+const replacement = "\u{fffd}";
 
 /// Writes what turns an outer terminal showing `old` into `new`. Identical
 /// frames write nothing. Assumes the outer cursor is at `old.cursor` with
@@ -99,6 +100,7 @@ const Out = struct {
             if (start >= blank_from and !erase_declined) {
                 if (o.eraseIsCheaper(old, new, start)) {
                     try o.moveTo(@intCast(start), y);
+                    // Erase-in-line fills with the pen's background.
                     if (o.pen.bg_color != .none) try o.setPen(.{});
                     try o.w.writeAll(erase_line);
                     return;
@@ -118,7 +120,6 @@ const Out = struct {
         }
     }
 
-    /// Erasing the default-blank tail beats writing its changed cells.
     fn eraseIsCheaper(o: *const Out, old: ?[]const Cell, new: []const Cell, start: usize) bool {
         var changed: usize = 0;
         for (start..new.len) |i| {
@@ -129,8 +130,8 @@ const Out = struct {
         return erase_cost < write_cost;
     }
 
-    /// Rewriting the unchanged cells in `new[end..next]` takes fewer bytes
-    /// than jumping over them. Only gaps drawn in the current pen qualify.
+    /// Only gaps in the style of the cell before them qualify, so that
+    /// rewriting them needs no SGR.
     fn gapIsCheaper(o: *const Out, new: []const Cell, end: usize, next: usize) bool {
         const last = new[end - 1];
         const pen = if (last.width == .tail) new[end - 2].style else last.style;
@@ -157,8 +158,8 @@ const Out = struct {
 };
 
 /// The start of the next character at or after `from` that differs.
-/// `from` must be a character boundary in `new`.
 fn nextChanged(old: ?[]const Cell, new: []const Cell, from: usize) ?usize {
+    std.debug.assert(from >= new.len or new[from].width != .tail);
     var x = from;
     while (x < new.len) {
         const end = @min(x + unitWidth(new[x]), new.len);
@@ -191,12 +192,12 @@ fn digits(n: usize) usize {
 }
 
 fn codepointLen(cp: u21) usize {
-    return std.unicode.utf8CodepointSequenceLength(cp) catch 3;
+    return std.unicode.utf8CodepointSequenceLength(cp) catch replacement.len;
 }
 
 fn writeCodepoint(w: *Writer, cp: u21) Writer.Error!void {
     var buf: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(cp, &buf) catch return w.writeAll("\u{fffd}");
+    const n = std.unicode.utf8Encode(cp, &buf) catch return w.writeAll(replacement);
     try w.writeAll(buf[0..n]);
 }
 
@@ -225,7 +226,6 @@ const Fixture = struct {
         f.out.deinit();
     }
 
-    /// Writes `text` into both frames at (x, y), as narrow default cells.
     fn both(f: *Fixture, x: usize, y: usize, text: []const u8) void {
         for (text, 0..) |ch, i| {
             f.old.row(y)[x + i] = .{ .cp = ch };
@@ -239,8 +239,6 @@ const Fixture = struct {
         return f.out.written();
     }
 
-    /// Feeds `full(old)` and `diff(old, new)` into a fresh outer terminal
-    /// and checks that it shows `new`.
     fn expectRoundTrip(f: *Fixture) !void {
         var outer: Outer = undefined;
         try outer.init(f.old.cols, f.old.rows);
@@ -365,7 +363,7 @@ test "changing either half of a wide character rewrites the whole character" {
     try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
-    // Only the tail differs: the old wide character was half overwritten.
+    // An invalid old frame on purpose: only the tail differs.
     f.old.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
     f.old.row(0)[3] = .{ .cp = 'q' };
     try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
@@ -455,6 +453,7 @@ test "a full redraw clears the screen first and sets every cursor property" {
 
 const Rng = std.Random;
 
+/// Spaces repeat so that rows often end in blanks and the erase path runs.
 const texts = [_][]const u21{
     &.{'a'},             &.{'b'},                 &.{'Z'},    &.{'#'},
     &.{' '},             &.{' '},                 &.{' '},    &.{0xe9},
@@ -493,29 +492,38 @@ fn randomCell(r: Rng, g: *Graphemes) !Cell {
     };
 }
 
-/// Fills `f` with valid random cells. With `edits` set, changes only that
-/// many random spots, so that the result is a plausible next frame.
-fn scribble(r: Rng, g: *Graphemes, f: *Frame, edits: ?usize) !void {
-    const n = edits orelse f.rows;
-    for (0..n) |k| {
-        const y = if (edits == null) k else r.uintLessThan(usize, f.rows);
-        const x = if (edits == null) 0 else r.uintLessThan(usize, f.cols);
-        const len = if (edits == null) f.cols else 1 + r.uintLessThan(usize, 3);
-        const row = f.row(y);
-        var i = x;
-        while (i < @min(x + len, f.cols)) {
-            var c = try randomCell(r, g);
-            if (c.width == .wide and i + 1 == f.cols) c = .{ .cp = 'w' };
-            setUnit(row, i, c);
-            i += unitWidth(c);
-        }
-        if (r.uintLessThan(u8, 4) == 0) {
-            const from = r.uintLessThan(usize, f.cols);
-            if (from > 0 and row[from].width == .tail) row[from - 1] = .blank;
-            @memset(row[from..], .blank);
-        }
+fn fillRandom(r: Rng, g: *Graphemes, f: *Frame) !void {
+    for (0..f.rows) |y| try writeRandom(r, g, f.row(y), 0, f.cols);
+    f.cursor = randomCursor(r, f);
+}
+
+/// Changes a few random runs, so that the result is a plausible next frame.
+fn editRandom(r: Rng, g: *Graphemes, f: *Frame, edits: usize) !void {
+    for (0..edits) |_| {
+        const row = f.row(r.uintLessThan(usize, f.rows));
+        try writeRandom(r, g, row, r.uintLessThan(usize, f.cols), 1 + r.uintLessThan(usize, 3));
     }
-    f.cursor = .{
+    f.cursor = randomCursor(r, f);
+}
+
+/// Writes up to `len` random cells from `x`, then sometimes blanks a tail.
+fn writeRandom(r: Rng, g: *Graphemes, row: []Cell, x: usize, len: usize) !void {
+    var i = x;
+    while (i < @min(x + len, row.len)) {
+        var c = try randomCell(r, g);
+        if (c.width == .wide and i + 1 == row.len) c = .{ .cp = 'w' };
+        setUnit(row, i, c);
+        i += unitWidth(c);
+    }
+    if (r.uintLessThan(u8, 4) == 0) {
+        const from = r.uintLessThan(usize, row.len);
+        if (from > 0 and row[from].width == .tail) row[from - 1] = .blank;
+        @memset(row[from..], .blank);
+    }
+}
+
+fn randomCursor(r: Rng, f: *const Frame) Cursor {
+    return .{
         .x = r.uintLessThan(u16, f.cols),
         .y = r.uintLessThan(u16, f.rows),
         .visible = r.uintLessThan(u8, 4) != 0,
@@ -544,9 +552,13 @@ test "random frame pairs round-trip through a ghostty-vt outer terminal" {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 1 + r.uintLessThan(u16, 5);
         try f.init(cols, rows);
-        try scribble(r, &f.g, &f.old, null);
+        try fillRandom(r, &f.g, &f.old);
         f.new.copyFrom(&f.old);
-        try scribble(r, &f.g, &f.new, if (r.boolean()) null else 1 + r.uintLessThan(usize, 6));
+        if (r.boolean()) {
+            try fillRandom(r, &f.g, &f.new);
+        } else {
+            try editRandom(r, &f.g, &f.new, 1 + r.uintLessThan(usize, 6));
+        }
         f.expectRoundTripOn(&outer) catch |e| {
             std.debug.print("iteration {d}, {d}x{d}\n", .{ i, cols, rows });
             return e;

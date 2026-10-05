@@ -302,6 +302,7 @@ const Server = struct {
             diff.full(&c.frame, &c.graphemes, &aw.writer)
         else
             diff.diff(&c.last_frame, &c.frame, &c.graphemes, &aw.writer);
+        // Taken back before the error check so that `scratch` keeps its buffer.
         s.scratch = aw.toArrayList();
         written catch return error.OutOfMemory;
         if (s.scratch.items.len == 0) return;
