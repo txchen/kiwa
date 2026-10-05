@@ -30,7 +30,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (cmd.len == 0) return client.attach(init.gpa, init.environ_map, resolved);
     if (std.mem.eql(u8, cmd, "__server")) return server.run(init.gpa, init.io, init.environ_map, resolved);
     if (std.mem.eql(u8, cmd, "kill-server")) return client.killServer(resolved);
-    if (std.mem.eql(u8, cmd, "ls")) return client.list(init.gpa, resolved);
+    if (std.mem.eql(u8, cmd, "ls")) return client.print(init.gpa, resolved, .list);
+    if (std.mem.eql(u8, cmd, "__stats")) return client.print(init.gpa, resolved, .stats);
     return fail(usage);
 }
 

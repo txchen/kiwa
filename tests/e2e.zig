@@ -126,6 +126,18 @@ const Ctx = struct {
         return error.ServerStillRunning;
     }
 
+    /// One counter from `kiwa __stats`.
+    fn counter(ctx: *Ctx, name: []const u8) !u64 {
+        const text = try ctx.output("__stats");
+        defer ctx.gpa.free(text);
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+            if (std.mem.eql(u8, line[0..space], name)) return std.fmt.parseInt(u64, line[space + 1 ..], 10);
+        }
+        return error.NoSuchCounter;
+    }
+
     fn socketExists(ctx: *Ctx) bool {
         _ = std.Io.Dir.cwd().statFile(ctx.io, ctx.socket, .{}) catch return false;
         return true;
@@ -559,6 +571,20 @@ fn sample(ctx: *Ctx, pid: sys.pid_t) !Sample {
         if (i == 14 or i == 15) s.ticks += try std.fmt.parseInt(u64, f, 10);
     }
     return s;
+}
+
+fn statsCountRendersAndWakes(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    _ = try o.pump(300);
+    const renders = try ctx.counter("renders");
+    const wakes = try ctx.counter("wakes");
+    try expect(renders > 0, "the first frame counts as a render");
+    try o.send("echo hi\r");
+    try o.waitLine("hi");
+    _ = try o.pump(100);
+    try expect(try ctx.counter("renders") > renders, "output that shows counts renders");
+    try expect(try ctx.counter("wakes") > wakes, "input and output count wakes");
+    try expect(try ctx.counter("clipboard_writes") == 0, "no clipboard writes happened");
 }
 
 fn resizeReachesPane(ctx: *Ctx) !void {
@@ -1858,6 +1884,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },
     .{ .name = "quiet server makes no wakes", .run = quietServer },
+    .{ .name = "kiwa __stats counts renders and wakes", .run = statsCountRendersAndWakes },
     .{ .name = "resize reaches the pane", .run = resizeReachesPane },
     .{ .name = "second client takes over", .run = takeover },
     .{ .name = "child exit stops the server", .run = childExitStopsServer },

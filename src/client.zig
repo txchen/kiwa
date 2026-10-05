@@ -194,9 +194,10 @@ pub fn killServer(paths: paths_mod.Paths) !u8 {
     return 0;
 }
 
-/// Prints the session's workspaces and tabs.
-pub fn list(gpa: std.mem.Allocator, paths: paths_mod.Paths) !u8 {
-    const sock = try connectRequest(paths, .list) orelse return 1;
+/// Prints the server's text answer to `request`: the session's workspaces
+/// and tabs for `list`, the debug counters for `stats`.
+pub fn print(gpa: std.mem.Allocator, paths: paths_mod.Paths, request: protocol.Message) !u8 {
+    const sock = try connectRequest(paths, request) orelse return 1;
     defer sys.close(sock);
     var decoder: protocol.Decoder = .{};
     defer decoder.deinit(gpa);

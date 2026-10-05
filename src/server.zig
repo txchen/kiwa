@@ -122,6 +122,18 @@ const Conn = struct {
     }
 };
 
+/// Debug counters for `kiwa __stats`. Plain integers, so counting costs nothing.
+const Stats = struct {
+    /// Event-loop wakes.
+    wakes: u64 = 0,
+    /// Frames composed and diffed, including ones that sent no bytes.
+    renders: u64 = 0,
+    /// Dynamic-name checks of a tab's foreground command.
+    name_checks: u64 = 0,
+    /// Clipboard writes from panes forwarded to the outer terminal.
+    clipboard_writes: u64 = 0,
+};
+
 const Server = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -152,13 +164,16 @@ const Server = struct {
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
     /// The pane whose terminal holds the selection.
     selected: ?PaneId = null,
+    stats: Stats = .{},
 
     const Exit = struct { reason: []const u8, hangup_child: bool };
 
     fn loop(s: *Server) !void {
         var events: [16]linux.epoll_event = undefined;
         while (s.exit == null) {
-            for (try sys.epollWait(s.ep, &events)) |ev| {
+            const ready = try sys.epollWait(s.ep, &events);
+            s.stats.wakes += 1;
+            for (ready) |ev| {
                 const fd = ev.data.fd;
                 if (fd == s.listener) {
                     try s.acceptAll();
@@ -317,6 +332,7 @@ const Server = struct {
             },
             .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
             .list => try s.list(c),
+            .stats => try s.printStats(c),
             .output, .detach => s.dropConn(c),
         }
     }
@@ -328,6 +344,20 @@ const Server = struct {
         const written = s.session.list(&aw.writer);
         s.scratch = aw.toArrayList();
         written catch return error.OutOfMemory;
+        try s.answer(c);
+    }
+
+    /// Answers `kiwa __stats` with one `name value` line per counter.
+    fn printStats(s: *Server, c: *Conn) !void {
+        s.scratch.clearRetainingCapacity();
+        inline for (@typeInfo(Stats).@"struct".fields) |f| {
+            try s.scratch.print(s.gpa, "{s} {d}\n", .{ f.name, @field(s.stats, f.name) });
+        }
+        try s.answer(c);
+    }
+
+    /// Sends `scratch` as a request's answer and closes the connection.
+    fn answer(s: *Server, c: *Conn) !void {
         c.state = .closing;
         c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
             error.Overflow => return s.dropConn(c),
@@ -671,6 +701,7 @@ const Server = struct {
     fn forwardClipboard(s: *Server, p: *Pane) !void {
         defer p.clipboard.clearRetainingCapacity();
         const c = s.client orelse return;
+        s.stats.clipboard_writes += 1;
         if (try s.pushTerminal(c, p.clipboard.items)) try s.flush(c);
     }
 
@@ -784,6 +815,7 @@ const Server = struct {
         const c = s.client orelse return;
         if (s.session.isEmpty()) return;
         if (c.redraw_pending and !c.out.isEmpty()) return;
+        s.stats.renders += 1;
 
         var compose_all = false;
         if (c.frame.cols != c.size.cols or c.frame.rows != c.size.rows) {
