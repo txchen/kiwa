@@ -22,15 +22,30 @@ const replacement = "\u{fffd}";
 /// the default pen, which is where every diff and full redraw leaves it.
 pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
     std.debug.assert(old.cols == new.cols and old.rows == new.rows);
-    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = old.cursor.x, .y = old.cursor.y } };
+    // One row's write cannot tear, so it needs no synchronized output.
+    const sync = changedRows(old, new) > 1;
+    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = old.cursor.x, .y = old.cursor.y }, .sync = sync };
     for (0..new.rows) |y| try o.row(old.row(y), new.row(y), @intCast(y));
     try o.cursor(old.cursor, new.cursor);
     try o.finish();
 }
 
+/// The number of rows that differ, counting no further than 2.
+fn changedRows(old: *const Frame, new: *const Frame) usize {
+    var n: usize = 0;
+    for (0..new.rows) |y| {
+        for (old.row(y), new.row(y)) |a, b| if (!a.eql(b)) {
+            n += 1;
+            if (n == 2) return n;
+            break;
+        };
+    }
+    return n;
+}
+
 /// Redraws `new` on an outer terminal whose contents are unknown.
 pub fn full(new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
-    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = 0, .y = 0 } };
+    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = 0, .y = 0 }, .sync = true };
     try o.begin();
     try w.writeAll(reset_pen ++ "\x1b[H\x1b[2J");
     for (0..new.rows) |y| try o.row(null, new.row(y), @intCast(y));
@@ -44,6 +59,8 @@ const Out = struct {
     w: *Writer,
     g: *const Graphemes,
     cols: u16,
+    /// Whether the output is wrapped in synchronized output.
+    sync: bool,
     started: bool = false,
     pen: vt.Style = .{},
     /// Null after a write to the last column, which leaves the outer cursor
@@ -53,20 +70,27 @@ const Out = struct {
     fn begin(o: *Out) Writer.Error!void {
         if (o.started) return;
         o.started = true;
-        try o.w.writeAll(sync_begin);
+        if (o.sync) try o.w.writeAll(sync_begin);
     }
 
     fn finish(o: *Out) Writer.Error!void {
         if (!o.started) return;
         if (!o.pen.eql(.{})) try o.w.writeAll(reset_pen);
-        try o.w.writeAll(sync_end);
+        if (o.sync) try o.w.writeAll(sync_end);
     }
 
     fn moveTo(o: *Out, x: u16, y: u16) Writer.Error!void {
         if (o.pos) |p| if (p.x == x and p.y == y) return;
         try o.begin();
         if (o.pos != null and o.pos.?.y == y) {
-            if (x == 0) try o.w.writeByte('\r') else try o.w.print("\x1b[{d}G", .{x + 1});
+            const p = o.pos.?;
+            if (x == 0) {
+                try o.w.writeByte('\r');
+            } else if (x < p.x and p.x - x < "\x1b[G".len + digits(x + 1)) {
+                try o.w.splatByteAll(0x08, p.x - x);
+            } else {
+                try o.w.print("\x1b[{d}G", .{x + 1});
+            }
         } else if (x == 0) {
             try o.w.print("\x1b[{d}H", .{y + 1});
         } else {
@@ -316,7 +340,7 @@ test "a one-cell change emits one cursor move and that cell" {
     f.new.row(1)[2] = .{ .cp = 'x' };
     f.old.cursor = .{ .x = 3, .y = 1 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3Gx\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x08x", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -328,7 +352,7 @@ test "a style-only change sets the pen, writes the cell, and resets the pen" {
     f.new.row(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .{ .palette = 1 } };
     f.old.cursor = .{ .x = 2, .y = 0 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[2G\x1b[0;1;31mb\x1b[0m\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x08\x1b[0;1;31mb\x1b[0m", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -344,11 +368,11 @@ test "a wide character replaced by two narrow ones and back rewrites both column
     f.new.row(0)[2] = .{ .cp = 'y' };
     f.old.cursor = .{ .x = 4 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[2Gxy\x1b[5G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x08\x08\x08xy\x1b[5G", try f.diffBytes());
     try f.expectRoundTrip();
 
     std.mem.swap(Frame, &f.old, &f.new);
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[2G\u{4e2d}\x1b[5G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x08\x08\x08\u{4e2d}\x1b[5G", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -360,13 +384,13 @@ test "changing either half of a wide character rewrites the whole character" {
     f.old.row(0)[3] = .tail;
     f.new.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
     f.new.row(0)[3] = .tail;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[3G\u{6587}\r", try f.diffBytes());
     try f.expectRoundTrip();
 
     // An invalid old frame on purpose: only the tail differs.
     f.old.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
     f.old.row(0)[3] = .{ .cp = 'q' };
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[3G\u{6587}\r", try f.diffBytes());
 }
 
 test "a write to the last column is followed by an absolute move" {
@@ -384,7 +408,7 @@ test "a write to the last column is followed by an absolute move" {
     f.new.row(1)[0] = .blank;
     f.old.cursor = .{ .x = 4, .y = 0 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x1b[?2026hx\x1b[1;5H\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("x\x1b[1;5H", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -394,9 +418,9 @@ test "a cursor-only move emits one move" {
     try f.init(10, 3);
     f.old.cursor = .{ .x = 3, .y = 0 };
     f.new.cursor = .{ .x = 1, .y = 2 };
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3;2H\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[3;2H", try f.diffBytes());
     f.new.cursor = .{ .x = 7, .y = 0 };
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[8G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[8G", try f.diffBytes());
 }
 
 test "cursor shape and visibility are emitted only when they change" {
@@ -404,11 +428,11 @@ test "cursor shape and visibility are emitted only when they change" {
     defer f.deinit();
     try f.init(10, 3);
     f.new.cursor.shape = .steady_bar;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[6 q\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[6 q", try f.diffBytes());
     try f.expectRoundTrip();
     f.old.cursor.shape = .steady_bar;
     f.new.cursor.visible = false;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[?25l\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[?25l", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -418,7 +442,7 @@ test "a default blank tail is erased, a colored one is written" {
     try f.init(20, 1);
     for ("hello world, again", 0..) |ch, i| f.old.row(0)[i] = .{ .cp = ch };
     f.both(0, 0, "hi");
-    try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\r\x1b[?2026l"));
+    try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\r"));
     try f.expectRoundTrip();
 
     for (f.new.row(0)[2..]) |*c| c.style = .{ .bg_color = .{ .palette = 4 } };
@@ -436,7 +460,7 @@ test "short unchanged gaps are rewritten instead of jumped" {
     f.new.row(0)[20].cp = 'U';
     f.old.cursor = .{ .x = 21 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[2GBcD\x1b[21GU\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[2GBcD\x1b[21GU", try f.diffBytes());
     try f.expectRoundTrip();
 }
 

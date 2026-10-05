@@ -960,17 +960,20 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
 
 fn spinnerCostsBytesPerFrame(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    try o.send("while :; do for c in '|' / - '\\'; do printf '\\r%s' \"$c\"; sleep 0.016; done; done\r");
-    _ = try o.pump(500);
+    // A non-interactive shell keeps `sleep` in its process group, so the
+    // tab's dynamic name stays put and only the spinner draws.
+    try o.send("sh -c 'while :; do for c in \"|\" / - \"\\\\\"; do printf \"\\r%s\" \"$c\"; sleep 0.016; done; done'\r");
+    _ = try o.pump(800);
     var seen: std.ArrayList(u8) = .empty;
     defer seen.deinit(ctx.gpa);
     o.capture = &seen;
     const bytes = try o.pump(2000);
     o.capture = null;
-    const frames = std.mem.count(u8, seen.items, "\x1b[?2026h");
+    var frames: usize = 0;
+    for (seen.items) |b| frames += @intFromBool(std.mem.indexOfScalar(u8, "|/-\\", b) != null);
     std.debug.print("    spinner 2 s: {d} frames, {d} outer bytes, {d} bytes per frame\n", .{ frames, bytes, bytes / @max(frames, 1) });
     try expect(frames >= 40, "the spinner drew at least 40 frames in 2 s");
-    try expect(bytes <= 32 * frames, "each spinner frame costs at most 32 outer bytes");
+    try expect(bytes <= 4 * frames, "each spinner frame costs at most 4 outer bytes");
     try o.send("\x03");
 }
 
