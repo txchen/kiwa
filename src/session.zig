@@ -96,7 +96,7 @@ pub const Session = struct {
         return s.activeTab().focused;
     }
 
-    fn activeIndex(s: *const Session) usize {
+    pub fn activeIndex(s: *const Session) usize {
         for (s.workspaces.items, 0..) |ws, i| if (ws.id == s.active) return i;
         unreachable;
     }

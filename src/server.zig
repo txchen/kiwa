@@ -7,6 +7,7 @@ const prefix = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const session_mod = @import("session.zig");
+const chrome = @import("chrome.zig");
 const Pane = @import("pane.zig").Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
 const vt = @import("ghostty-vt");
@@ -87,6 +88,12 @@ const Conn = struct {
     /// again copies only its dirty rows.
     drawn: std.ArrayList(Placement) = .empty,
     drawn_focus: ?PaneId = null,
+    /// A hash of the chrome view `frame` holds; null when it holds none.
+    drawn_chrome: ?u64 = null,
+    /// Whether `frame` holds the key help box over the panes.
+    drawn_help: bool = false,
+    /// The navigate cursor, a workspace index.
+    nav: usize = 0,
 
     fn drewAt(c: *const Conn, p: Placement) bool {
         for (c.drawn.items) |d| if (std.meta.eql(d, p)) return true;
@@ -128,6 +135,10 @@ const Server = struct {
     client: ?*Conn = null,
     scratch: std.ArrayList(u8) = .empty,
     exit: ?Exit = null,
+    /// The user's sidebar toggle; narrow clients collapse it regardless.
+    collapsed: bool = false,
+    chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
+    chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
 
     const Exit = struct { reason: []const u8, hangup_child: bool };
 
@@ -330,8 +341,8 @@ const Server = struct {
     }
 
     /// The area the current tab owns in a frame of `size`.
-    fn tabArea(size: protocol.Size) Rect {
-        return .{ .cols = size.cols, .rows = size.rows };
+    fn tabArea(s: *const Server, size: protocol.Size) Rect {
+        return chrome.Geometry.of(size.cols, size.rows, s.collapsed).area;
     }
 
     /// Lays out the current tab for the last client size and resizes its
@@ -340,7 +351,7 @@ const Server = struct {
         s.view.clearRetainingCapacity();
         const size = s.size orelse return;
         if (s.session.isEmpty()) return;
-        try s.session.view(tabArea(size), &s.view);
+        try s.session.view(s.tabArea(size), &s.view);
         for (s.view.items) |pl| {
             const p = s.panes.get(pl.pane) orelse continue;
             p.resize(paneSize(pl.inner)) catch |e| std.log.err("pane resize: {t}", .{e});
@@ -422,7 +433,10 @@ const Server = struct {
                 try s.onReply(c, ev.reply);
                 continue;
             }
-            switch (c.prefix.feed(ev)) {
+            const mode = c.prefix.mode;
+            const outcome = c.prefix.feed(ev);
+            if (c.prefix.mode != mode) try s.markStale();
+            switch (outcome) {
                 .pane => |pane_ev| if (s.focusedPane()) |p| {
                     p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e});
                     try s.syncPaneEvents(p);
@@ -432,6 +446,7 @@ const Server = struct {
                     try s.act(c, a);
                     if (s.exit != null) return;
                 },
+                .navigate => |n| try s.navigate(c, n),
                 .none => {},
             }
         }
@@ -439,7 +454,7 @@ const Server = struct {
     }
 
     fn act(s: *Server, c: *Conn, a: prefix.Action) !void {
-        const area = tabArea(c.size);
+        const area = s.tabArea(c.size);
         var cwd_buf: [linux.PATH_MAX]u8 = undefined;
         const ss = &s.session;
         const changed = switch (a) {
@@ -476,9 +491,35 @@ const Server = struct {
             .prev_tab => ss.cycleTab(.prev),
             .tab => |i| ss.selectTab(i),
             .workspace => |i| ss.selectWorkspace(i),
+            .toggle_sidebar => blk: {
+                s.collapsed = !s.collapsed;
+                break :blk true;
+            },
+            .navigate => blk: {
+                c.nav = ss.activeIndex();
+                break :blk false;
+            },
+            // The prefix entered the mode; the mode bar shows it.
+            .resize_mode, .help => false,
         };
         if (!changed) return;
         try s.relayout();
+        try s.markStale();
+    }
+
+    fn navigate(s: *Server, c: *Conn, n: prefix.Nav) !void {
+        const last = s.session.workspaces.items.len - 1;
+        c.nav = @min(c.nav, last);
+        switch (n) {
+            .step => |dir| c.nav = switch (dir) {
+                .down => @min(c.nav + 1, last),
+                .up => c.nav -| 1,
+            },
+            .jump => |i| if (i <= last) {
+                c.nav = i;
+            },
+            .pick => if (s.session.selectWorkspace(c.nav)) try s.relayout(),
+        }
         try s.markStale();
     }
 
@@ -569,7 +610,13 @@ const Server = struct {
             compose_all = true;
             c.redraw_pending = true;
         }
-        try s.compose(c, compose_all);
+        const help = c.prefix.mode == .help;
+        // Closing the help box uncovers panes and borders.
+        try s.compose(c, compose_all or (c.drawn_help and !help));
+        try s.drawChrome(c, compose_all);
+        if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size));
+        c.drawn_help = help;
+        if (help or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
 
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
@@ -616,6 +663,38 @@ const Server = struct {
         c.drawn.clearRetainingCapacity();
         try c.drawn.appendSlice(s.gpa, s.view.items);
         c.drawn_focus = focus;
+    }
+
+    /// Redraws the sidebar and the tab row when what they show changed.
+    fn drawChrome(s: *Server, c: *Conn, all: bool) !void {
+        const ss = &s.session;
+        s.chrome_workspaces.clearRetainingCapacity();
+        for (ss.workspaces.items) |ws| try s.chrome_workspaces.append(s.gpa, .{
+            .name = ws.name.text(),
+            .activity = ws.activity,
+            .active = ws.id == ss.active,
+        });
+        const current = ss.activeWorkspace();
+        s.chrome_tabs.clearRetainingCapacity();
+        for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .active = t.id == current.active });
+        const view: chrome.View = .{
+            .workspaces = s.chrome_workspaces.items,
+            .tabs = s.chrome_tabs.items,
+            .collapsed = s.collapsed,
+            .mode = switch (c.prefix.mode) {
+                .normal => .normal,
+                .armed => .prefix,
+                .resize => .resize,
+                .navigate => .{ .navigate = @min(c.nav, ss.workspaces.items.len - 1) },
+                .help => .help,
+            },
+        };
+        var h: std.hash.Wyhash = .init(0);
+        std.hash.autoHashStrat(&h, view, .Deep);
+        const key = h.final();
+        if (!all and c.drawn_chrome == key) return;
+        chrome.draw(&c.frame, view);
+        c.drawn_chrome = key;
     }
 
     /// Writes what the socket accepts and keeps EPOLLOUT armed only while
@@ -678,6 +757,8 @@ const Server = struct {
         s.pane_fds.deinit(s.gpa);
         s.view.deinit(s.gpa);
         s.closed.deinit(s.gpa);
+        s.chrome_workspaces.deinit(s.gpa);
+        s.chrome_tabs.deinit(s.gpa);
         s.session.deinit();
         s.scratch.deinit(s.gpa);
     }

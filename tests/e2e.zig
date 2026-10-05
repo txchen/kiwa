@@ -283,11 +283,16 @@ const Outer = struct {
         return o.term.plainString(o.gpa);
     }
 
+    /// Whether a row reads `line`, either whole or right of the sidebar.
     fn hasLine(o: *Outer, line: []const u8) !bool {
-        const text = try o.screen();
-        defer o.gpa.free(text);
-        var it = std.mem.splitScalar(u8, text, '\n');
-        while (it.next()) |l| if (std.mem.eql(u8, std.mem.trimEnd(u8, l, " "), line)) return true;
+        var g: Grid = try .load(o);
+        defer g.deinit();
+        const sidebar = g.sidebarCols();
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(o.gpa);
+        for (0..g.rs.rows) |y| for ([_]usize{ 0, sidebar }) |from| {
+            if (std.mem.eql(u8, try g.rowText(&buf, y, from), line)) return true;
+        };
         return false;
     }
 
@@ -519,8 +524,8 @@ fn resizeReachesPane(ctx: *Ctx) !void {
     try o.resize(90, 30);
     _ = try o.pump(300);
     try o.send("tput cols; tput lines\r");
-    try o.waitLine("90");
-    try o.waitLine("30");
+    try o.waitLine("64");
+    try o.waitLine("29");
 }
 
 fn takeover(ctx: *Ctx) !void {
@@ -560,13 +565,14 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
     var rs: vt.RenderState = .empty;
     defer rs.deinit(ctx.gpa);
     try rs.update(ctx.gpa, &o.term);
+    const x = area.x;
     const y = for (rs.row_data.items(.cells), 0..) |cells, y| {
-        if (cells.items(.raw)[0].content.codepoint.data == 'r') break y;
+        if (cells.items(.raw)[x].content.codepoint.data == 'r') break y;
     } else return error.RowNotFound;
     const cells = rs.row_data.items(.cells)[y];
-    const raw = cells.items(.raw);
+    const raw = cells.items(.raw)[x..];
     try expect(raw[0].style_id != 0, "\"red\" has a style");
-    const fg = cells.items(.style)[0].fg_color;
+    const fg = cells.items(.style)[x].fg_color;
     try expect(fg == .palette and fg.palette == 1, "\"red\" is drawn in palette color 1");
     try expect(raw[3].style_id == 0, "the space after \"red\" has the default style");
     try expect(raw[4].content.codepoint.data == 0x4e2d and raw[4].wide == .wide, "\u{4e2d} is one wide cell");
@@ -577,7 +583,7 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
 fn fullScreenPrograms(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("23");
+    try o.waitLine("22");
     try expect(!try o.hasLine("200"), "less shows only the first screen");
     try o.send("G");
     try o.waitLine("200");
@@ -677,11 +683,11 @@ fn pasteIntoVimIsBracketed(ctx: *Ctx) !void {
 
 fn lessPages(o: *Outer) !void {
     try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("23");
+    try o.waitLine("22");
     try o.press(named(.page_down, .{}));
-    try o.waitLine("46");
+    try o.waitLine("44");
     try o.press(named(.arrow_down, .{}));
-    try o.waitLine("47");
+    try o.waitLine("45");
     try o.press(named(.end, .{}));
     try o.waitLine("200");
     try o.press(named(.home, .{}));
@@ -839,7 +845,8 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     // On a large screen, each line scrolls every row of the region, so even
     // diffed frames pass the 1 MiB limit quickly. The region keeps lines out
     // of the scrollback, which a Debug ghostty-vt makes slow to grow.
-    const o = try ctx.attachSized(250, 80);
+    // A 250x80 pane, beside the sidebar and under the tab row.
+    const o = try ctx.attachSized(276, 81);
     try o.waitLine("$");
     try o.send("a=$(printf 'abcdefghij%.0s' $(seq 24)); printf '\\033[1;79r\\033[79H'; " ++
         "while :; do printf '%s%s\\n' $RANDOM \"$a\"; sleep 0.01; done\r");
@@ -919,17 +926,52 @@ const Grid = struct {
         return if (raw.content.codepoint.data == 0) ' ' else raw.content.codepoint.data;
     }
 
+    fn style(g: *const Grid, x: usize, y: usize) vt.Style {
+        const cells = g.rs.row_data.items(.cells)[y];
+        if (cells.items(.raw)[x].style_id == 0) return .{};
+        return cells.items(.style)[x];
+    }
+
+    /// Whether the cell has Kiwa's highlight: black on the accent color.
+    fn highlighted(g: *const Grid, x: usize, y: usize) bool {
+        const s = g.style(x, y);
+        return s.bg_color == .palette and s.bg_color.palette == 6 and s.fg_color == .palette and s.fg_color.palette == 0;
+    }
+
+    /// The width of Kiwa's sidebar, found by its divider on the top row; 0
+    /// when the screen shows none.
+    fn sidebarCols(g: *const Grid) usize {
+        if (g.rs.rows == 0) return 0;
+        for ([_]usize{ 26, 4 }) |w| {
+            if (g.rs.cols >= w and g.cp(w - 1, 0) == 0x2502) return w;
+        }
+        return 0;
+    }
+
+    /// Row `y` from column `from` on as UTF-8, without trailing blanks.
+    fn rowText(g: *const Grid, buf: *std.ArrayList(u8), y: usize, from: usize) ![]const u8 {
+        buf.clearRetainingCapacity();
+        const raws = g.rs.row_data.items(.cells)[y].items(.raw);
+        for (from..g.rs.cols) |x| {
+            if (raws[x].wide == .spacer_tail) continue;
+            var utf8: [4]u8 = undefined;
+            const n = try std.unicode.utf8Encode(g.cp(x, y), &utf8);
+            try buf.appendSlice(g.gpa, utf8[0..n]);
+        }
+        return std.mem.trimEnd(u8, buf.items, " ");
+    }
+
     fn fg(g: *const Grid, x: usize, y: usize) vt.Style.Color {
         const cells = g.rs.row_data.items(.cells)[y];
         if (cells.items(.raw)[x].style_id == 0) return .none;
         return cells.items(.style)[x].fg_color;
     }
 
-    /// Where ASCII `needle` starts on screen, top row first.
-    fn find(g: *const Grid, needle: []const u8) ?[2]usize {
-        for (0..g.rs.rows) |y| {
-            var x: usize = 0;
-            while (x + needle.len <= g.rs.cols) : (x += 1) {
+    /// Where ASCII `needle` starts inside `b`, top row first.
+    fn findIn(g: *const Grid, needle: []const u8, b: Box) ?[2]usize {
+        for (b.y..@min(b.y + b.rows, g.rs.rows)) |y| {
+            var x: usize = b.x;
+            while (x + needle.len <= @min(b.x + b.cols, g.rs.cols)) : (x += 1) {
                 for (needle, 0..) |c, i| {
                     if (g.cp(x + i, y) != c) break;
                 } else return .{ x, y };
@@ -949,8 +991,9 @@ const Grid = struct {
         return true;
     }
 
+    /// Whether the screen right of the sidebar has line-drawing characters.
     fn hasBoxChars(g: *const Grid) bool {
-        for (0..g.rs.rows) |y| for (0..g.rs.cols) |x| switch (g.cp(x, y)) {
+        for (0..g.rs.rows) |y| for (g.sidebarCols()..g.rs.cols) |x| switch (g.cp(x, y)) {
             0x2500...0x257f => return true,
             else => {},
         };
@@ -964,8 +1007,7 @@ const TextIn = struct { text: []const u8, box: Box };
 fn textIn(o: *Outer, t: TextIn) !bool {
     var g: Grid = try .load(o);
     defer g.deinit();
-    const at = g.find(t.text) orelse return false;
-    return t.box.contains(at[0], at[1]) and t.box.contains(at[0] + t.text.len - 1, at[1]);
+    return g.findIn(t.text, t.box) != null;
 }
 
 fn waitTextIn(o: *Outer, text: []const u8, box: Box) !void {
@@ -1025,10 +1067,13 @@ fn caseName(ctx: *Ctx) []const u8 {
     return std.fs.path.basename(ctx.dir);
 }
 
-const left_half: Box = .{ .x = 0, .y = 0, .cols = 40, .rows = 24 };
-const right_half: Box = .{ .x = 40, .y = 0, .cols = 40, .rows = 24 };
-const right_top: Box = .{ .x = 40, .y = 0, .cols = 40, .rows = 12 };
-const right_bottom: Box = .{ .x = 40, .y = 12, .cols = 40, .rows = 12 };
+/// The tab area of an 80x24 outer terminal: right of the 26-column sidebar
+/// and below the tab row.
+const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
+const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
+const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
+const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
+const right_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
 
 fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
@@ -1083,8 +1128,8 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try waitNoBorders(o);
     try o.waitText("left11");
     try o.send("clear; tput cols; tput lines\r");
-    try o.waitLine("80");
-    try o.waitLine("24");
+    try o.waitLine("54");
+    try o.waitLine("23");
     want.clearRetainingCapacity();
     try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: two\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
@@ -1095,15 +1140,15 @@ fn zoomAndUnzoom(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "38", right_half.inner());
+    try waitTextIn(o, "25", right_half.inner());
     try prefixed(o, "z");
     try waitNoBorders(o);
     try o.send("clear; tput cols\r");
-    try o.waitLine("80");
+    try o.waitLine("54");
     try prefixed(o, "z");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "38", right_half.inner());
+    try waitTextIn(o, "25", right_half.inner());
 }
 
 fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
@@ -1114,12 +1159,14 @@ fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
     // An unambiguous escape: a raw ESC followed at once by typing would read as alt+c.
     try o.waitKitty();
     try o.press(named(.escape, .{}));
-    try waitBoxes(o, &.{ .{ .x = 0, .y = 0, .cols = 32, .rows = 24 }, .{ .x = 32, .y = 0, .cols = 48, .rows = 24 } });
+    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 23 };
+    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 23 };
+    try waitBoxes(o, &.{ resized_left, resized_right });
     try o.send("clear; tput cols\r");
-    try o.waitText("46");
+    try waitTextIn(o, "30", resized_right.inner());
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
-    try o.waitText("30");
+    try waitTextIn(o, "20", resized_left.inner());
 }
 
 fn exitCascadesToTheServer(ctx: *Ctx) !void {
@@ -1153,15 +1200,19 @@ fn exitCascadesToTheServer(ctx: *Ctx) !void {
 }
 
 fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
+    // Wide enough for the case directory's path inside half a split.
+    const o = try ctx.attachSized(120, 24);
+    try o.waitLine("$");
     try o.send("mkdir sub && cd sub && echo in-$(basename $PWD)\r");
     try o.waitLine("in-sub");
     try prefixed(o, "v");
-    try waitBoxes(o, &.{ left_half, right_half });
+    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 23 };
+    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 23 };
+    try waitBoxes(o, &.{ left, right });
     try o.send("clear; pwd\r");
     const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
     defer ctx.gpa.free(sub);
-    try waitTextIn(o, sub, right_half.inner());
+    try waitTextIn(o, sub, right.inner());
     // A reported OSC 7 directory wins over the shell's actual one.
     try o.send("clear; mkdir '../o d'; printf '\\033]7;file://localhost%s/o%%20d\\007' \"$(dirname \"$PWD\")\"\r");
     _ = try o.pump(200);
@@ -1225,8 +1276,8 @@ fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
     try o.resize(80, 24);
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
     try o.send("clear; tput cols; tput lines\r");
-    try waitTextIn(o, "38", right_bottom.inner());
-    try waitTextIn(o, "10", right_bottom.inner());
+    try waitTextIn(o, "25", right_bottom.inner());
+    try waitTextIn(o, "9", right_bottom.inner());
 }
 
 /// The highest counter each producer `N:` shows on screen.
@@ -1256,7 +1307,8 @@ fn producersAhead(o: *Outer, a: Ahead) !bool {
 }
 
 fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
-    const o = try ctx.attachSized(240, 64);
+    // A 240x64 tab area, beside the sidebar and under the tab row.
+    const o = try ctx.attachSized(266, 65);
     try o.waitLine("$");
     try prefixed(o, "c");
     for (0..10) |i| {
@@ -1274,6 +1326,195 @@ fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
     try expect(bytes == 0, "hidden producers send no outer bytes");
     try prefixed(o, "2");
     try o.waitFor("the producers' latest output", Ahead{ .base = before, .by = 50 }, producersAhead);
+}
+
+const Mark = struct { x: usize, y: usize, cp: u21 };
+
+fn cellIs(o: *Outer, m: Mark) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    return g.cp(m.x, m.y) == m.cp;
+}
+
+fn waitCell(o: *Outer, what: []const u8, x: usize, y: usize, cp: u21) !void {
+    return o.waitFor(what, Mark{ .x = x, .y = y, .cp = cp }, cellIs);
+}
+
+fn sidebarIs(o: *Outer, cols: usize) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    return g.sidebarCols() == cols;
+}
+
+fn waitSidebar(o: *Outer, cols: usize) !void {
+    return o.waitFor(if (cols == 26) "the expanded sidebar" else "the collapsed sidebar", cols, sidebarIs);
+}
+
+/// Whether row `y` is highlighted across the expanded sidebar.
+fn rowHighlighted(o: *Outer, y: usize) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    return g.highlighted(0, y) and g.highlighted(24, y) and !g.highlighted(25, y);
+}
+
+fn waitHighlighted(o: *Outer, y: usize) !void {
+    return o.waitFor("a highlighted workspace", y, rowHighlighted);
+}
+
+fn cursorAt(o: *Outer, at: [2]usize) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    const vp = g.rs.cursor.viewport orelse return false;
+    return vp.x == at[0] and vp.y == at[1] and o.term.modes.get(.cursor_visible);
+}
+
+fn waitCursor(o: *Outer, x: usize, y: usize) !void {
+    return o.waitFor("the cursor", [2]usize{ x, y }, cursorAt);
+}
+
+fn cursorHidden(o: *Outer, _: void) !bool {
+    return !o.term.modes.get(.cursor_visible);
+}
+
+fn waitCursorHidden(o: *Outer) !void {
+    return o.waitFor("a hidden cursor", {}, cursorHidden);
+}
+
+fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(ctx.gpa);
+    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " workspaces "), "the sidebar header is on the top row");
+    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 kiwa-e2e-"), "workspace 1 is listed under the header");
+    try expect(g.highlighted(0, 1) and g.highlighted(24, 1), "workspace 1 is highlighted across the sidebar");
+    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 23, 0), " + new"), "the new button is on the last row");
+    try expect(g.cp(24, 23) == 0x00ab, "the collapse control sits before the divider");
+    for (0..24) |y| try expect(g.cp(25, y) == 0x2502, "the divider runs down the sidebar's right edge");
+    try expect(std.mem.eql(u8, try g.rowText(&buf, 0, 26), " 1 sh  +"), "the tab row shows tab 1 and +");
+    try expect(g.highlighted(26, 0) and g.highlighted(31, 0) and !g.highlighted(32, 0), "the active tab is highlighted");
+    try expect(g.cp(26, 1) == '$', "the prompt starts the tab area");
+    try waitCursor(o, 28, 1);
+}
+
+fn activityMarksOtherWorkspaces(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("sleep 1; echo out; sleep 1; printf '\\a'\r");
+    try o.waitText("printf");
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    try waitCell(o, "the output marker on workspace 1", 23, 1, 0x2022);
+    {
+        var g: Grid = try .load(o);
+        defer g.deinit();
+        const fg = g.fg(23, 1);
+        try expect(fg == .palette and fg.palette == 3, "the marker is drawn in palette color 3");
+        try expect(g.cp(23, 2) == ' ', "the viewed workspace has no marker");
+    }
+    try waitCell(o, "the bell marker on workspace 1", 23, 1, '!');
+    try prefixed(o, "!");
+    try waitHighlighted(o, 1);
+    try waitCell(o, "no marker on the viewed workspace", 23, 1, ' ');
+}
+
+fn sidebarCollapsesAndExpands(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "b");
+    try waitSidebar(o, 4);
+    {
+        var g: Grid = try .load(o);
+        defer g.deinit();
+        try expect(g.cp(1, 0) == '1' and g.highlighted(0, 0) and g.highlighted(2, 0), "workspace 1 is highlighted in the collapsed sidebar");
+        try expect(g.cp(2, 23) == 0x00bb, "the expand control is on the last row");
+    }
+    try o.send("clear; tput cols\r");
+    try o.waitLine("76");
+    try prefixed(o, "b");
+    try waitSidebar(o, 26);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("54");
+    try o.resize(50, 24);
+    try waitSidebar(o, 4);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("46");
+    try o.resize(100, 24);
+    try waitSidebar(o, 26);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("74");
+}
+
+fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    try prefixed(o, "!");
+    try waitHighlighted(o, 1);
+    const name = caseName(ctx);
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(ctx.gpa);
+    try first.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(ctx.gpa);
+    try second.print(ctx.gpa, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try ctx.waitList(first.items);
+
+    try prefixed(o, "w");
+    try o.waitText(" NAVIGATE ");
+    try waitCell(o, "the navigate cursor on workspace 1", 0, 1, 0x25b6);
+    try waitCursorHidden(o);
+    try o.send("j");
+    try waitCell(o, "the navigate cursor on workspace 2", 0, 2, 0x25b6);
+    try o.press(named(.enter, .{}));
+    try waitHighlighted(o, 2);
+    try o.waitGone(" NAVIGATE ");
+    try expect(!try o.contains("\u{25b6}"), "the navigate cursor is gone");
+    try ctx.waitList(second.items);
+
+    try prefixed(o, "w");
+    try waitCell(o, "the navigate cursor on workspace 2", 0, 2, 0x25b6);
+    try o.send("k");
+    try waitCell(o, "the navigate cursor on workspace 1", 0, 1, 0x25b6);
+    try o.press(named(.escape, .{}));
+    try o.waitGone(" NAVIGATE ");
+    try o.send("echo stayed\r");
+    try o.waitLine("stayed");
+    try ctx.waitList(second.items);
+}
+
+fn keyHelpOpensAndCloses(ctx: *Ctx) !void {
+    // Tall and wide enough that the box leaves the first pane rows visible.
+    const o = try ctx.attachSized(120, 40);
+    try o.waitLine("$");
+    try o.waitKitty();
+    try o.send("sleep 1; echo under$((1+1))\r");
+    try o.waitText("sleep 1");
+    try prefixed(o, "?");
+    try o.waitText("send ctrl+b to the pane");
+    try waitCursorHidden(o);
+    try expect(try o.contains("h j k l, arrows  focus the pane in that direction"), "the help lists the focus keys");
+    try o.waitLine("under2");
+    try expect(try o.contains("send ctrl+b to the pane"), "the help stays open while the pane updates");
+    try o.press(named(.escape, .{}));
+    try o.waitGone("send ctrl+b to the pane");
+    try waitNoBorders(o);
+    try o.send("echo after\r");
+    try o.waitLine("after");
+}
+
+fn cursorFollowsTheFocusedPane(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("clear\r");
+    try waitCursor(o, area.x + 2, area.y);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try waitCursor(o, right_half.x + 1 + 2, right_half.y + 1);
+    try o.send("echo hi\r");
+    try waitCursor(o, right_half.x + 1 + 2, right_half.y + 3);
+    try prefixed(o, "h");
+    try waitAccent(o, &.{ left_half, right_half });
+    try waitCursor(o, left_half.x + 1 + 2, left_half.y + 1);
 }
 
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
@@ -1312,6 +1553,12 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "hidden producers draw nothing until their tab shows", .run = hiddenProducersDrawNothing },
     .{ .name = "a split survives a client shrunk below the minimum pane size", .run = tinyClientKeepsTheSplit },
     .{ .name = "prefix x closes the pane and hangs up its foreground program", .run = closingAPaneHangsUpItsProgram },
+    .{ .name = "a fresh attach shows the sidebar, the tab row, and the prompt", .run = freshAttachShowsTheChrome },
+    .{ .name = "output and bells mark other workspaces until viewed", .run = activityMarksOtherWorkspaces },
+    .{ .name = "the sidebar collapses on prefix b and below 64 columns", .run = sidebarCollapsesAndExpands },
+    .{ .name = "navigate mode switches workspaces on enter and not on esc", .run = navigateModeSwitchesWorkspaces },
+    .{ .name = "key help opens over updating panes and closes on esc", .run = keyHelpOpensAndCloses },
+    .{ .name = "the outer cursor sits at the focused pane's cursor", .run = cursorFollowsTheFocusedPane },
 };
 
 pub fn main(init: std.process.Init) !u8 {

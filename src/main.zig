@@ -47,6 +47,7 @@ test {
     _ = @import("prefix.zig");
     _ = @import("encode.zig");
     _ = @import("frame.zig");
+    _ = @import("chrome.zig");
     _ = @import("diff.zig");
     _ = @import("out_buffer.zig");
     _ = @import("layout.zig");
