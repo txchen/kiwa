@@ -181,22 +181,51 @@ fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, path
 }
 
 pub fn killServer(paths: paths_mod.Paths) !u8 {
-    const sock = sys.connectUnix(paths.socket) catch |e| switch (e) {
-        error.ConnectionRefused, error.FileNotFound => {
-            try printErr("kiwa: no server running\n");
-            return 1;
-        },
-        else => return e,
-    };
+    const sock = try connectRequest(paths, .kill) orelse return 1;
     defer sys.close(sock);
-    var frame: [protocol.header_len]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&frame);
-    try protocol.encode(&w, .kill);
-    try sys.writeAll(sock, w.buffered());
     // The server closes the socket only after removing its path.
     var buf: [4096]u8 = undefined;
     while ((sys.read(sock, &buf) catch 0) > 0) {}
     return 0;
+}
+
+/// Prints the session's workspaces and tabs.
+pub fn list(gpa: std.mem.Allocator, paths: paths_mod.Paths) !u8 {
+    const sock = try connectRequest(paths, .list) orelse return 1;
+    defer sys.close(sock);
+    var decoder: protocol.Decoder = .{};
+    defer decoder.deinit(gpa);
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = sys.read(sock, &buf) catch |e| switch (e) {
+            error.ConnectionReset => 0,
+            else => return e,
+        };
+        if (n == 0) return 0;
+        try decoder.feed(gpa, buf[0..n]);
+        while (try decoder.next()) |m| switch (m) {
+            .output => |text| try sys.writeAll(1, text),
+            else => return error.UnexpectedMessage,
+        };
+    }
+}
+
+/// Connects and sends a request without a payload. Null, after telling
+/// the user, when no server runs.
+fn connectRequest(paths: paths_mod.Paths, request: protocol.Message) !?sys.fd_t {
+    const sock = sys.connectUnix(paths.socket) catch |e| switch (e) {
+        error.ConnectionRefused, error.FileNotFound => {
+            try printErr("kiwa: no server running\n");
+            return null;
+        },
+        else => return e,
+    };
+    errdefer sys.close(sock);
+    var frame: [protocol.header_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&frame);
+    try protocol.encode(&w, request);
+    try sys.writeAll(sock, w.buffered());
+    return sock;
 }
 
 fn printErr(s: []const u8) !void {

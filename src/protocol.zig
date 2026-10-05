@@ -9,7 +9,7 @@ pub const version: u16 = 1;
 pub const max_frame_len: u32 = 16 * 1024 * 1024;
 pub const header_len = 5;
 
-pub const Tag = enum(u8) { hello = 1, input, resize, output, detach, kill, _ };
+pub const Tag = enum(u8) { hello = 1, input, resize, output, detach, kill, list, _ };
 
 pub const Size = struct { cols: u16, rows: u16 };
 
@@ -22,6 +22,8 @@ pub const Message = union(enum) {
     output: []const u8,
     detach: []const u8,
     kill,
+    /// Asks for the session as text, answered with `output` and a close.
+    list,
 };
 
 pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
@@ -29,7 +31,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .hello => |h| 6 + h.cwd.len,
         .input, .output, .detach => |b| b.len,
         .resize => 4,
-        .kill => 0,
+        .kill, .list => 0,
     };
     try w.writeInt(u32, @intCast(1 + payload_len), .little);
     try w.writeByte(@intFromEnum(@as(Tag, switch (msg) {
@@ -39,6 +41,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .output => .output,
         .detach => .detach,
         .kill => .kill,
+        .list => .list,
     })));
     switch (msg) {
         .hello => |h| {
@@ -48,7 +51,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         },
         .input, .output, .detach => |b| try w.writeAll(b),
         .resize => |s| try writeSize(w, s),
-        .kill => {},
+        .kill, .list => {},
     }
 }
 
@@ -96,6 +99,7 @@ pub fn parse(frame: []const u8) DecodeError!Message {
         .output => .{ .output = payload },
         .detach => .{ .detach = payload },
         .kill => .kill,
+        .list => .list,
         _ => error.UnknownTag,
     };
 }
@@ -156,7 +160,7 @@ fn expectMessage(expected: Message, actual: Message) !void {
         .output => |b| try testing.expectEqualStrings(b, actual.output),
         .detach => |b| try testing.expectEqualStrings(b, actual.detach),
         .resize => |s| try testing.expectEqual(s, actual.resize),
-        .kill => {},
+        .kill, .list => {},
     }
 }
 
@@ -167,6 +171,7 @@ const sample = [_]Message{
     .{ .output = "\x1b[?2026h\x1b[H$ \x1b[?2026l" },
     .{ .detach = "attached elsewhere" },
     .kill,
+    .list,
     .{ .input = "" },
 };
 

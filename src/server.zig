@@ -291,8 +291,24 @@ const Server = struct {
                 try s.render();
             },
             .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
+            .list => try s.list(c),
             .output, .detach => s.dropConn(c),
         }
+    }
+
+    /// Answers `kiwa ls` and closes the connection.
+    fn list(s: *Server, c: *Conn) !void {
+        s.scratch.clearRetainingCapacity();
+        var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
+        const written = s.session.list(&aw.writer);
+        s.scratch = aw.toArrayList();
+        written catch return error.OutOfMemory;
+        c.state = .closing;
+        c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
+            error.Overflow => return s.dropConn(c),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try s.flush(c);
     }
 
     fn attach(s: *Server, c: *Conn, h: protocol.Hello) !void {

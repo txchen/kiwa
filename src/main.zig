@@ -11,7 +11,7 @@ pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .Debug) .debug else .err,
 };
 
-const usage = "usage: kiwa [kill-server | --version]\n";
+const usage = "usage: kiwa [ls | kill-server | --version]\n";
 
 pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
@@ -30,6 +30,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (cmd.len == 0) return client.attach(init.gpa, init.environ_map, resolved);
     if (std.mem.eql(u8, cmd, "__server")) return server.run(init.gpa, init.io, init.environ_map, resolved);
     if (std.mem.eql(u8, cmd, "kill-server")) return client.killServer(resolved);
+    if (std.mem.eql(u8, cmd, "ls")) return client.list(init.gpa, resolved);
     return fail(usage);
 }
 
