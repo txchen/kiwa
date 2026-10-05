@@ -68,8 +68,20 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `shift+x` | Close the tab |
 | `shift+n` / `shift+d` | New workspace in the focused pane's directory / close the workspace |
 | `shift+1..9` | Workspace by number |
+| `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
+| `b` | Collapse or expand the sidebar |
 | `q` | Detach |
+| `?` | Key help; `esc`, `q`, or `?` closes it |
 | `ctrl+b` | Send `ctrl+b` to the pane |
+
+The sidebar on the left lists the workspaces and highlights the current
+one. A workspace you are not viewing shows `•` after output and `!` after a
+bell, until you view it. Below 64 columns the sidebar collapses to the
+workspace numbers. The tab row above the panes lists the current
+workspace's tabs; while the prefix, resize mode, or navigate mode is
+active, a mode bar with the main keys takes its place. The outer window
+title is `{hostname}: {workspace}`, and the outer terminal's own title is
+restored on detach.
 
 A pane closes when its program exits. The last pane of a tab closes the
 tab, the last tab closes the workspace, and the last workspace stops the
