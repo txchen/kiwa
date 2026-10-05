@@ -2,6 +2,8 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const sys = @import("sys.zig");
 const protocol = @import("protocol.zig");
+const input = @import("input.zig");
+const encode = @import("encode.zig");
 
 const linux = std.os.linux;
 const Handler = vt.TerminalStream.Handler;
@@ -110,6 +112,16 @@ pub const Pane = struct {
         } else {
             try self.pending.appendSlice(self.gpa, bytes);
         }
+    }
+
+    /// Encodes a decoded input event for this pane's terminal modes and
+    /// writes it without blocking.
+    pub fn send(self: *Pane, ev: input.Event) !void {
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.pending);
+        const encoded = encode.event(&aw.writer, &self.terminal, ev);
+        self.pending = aw.toArrayList();
+        encoded catch return error.OutOfMemory;
+        try self.flushPending();
     }
 
     pub fn flushPending(self: *Pane) !void {

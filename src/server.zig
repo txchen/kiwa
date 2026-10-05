@@ -2,7 +2,8 @@ const std = @import("std");
 const sys = @import("sys.zig");
 const paths_mod = @import("paths.zig");
 const protocol = @import("protocol.zig");
-const prefix_mod = @import("prefix.zig");
+const input = @import("input.zig");
+const prefix = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const Pane = @import("pane.zig").Pane;
@@ -14,8 +15,20 @@ const Error = std.mem.Allocator.Error || sys.Error;
 
 pub const ready_fd_env = "KIWA_READY_FD";
 
-/// The render deadline after pane output. Batches bursts into one frame.
-const render_delay_ns = 8 * std.time.ns_per_ms;
+/// One-shot deadlines that share the timerfd, which is armed for the
+/// nearest one (ADR 0002).
+const Deadline = enum {
+    /// After pane output. Batches bursts into one frame.
+    render,
+    /// After input that ends inside a sequence, such as a lone ESC that
+    /// could start an escape sequence or an alt chord.
+    input,
+};
+
+const delay_ns = std.EnumArray(Deadline, u64).init(.{
+    .render = 8 * std.time.ns_per_ms,
+    .input = 25 * std.time.ns_per_ms,
+});
 
 const msg = struct {
     const detached = "detached";
@@ -30,6 +43,9 @@ const msg = struct {
 const Conn = struct {
     fd: sys.fd_t,
     decoder: protocol.Decoder = .{},
+    /// Decodes the outer terminal's input inside `input` messages.
+    input: input.Decoder = .{},
+    prefix: prefix.Prefix = .{},
     out: OutBuffer = .{},
     state: enum {
         open,
@@ -52,6 +68,7 @@ const Conn = struct {
 
     fn deinit(c: *Conn, gpa: std.mem.Allocator) void {
         c.decoder.deinit(gpa);
+        c.input.deinit(gpa);
         c.out.deinit(gpa);
         c.frame.deinit(gpa);
         c.last_frame.deinit(gpa);
@@ -69,13 +86,13 @@ const Server = struct {
     listener: sys.fd_t,
     sigfd: sys.fd_t,
     timerfd: sys.fd_t,
-    render_armed: bool = false,
+    /// Monotonic nanoseconds; null when not armed.
+    deadlines: std.EnumArray(Deadline, ?u64) = .initFill(null),
     pane: ?*Pane = null,
     /// Epoll interest for the PTY. Null once the PTY hung up.
     pane_events: ?u32 = null,
     conns: std.ArrayList(*Conn) = .empty,
     client: ?*Conn = null,
-    prefix: prefix_mod.Prefix = .{},
     scratch: std.ArrayList(u8) = .empty,
     exit: ?Exit = null,
 
@@ -91,10 +108,7 @@ const Server = struct {
                 } else if (fd == s.sigfd) {
                     try s.onSignals();
                 } else if (fd == s.timerfd) {
-                    var expirations: u64 = 0;
-                    _ = sys.read(s.timerfd, std.mem.asBytes(&expirations)) catch {};
-                    s.render_armed = false;
-                    try s.render();
+                    try s.onTimer();
                 } else if (s.pane != null and fd == s.pane.?.fd) {
                     try s.onPane(ev.events);
                 } else if (s.findConn(fd)) |c| {
@@ -209,12 +223,8 @@ const Server = struct {
             .hello => |h| try s.attach(c, h),
             .input => |bytes| {
                 if (s.client != c) return;
-                var rest = bytes;
-                while (s.prefix.next(&rest)) |ev| switch (ev) {
-                    .pane => |b| if (s.pane) |p| p.write(b) catch |e| std.log.err("pane write: {t}", .{e}),
-                    .detach => return s.detach(c, msg.detached),
-                };
-                try s.syncPaneEvents();
+                try c.input.feed(s.gpa, bytes);
+                try s.drainInput(c);
             },
             .resize => |size| {
                 if (s.client != c) return;
@@ -231,7 +241,6 @@ const Server = struct {
         if (h.version != protocol.version) return s.detach(c, msg.version_mismatch);
         if (s.client) |old| if (old != c) try s.detach(old, msg.elsewhere);
         s.client = c;
-        s.prefix = .{};
         c.size = sanitize(h.size);
         c.redraw_pending = true;
         if (s.pane) |p| {
@@ -264,14 +273,55 @@ const Server = struct {
         s.pane_events = EPOLL.IN;
     }
 
+    fn drainInput(s: *Server, c: *Conn) !void {
+        while (try c.input.next(s.gpa)) |ev| switch (c.prefix.feed(ev)) {
+            .pane => |pane_ev| if (s.pane) |p| p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e}),
+            .action => |a| switch (a) {
+                .detach => return s.detach(c, msg.detached),
+            },
+            .none => {},
+        };
+        try s.setDeadline(.input, if (c.input.pending()) monotonicNs() + delay_ns.get(.input) else null);
+        try s.syncPaneEvents();
+    }
+
     fn markStale(s: *Server) !void {
-        if (s.client == null or s.render_armed) return;
+        if (s.client == null or s.deadlines.get(.render) != null) return;
+        try s.setDeadline(.render, monotonicNs() + delay_ns.get(.render));
+    }
+
+    fn setDeadline(s: *Server, which: Deadline, at: ?u64) !void {
+        if (s.deadlines.get(which) == at) return;
+        s.deadlines.set(which, at);
+        var nearest: ?u64 = null;
+        for (s.deadlines.values) |d| if (d) |t| {
+            nearest = @min(t, nearest orelse t);
+        };
+        // An all-zero value disarms the timer.
+        const t = nearest orelse 0;
         const its: linux.itimerspec = .{
             .it_interval = .{ .sec = 0, .nsec = 0 },
-            .it_value = .{ .sec = 0, .nsec = render_delay_ns },
+            .it_value = .{ .sec = @intCast(t / std.time.ns_per_s), .nsec = @intCast(t % std.time.ns_per_s) },
         };
-        _ = try sys.check(linux.timerfd_settime(s.timerfd, .{}, &its, null));
-        s.render_armed = true;
+        _ = try sys.check(linux.timerfd_settime(s.timerfd, .{ .ABSTIME = true }, &its, null));
+    }
+
+    fn onTimer(s: *Server) !void {
+        var expirations: u64 = 0;
+        _ = sys.read(s.timerfd, std.mem.asBytes(&expirations)) catch {};
+        const now = monotonicNs();
+        for (std.enums.values(Deadline)) |which| {
+            const at = s.deadlines.get(which) orelse continue;
+            if (at > now) continue;
+            try s.setDeadline(which, null);
+            switch (which) {
+                .render => try s.render(),
+                .input => if (s.client) |c| {
+                    c.input.expire();
+                    try s.drainInput(c);
+                },
+            }
+        }
     }
 
     fn render(s: *Server) Error!void {
@@ -378,6 +428,12 @@ const Server = struct {
         s.scratch.deinit(s.gpa);
     }
 };
+
+fn monotonicNs() u64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 
 fn sanitize(size: protocol.Size) protocol.Size {
     return .{ .cols = @max(size.cols, 2), .rows = @max(size.rows, 1) };

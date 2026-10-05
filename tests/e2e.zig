@@ -188,6 +188,14 @@ const Outer = struct {
         return o.waitUntil(needle, contains);
     }
 
+    fn lacks(o: *Outer, needle: []const u8) !bool {
+        return !try o.contains(needle);
+    }
+
+    fn waitGone(o: *Outer, needle: []const u8) !void {
+        return o.waitUntil(needle, lacks);
+    }
+
     fn waitUntil(o: *Outer, what: []const u8, comptime pred: fn (*Outer, []const u8) anyerror!bool) !void {
         const deadline = now() + 5 * std.time.ns_per_s;
         while (true) {
@@ -404,6 +412,20 @@ fn fullScreenPrograms(ctx: *Ctx) !void {
     try o.waitLine("back");
 }
 
+fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("vim -u NONE -N -c 'set showmode' notes\r");
+    try o.waitText("notes");
+    try o.send("iabc");
+    try o.waitText("-- INSERT --");
+    try o.send("\x1b");
+    try o.waitGone("-- INSERT --");
+    try o.send("x");
+    try o.waitLine("ab");
+    try o.send(":q!\r");
+    try o.waitLine("$");
+}
+
 fn versionMismatch(ctx: *Ctx) !void {
     const a = try attachedWithPrompt(ctx);
     const sock = try sys.connectUnix(ctx.socket);
@@ -517,6 +539,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "the pane starts in the client's directory with Kiwa's environment", .run = paneStartsWithClientDirAndEnv },
     .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
     .{ .name = "less and vim draw", .run = fullScreenPrograms },
+    .{ .name = "a lone esc reaches vim and leaves insert mode", .run = loneEscLeavesInsertMode },
     .{ .name = "version mismatch detaches only the new client", .run = versionMismatch },
     .{ .name = "a dead server's socket is replaced", .run = staleSocketIsReplaced },
     .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
