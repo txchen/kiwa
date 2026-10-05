@@ -170,12 +170,20 @@ pub const Reply = union(enum) {
     device_attributes,
 };
 
+/// Text between `CSI 200 ~` and `CSI 201 ~`. A paste longer than the
+/// decoder's limit arrives in several chunks; `first` and `last` mark the
+/// ends of the whole paste.
+pub const Paste = struct {
+    /// Mutable so that paste encoding can sanitize it in place.
+    data: []u8,
+    first: bool = true,
+    last: bool = true,
+};
+
 pub const Event = union(enum) {
     key: Key,
     mouse: Mouse,
-    /// The text between `CSI 200 ~` and `CSI 201 ~`. Mutable so that paste
-    /// encoding can sanitize it in place.
-    paste: []u8,
+    paste: Paste,
     focus: Focus,
     reply: Reply,
     /// A sequence Kiwa does not understand, to pass to the pane unchanged.
@@ -184,11 +192,19 @@ pub const Event = union(enum) {
 
 const paste_end = "\x1b[201~";
 
+pub const default_paste_limit = 8 * 1024 * 1024;
+
 pub const Decoder = struct {
     buf: std.ArrayList(u8) = .empty,
     pos: usize = 0,
-    mode: enum { keys, paste } = .keys,
+    mode: union(enum) {
+        keys,
+        /// `chunked` once part of the paste went out as a chunk.
+        paste: struct { chunked: bool = false },
+    } = .keys,
     paste: std.ArrayList(u8) = .empty,
+    /// A paste buffer this full goes out as a chunk instead of growing.
+    paste_limit: usize = default_paste_limit,
     /// Set once the input has gone quiet: a partial sequence at the end is
     /// then taken as complete, so a lone ESC becomes the escape key.
     expired: bool = false,
@@ -221,17 +237,22 @@ pub const Decoder = struct {
             const rest = d.buf.items[d.pos..];
             if (rest.len == 0) return null;
             switch (d.mode) {
-                .paste => {
+                .paste => |*state| {
+                    // Only a chunk that went out leaves the buffer this full.
+                    if (d.paste.items.len >= d.paste_limit) d.paste.clearRetainingCapacity();
+                    const first = !state.chunked;
                     if (std.mem.indexOf(u8, rest, paste_end)) |end| {
                         try d.paste.appendSlice(gpa, rest[0..end]);
                         d.pos += end + paste_end.len;
                         d.mode = .keys;
-                        return .{ .paste = d.paste.items };
+                        return .{ .paste = .{ .data = d.paste.items, .first = first } };
                     }
                     const take = rest.len - partialSuffix(rest, paste_end);
                     try d.paste.appendSlice(gpa, rest[0..take]);
                     d.pos += take;
-                    return null;
+                    if (d.paste.items.len < d.paste_limit) return null;
+                    state.chunked = true;
+                    return .{ .paste = .{ .data = d.paste.items, .first = first, .last = false } };
                 },
                 .keys => {
                     const p = parse(rest, d.expired) orelse return null;
@@ -239,7 +260,7 @@ pub const Decoder = struct {
                     switch (p.what) {
                         .event => |ev| return ev,
                         .paste_start => {
-                            d.mode = .paste;
+                            d.mode = .{ .paste = .{} };
                             d.paste.clearRetainingCapacity();
                         },
                     }
@@ -593,7 +614,7 @@ fn decode(chunks: []const []const u8, quiet: bool) !Run {
 fn collect(d: *Decoder, r: *Run) !void {
     const a = r.arena.allocator();
     while (try d.next(testing.allocator)) |ev| try r.events.append(a, switch (ev) {
-        .paste => |p| .{ .paste = try a.dupe(u8, p) },
+        .paste => |p| .{ .paste = .{ .data = try a.dupe(u8, p.data), .first = p.first, .last = p.last } },
         .unknown => |u| .{ .unknown = try a.dupe(u8, u) },
         else => ev,
     });
@@ -753,10 +774,42 @@ test "xterm modifyOtherKeys keys" {
 test "bracketed paste split across feeds keeps its ESC bytes" {
     try expectEvents(&.{ "x\x1b[20", "0~line1\n\x1b[Aline2\x1b[2", "01", "~y" }, false, &.{
         typed('x'),
-        .{ .paste = @constCast("line1\n\x1b[Aline2") },
+        .{ .paste = .{ .data = @constCast("line1\n\x1b[Aline2") } },
         typed('y'),
     });
-    try expectEvents(&.{"\x1b[200~\x1b[201~"}, false, &.{.{ .paste = @constCast("") }});
+    try expectEvents(&.{"\x1b[200~\x1b[201~"}, false, &.{.{ .paste = .{ .data = @constCast("") } }});
+}
+
+test "a paste past the limit arrives in chunks without growing the buffer" {
+    var d: Decoder = .{ .paste_limit = 8 };
+    defer d.deinit(testing.allocator);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(testing.allocator);
+    var marks: std.ArrayList([2]bool) = .empty;
+    defer marks.deinit(testing.allocator);
+    var feeds: std.ArrayList([]const u8) = .empty;
+    defer feeds.deinit(testing.allocator);
+    try feeds.append(testing.allocator, "\x1b[200~");
+    for (0..1000) |_| try feeds.append(testing.allocator, "abcdefghij");
+    try feeds.appendSlice(testing.allocator, &.{ "xy\x1b[20", "1~z" });
+    for (feeds.items) |chunk| {
+        try d.feed(testing.allocator, chunk);
+        while (try d.next(testing.allocator)) |ev| switch (ev) {
+            .paste => |p| {
+                try got.appendSlice(testing.allocator, p.data);
+                try marks.append(testing.allocator, .{ p.first, p.last });
+            },
+            .key => |k| try testing.expectEqual(@as(u21, 'z'), k.code.char),
+            else => return error.UnexpectedEvent,
+        };
+    }
+    try testing.expectEqual(10002, got.items.len);
+    try testing.expect(std.mem.endsWith(u8, got.items, "ijxy"));
+    try testing.expect(d.paste.capacity < 1000);
+    try testing.expectEqual(1001, marks.items.len);
+    try testing.expectEqual([2]bool{ true, false }, marks.items[0]);
+    for (marks.items[1..1000]) |m| try testing.expectEqual([2]bool{ false, false }, m);
+    try testing.expectEqual([2]bool{ false, true }, marks.items[1000]);
 }
 
 test "an unfinished paste waits without a deadline" {

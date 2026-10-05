@@ -12,7 +12,12 @@ pub fn event(w: *std.Io.Writer, t: *const vt.Terminal, ev: input.Event) std.Io.W
             var utf8: [4]u8 = undefined;
             try vt.input.encodeKey(w, keyEvent(k, &utf8), .fromTerminal(t));
         },
-        .paste => |data| try vt.input.encodePasteWriter(w, data, .fromTerminal(t)),
+        .paste => |p| {
+            const parts = vt.input.encodePaste(p.data, .fromTerminal(t));
+            if (p.first) try w.writeAll(parts[0]);
+            try w.writeAll(parts[1]);
+            if (p.last) try w.writeAll(parts[2]);
+        },
         .focus => |f| if (t.modes.get(.focus_event)) try vt.input.encodeFocus(w, switch (f) {
             .in => .gained,
             .out => .lost,
@@ -117,10 +122,22 @@ test "paste is bracketed only when the pane enabled it, and is always sanitized"
     try p.init("");
     defer p.deinit();
     var data = "a\nb\x1bc".*;
-    try p.expect("a\rb c", .{ .paste = &data });
+    try p.expect("a\rb c", .{ .paste = .{ .data = &data } });
     p.stream.nextSlice("\x1b[?2004h");
     data = "a\nb\x1bc".*;
-    try p.expect("\x1b[200~a\nb c\x1b[201~", .{ .paste = &data });
+    try p.expect("\x1b[200~a\nb c\x1b[201~", .{ .paste = .{ .data = &data } });
+}
+
+test "a chunked paste opens the bracket once and closes it once" {
+    var p: Pane = undefined;
+    try p.init("\x1b[?2004h");
+    defer p.deinit();
+    var a = "ab\n".*;
+    var b = "cd".*;
+    var c = "e\x1b".*;
+    try p.expect("\x1b[200~ab\n", .{ .paste = .{ .data = &a, .last = false } });
+    try p.expect("cd", .{ .paste = .{ .data = &b, .first = false, .last = false } });
+    try p.expect("e \x1b[201~", .{ .paste = .{ .data = &c, .first = false } });
 }
 
 test "focus reaches only a pane that enabled focus reporting" {
