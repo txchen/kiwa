@@ -153,7 +153,7 @@ pub fn write(doc: Doc, w: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 /// The document for `s`. `dirs.cwd(arena, pane)` returns a pane's working
-/// directory, or null when it is unknown.
+/// directory allocated in `arena`, or null when it is unknown.
 pub fn snapshot(arena: std.mem.Allocator, s: *const Session, sidebar_collapsed: bool, dirs: anytype) !Doc {
     const workspaces = try arena.alloc(Workspace, s.workspaces.items.len);
     for (s.workspaces.items, workspaces) |ws, *out| {
@@ -197,7 +197,7 @@ fn indexOfId(items: anytype, id: anytype) usize {
 
 fn snapshotNode(arena: std.mem.Allocator, n: *const layout.Node, dirs: anytype) !Node {
     switch (n.*) {
-        .pane => |id| return .{ .pane = .{ .cwd = dirs.cwd(arena, id) } },
+        .pane => |id| return .{ .pane = .{ .cwd = try dirs.cwd(arena, id) } },
         .split => |s| {
             const a = try arena.create(Node);
             a.* = try snapshotNode(arena, s.a, dirs);
@@ -307,9 +307,8 @@ const screen: layout.Rect = .{ .cols = 80, .rows = 24 };
 const FakeDirs = struct {
     map: std.AutoHashMapUnmanaged(PaneId, []const u8) = .empty,
 
-    fn cwd(d: *const FakeDirs, arena: std.mem.Allocator, id: PaneId) ?[]const u8 {
-        const dir = d.map.get(id) orelse return null;
-        return arena.dupe(u8, dir) catch null;
+    fn cwd(d: *const FakeDirs, arena: std.mem.Allocator, id: PaneId) !?[]const u8 {
+        return try arena.dupe(u8, d.map.get(id) orelse return null);
     }
 };
 

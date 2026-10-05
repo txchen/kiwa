@@ -108,6 +108,15 @@ pub fn lstat(path: [*:0]const u8) error{StatFailed}!Stat {
     return .{ .mode = stx.mode, .uid = stx.uid };
 }
 
+/// Whether `path` names a directory, following symlinks.
+pub fn isDir(path: []const u8) bool {
+    var buf: [linux.PATH_MAX]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(linux.AT.FDCWD, z, 0, .{ .TYPE = true }, &stx);
+    return linux.errno(rc) == .SUCCESS and stx.mode & linux.S.IFMT == linux.S.IFDIR;
+}
+
 const testing = std.testing;
 
 test "default socket lives under XDG_RUNTIME_DIR/kiwa" {

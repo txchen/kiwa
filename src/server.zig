@@ -19,6 +19,8 @@ const TextField = @import("text_field.zig").TextField;
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
+const persist = @import("persist.zig");
+const session_file = @import("session_file.zig");
 const vt = @import("ghostty-vt");
 
 const Session = session_mod.Session;
@@ -42,12 +44,16 @@ const Deadline = enum {
     input,
     /// The earliest dynamic-name check that had to wait.
     names,
+    /// After a change to what `session.json` holds. Batches a burst of
+    /// changes into one write.
+    save,
 };
 
 const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .render = 8 * std.time.ns_per_ms,
     .input = 25 * std.time.ns_per_ms,
     .names = names.interval_ns,
+    .save = std.time.ns_per_s,
 });
 
 /// Asks for the kitty keyboard flags, then for DA1. Every terminal answers
@@ -176,8 +182,16 @@ const Server = struct {
     /// The pane whose terminal holds the selection.
     selected: ?PaneId = null,
     stats: Stats = .{},
+    /// The state directory, which holds `session.json`. Null when it could
+    /// not be opened; the session is then not saved.
+    state: ?std.Io.Dir,
+    /// The saved session, until the first client's size is known and it
+    /// is rebuilt.
+    restore: ?Restore = null,
 
     const Exit = struct { reason: []const u8, hangup_child: bool };
+
+    const Restore = struct { arena: std.heap.ArenaAllocator, doc: persist.Doc };
 
     fn loop(s: *Server) !void {
         var events: [16]linux.epoll_event = undefined;
@@ -276,9 +290,10 @@ const Server = struct {
             if (d.bytes > 0) {
                 // Output in a hidden pane changes nothing on screen, except
                 // the first time it marks its workspace.
-                if (s.isVisible(p.id) or s.session.noteOutput(p.id, d.bell)) try s.markStale();
+                if (s.isVisible(p.id) or (p.shown and s.session.noteOutput(p.id, d.bell))) try s.markStale();
                 if (s.session.tabOf(p.id)) |t| if (t.focused == p.id) try s.markName(t);
             }
+            if (d.moved) try s.markSave();
             // The child exit arrives as SIGCHLD; stop polling a hung-up PTY until then.
             if (d.closed) {
                 sys.epollCtl(s.ep, EPOLL.CTL_DEL, p.fd, 0) catch {};
@@ -390,7 +405,11 @@ const Server = struct {
         c.keyboard = if (try s.pushTerminal(c, probe_seq)) .probing else .legacy;
         s.size = c.size;
         if (s.session.isEmpty()) {
-            try s.openPane(try s.newWorkspace(h.cwd), h.cwd);
+            if (s.restore) |*r| {
+                try s.restoreSession(r);
+            } else {
+                try s.openPane(try s.newWorkspace(h.cwd), h.cwd);
+            }
             if (s.exit != null) return;
         } else {
             try s.relayout();
@@ -420,6 +439,7 @@ const Server = struct {
         try s.session.view(s.tabArea(size), &s.view);
         for (s.view.items) |pl| {
             const p = s.panes.get(pl.pane) orelse continue;
+            p.shown = true;
             p.resize(paneSize(pl.inner)) catch |e| std.log.err("pane resize: {t}", .{e});
         }
     }
@@ -439,8 +459,73 @@ const Server = struct {
             std.log.err("pane start: {t}", .{e});
             return s.closePanes(&.{}, s.session.closePane(id));
         };
+        // A new pane always goes on the visible tab.
+        s.panes.get(id).?.shown = true;
         if (s.session.tabOf(id)) |t| try s.markName(t);
         try s.markStale();
+        try s.markSave();
+    }
+
+    /// Rebuilds the saved session for the first client: a new shell in
+    /// each pane, sized for that client and started in the pane's saved
+    /// directory. The client's own directory is not used.
+    fn restoreSession(s: *Server, r: *Restore) !void {
+        var restored: std.ArrayList(persist.Restored) = .empty;
+        defer restored.deinit(s.gpa);
+        const built = try persist.build(s.gpa, s.session.tab_name, r.doc, &restored);
+        s.session.deinit();
+        s.session = built;
+        s.collapsed = r.doc.sidebar_collapsed;
+        for (s.session.workspaces.items) |ws| ws.git = try s.git.watch(s.gpa, ws.root_dir);
+
+        const area = s.tabArea(s.size.?);
+        var placed: std.ArrayList(Placement) = .empty;
+        defer placed.deinit(s.gpa);
+        var failed: std.ArrayList(PaneId) = .empty;
+        defer failed.deinit(s.gpa);
+        for (s.session.workspaces.items) |ws| for (ws.tabs.items) |t| {
+            placed.clearRetainingCapacity();
+            try t.layout.place(s.gpa, area, &placed);
+            for (placed.items) |pl| {
+                const saved = for (restored.items) |x| {
+                    if (x.pane == pl.pane) break x;
+                } else unreachable;
+                const inner = if (t.zoomed and pl.pane == t.focused) area else pl.inner;
+                s.spawnPane(pl.pane, paneSize(inner), startDir(s.env, saved)) catch |e| {
+                    std.log.err("pane start: {t}", .{e});
+                    try failed.append(s.gpa, pl.pane);
+                };
+            }
+            try s.markName(t);
+        };
+        r.arena.deinit();
+        s.restore = null;
+        for (failed.items) |id| {
+            try s.closePanes(&.{}, s.session.closePane(id));
+            if (s.exit != null) return;
+        }
+        try s.relayout();
+        try s.markStale();
+    }
+
+    /// Arms the save deadline unless it is armed already.
+    fn markSave(s: *Server) !void {
+        if (s.state == null or s.deadlines.get(.save) != null) return;
+        try s.setDeadline(.save, monotonicNs() + delay_ns.get(.save));
+    }
+
+    /// Writes `session.json` now, or deletes it once the session is empty.
+    fn save(s: *Server) void {
+        const dir = s.state orelse return;
+        // A saved session that was never rebuilt is still the one to keep.
+        if (s.restore != null) return;
+        if (s.session.isEmpty()) return session_file.remove(s.io, dir);
+        var arena: std.heap.ArenaAllocator = .init(s.gpa);
+        defer arena.deinit();
+        const doc = persist.snapshot(arena.allocator(), &s.session, s.collapsed, PaneDirs{ .panes = &s.panes }) catch |e| {
+            return std.log.err("saving {s}: {t}", .{ session_file.name, e });
+        };
+        session_file.save(s.io, dir, doc) catch |e| std.log.err("saving {s}: {t}", .{ session_file.name, e });
     }
 
     /// Closes one pane, whose program is stopped already or is stopped
@@ -507,6 +592,7 @@ const Server = struct {
         if (closed == .workspace) s.git.prune(s.gpa, s.session.workspaces.items);
         try s.relayout();
         try s.markStale();
+        try s.markSave();
     }
 
     fn destroyPane(s: *Server, p: *Pane) void {
@@ -648,6 +734,7 @@ const Server = struct {
         if (!changed) return;
         try s.relayout();
         try s.markStale();
+        try s.markSave();
     }
 
     /// Closes `target` at once, or asks first when one of its panes runs
@@ -713,6 +800,7 @@ const Server = struct {
             },
             .workspace => |id| if (s.session.findWorkspace(id)) |ws| try s.session.renameWorkspace(ws, text),
         }
+        try s.markSave();
     }
 
     /// A click outside an open dialog cancels it; nothing else reaches
@@ -737,7 +825,10 @@ const Server = struct {
             .jump => |i| if (i <= last) {
                 c.nav = i;
             },
-            .pick => if (s.session.selectWorkspace(c.nav)) try s.relayout(),
+            .pick => if (s.session.selectWorkspace(c.nav)) {
+                try s.relayout();
+                try s.markSave();
+            },
         }
         try s.markStale();
     }
@@ -776,6 +867,7 @@ const Server = struct {
                 if (s.session.focusPane(f.pane)) {
                     try s.markName(s.session.activeTab());
                     try s.markStale();
+                    try s.markSave();
                 }
                 if (f.deliver) try s.deliverMouse(f.pane, ev);
             },
@@ -800,10 +892,11 @@ const Server = struct {
         }
     }
 
-    /// Relays out and redraws after the session changed what is visible.
+    /// Relays out, redraws, and saves after the session changed what is visible.
     fn showChanges(s: *Server) !void {
         try s.relayout();
         try s.markStale();
+        try s.markSave();
     }
 
     fn placementOf(s: *const Server, pane: PaneId) ?Placement {
@@ -971,6 +1064,7 @@ const Server = struct {
                     try s.drainInput(c);
                 },
                 .names => try s.checkDueNames(),
+                .save => s.save(),
             }
         }
     }
@@ -1157,6 +1251,12 @@ const Server = struct {
     /// Tells the attached client why the server is going away, waiting at
     /// most a second for it to read the message.
     fn shutdown(s: *Server, e: Exit) void {
+        // Before the socket goes, so a finished `kiwa kill-server` means a
+        // written file, and before the hangup, while every child's
+        // directory can still be read.
+        s.save();
+        if (s.restore) |*r| r.arena.deinit();
+        if (s.state) |dir| dir.close(s.io);
         _ = linux.unlink(s.paths.socket);
         var it = s.panes.valueIterator();
         while (it.next()) |p| if (e.hangup_child) p.*.hangup();
@@ -1237,13 +1337,56 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
         .git = watcher,
         .hostname = std.mem.sliceTo(&uts.nodename, 0),
         .session = .init(gpa, std.fs.path.basename(env.get("SHELL") orelse "/bin/sh")),
+        .state = std.Io.Dir.openDirAbsolute(io, paths.state_dir, .{ .iterate = true }) catch |e| blk: {
+            std.log.err("opening {s}: {t}; the session will not be saved", .{ paths.state_dir, e });
+            break :blk null;
+        },
     };
+    if (s.state) |dir| s.restore = try loadSaved(gpa, io, dir);
     s.loop() catch |e| {
         std.log.err("server loop: {t}", .{e});
         s.exit = .{ .reason = msg.server_exited, .hangup_child = true };
     };
     s.shutdown(s.exit.?);
     return 0;
+}
+
+/// The working directory of each pane, for a save.
+const PaneDirs = struct {
+    panes: *const std.AutoHashMapUnmanaged(PaneId, *Pane),
+
+    pub fn cwd(d: PaneDirs, arena: std.mem.Allocator, id: PaneId) !?[]const u8 {
+        const p = d.panes.get(id) orelse return null;
+        var buf: [linux.PATH_MAX]u8 = undefined;
+        return try arena.dupe(u8, p.cwd(&buf) orelse return null);
+    }
+};
+
+/// Reads the saved session. A file that cannot be used is moved aside,
+/// and the server starts fresh.
+fn loadSaved(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !?Server.Restore {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    errdefer arena.deinit();
+    switch (try session_file.load(io, arena.allocator(), dir)) {
+        .doc => |doc| return .{ .arena = arena, .doc = doc },
+        .none => {},
+        .unusable => |u| if (u.moved_to) |bad| {
+            std.log.err("{s} is not usable ({t}); moved it to {s} and started fresh", .{ session_file.name, u.why, bad });
+        } else {
+            std.log.err("{s} is not usable ({t}) and could not be moved aside; started fresh", .{ session_file.name, u.why });
+        },
+    }
+    arena.deinit();
+    return null;
+}
+
+/// Where a restored pane's shell starts: its saved directory, else its
+/// workspace's root, else $HOME, else /, whichever is still a directory.
+fn startDir(env: *const std.process.Environ.Map, r: persist.Restored) []const u8 {
+    for ([_]?[]const u8{ r.cwd, r.root, env.get("HOME") }) |dir| {
+        if (dir) |d| if (paths_mod.isDir(d)) return d;
+    }
+    return "/";
 }
 
 /// Removes a socket left by a dead server. Refuses to remove anything that

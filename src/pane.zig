@@ -34,6 +34,15 @@ pub const Pane = struct {
     events: ?u32 = null,
     /// Set when output rang the bell; `drain` reports and clears it.
     rang: bool = false,
+    /// A hash of the last OSC 7 report, to tell a new directory from a
+    /// shell repeating the old one at every prompt.
+    pwd_hash: u64 = 0,
+    /// Set when an OSC 7 report named a new directory; `drain` reports and clears it.
+    moved: bool = false,
+    /// Whether the pane has been on screen. Output from a restored pane
+    /// that was never viewed, such as its new shell's first prompt, does
+    /// not mark its workspace.
+    shown: bool = false,
     /// The OSC 52 sequence for the program's last clipboard write, waiting
     /// to go to the outer terminal; empty when there is none.
     clipboard: std.ArrayList(u8) = .empty,
@@ -69,6 +78,7 @@ pub const Pane = struct {
         handler.effects.device_attributes = &deviceAttributes;
         handler.effects.bell = &bell;
         handler.effects.clipboard_write = &clipboardWrite;
+        handler.effects.pwd_changed = &pwdChanged;
         p.stream = .init(.{ .allocator = gpa, .handler = handler });
         errdefer p.stream.deinit();
 
@@ -101,7 +111,7 @@ pub const Pane = struct {
         self.gpa.destroy(self);
     }
 
-    pub const Drain = struct { bytes: usize, closed: bool, bell: bool };
+    pub const Drain = struct { bytes: usize, closed: bool, bell: bool, moved: bool };
 
     /// Reads and parses PTY output up to the per-wake budget.
     pub fn drain(self: *Pane) Drain {
@@ -113,8 +123,11 @@ pub const Pane = struct {
             self.stream.nextSlice(buf[0..n]);
             total += n;
         } else false;
-        defer self.rang = false;
-        return .{ .bytes = total, .closed = closed, .bell = self.rang };
+        defer {
+            self.rang = false;
+            self.moved = false;
+        }
+        return .{ .bytes = total, .closed = closed, .bell = self.rang, .moved = self.moved };
     }
 
     /// The directory the shell last reported with OSC 7, or else the
@@ -297,6 +310,15 @@ fn bell(h: *Handler) void {
     const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
     const p: *Pane = @fieldParentPtr("stream", stream);
     p.rang = true;
+}
+
+fn pwdChanged(h: *Handler) void {
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+    const p: *Pane = @fieldParentPtr("stream", stream);
+    const hash = std.hash.Wyhash.hash(0, p.terminal.getPwd() orelse "");
+    if (hash == p.pwd_hash) return;
+    p.pwd_hash = hash;
+    p.moved = true;
 }
 
 /// Keeps the program's clipboard write as OSC 52 for the outer terminal.
