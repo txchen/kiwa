@@ -60,4 +60,5 @@ test {
     _ = @import("text_field.zig");
     _ = @import("dialog.zig");
     _ = @import("names.zig");
+    _ = @import("git.zig");
 }
