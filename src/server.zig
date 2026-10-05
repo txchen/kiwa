@@ -201,6 +201,10 @@ const Server = struct {
     /// The saved session, until the first client's size is known and it
     /// is rebuilt.
     restore: ?Restore = null,
+    /// The client's frame no longer matches the session.
+    stale: bool = false,
+    /// Monotonic nanoseconds of the last render.
+    last_render: u64 = 0,
 
     const Exit = struct { reason: []const u8, hangup_child: bool };
 
@@ -228,6 +232,7 @@ const Server = struct {
                 }
                 if (s.exit != null) break;
             }
+            if (s.exit == null) try s.renderStale();
             s.freeDeadConns();
         }
     }
@@ -1049,8 +1054,17 @@ const Server = struct {
     }
 
     fn markStale(s: *Server) !void {
-        if (s.client == null or s.deadlines.get(.render) != null) return;
-        try s.setDeadline(.render, monotonicNs() + delay_ns.get(.render));
+        if (s.client != null) s.stale = true;
+    }
+
+    /// Renders a stale frame at the end of the wake that made it stale,
+    /// unless a frame went out less than the render delay ago. Then the
+    /// render deadline waits out the rest, so that a burst ends in one frame.
+    fn renderStale(s: *Server) !void {
+        if (!s.stale or s.deadlines.get(.render) != null) return;
+        const due = s.last_render + delay_ns.get(.render);
+        if (monotonicNs() >= due) return s.render();
+        try s.setDeadline(.render, due);
     }
 
     fn setDeadline(s: *Server, which: Deadline, at: ?u64) !void {
@@ -1090,10 +1104,14 @@ const Server = struct {
     }
 
     fn render(s: *Server) Error!void {
+        s.stale = false;
+        try s.setDeadline(.render, null);
         const c = s.client orelse return;
         if (s.session.isEmpty()) return;
+        // The frame goes out once the buffer drains; see `flush`.
         if (c.redraw_pending and !c.out.isEmpty()) return;
         s.stats.renders += 1;
+        s.last_render = monotonicNs();
 
         var compose_all = false;
         if (c.frame.cols != c.size.cols or c.frame.rows != c.size.rows) {

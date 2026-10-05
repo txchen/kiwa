@@ -698,7 +698,7 @@ fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
     const o = try ctx.attachWith(.{ .keyboard = .legacy });
     try o.waitLine("$");
     try o.send("vim -u NONE -N -c 'set showmode' notes\r");
-    try o.waitText("notes");
+    try o.waitText("\"notes\" [New]");
     try o.send("iabc");
     try o.waitText("-- INSERT --");
     try o.send("\x1b");
@@ -764,7 +764,7 @@ fn vimEditsLegacy(ctx: *Ctx) !void {
 fn pasteIntoVimIsBracketed(ctx: *Ctx) !void {
     const o = try attachedAs(ctx, .kitty);
     try o.send("vim -u NONE -N -c 'set showmode' pasted\r");
-    try o.waitText("pasted");
+    try o.waitText("\"pasted\" [New]");
     // In normal mode only a bracketed paste inserts text; unbracketed, it runs as commands.
     try o.paste("first line\nsecond line\n");
     try o.waitLine("first line");
@@ -974,13 +974,17 @@ fn spinnerCostsBytesPerFrame(ctx: *Ctx) !void {
     var seen: std.ArrayList(u8) = .empty;
     defer seen.deinit(ctx.gpa);
     o.capture = &seen;
+    const wakes = try ctx.counter("wakes");
     const bytes = try o.pump(2000);
+    const frame_wakes = try ctx.counter("wakes") - wakes;
     o.capture = null;
     var frames: usize = 0;
     for (seen.items) |b| frames += @intFromBool(std.mem.indexOfScalar(u8, "|/-\\", b) != null);
-    std.debug.print("    spinner 2 s: {d} frames, {d} outer bytes, {d} bytes per frame\n", .{ frames, bytes, bytes / @max(frames, 1) });
+    std.debug.print("    spinner 2 s: {d} frames, {d} outer bytes, {d} server wakes\n", .{ frames, bytes, frame_wakes });
     try expect(frames >= 40, "the spinner drew at least 40 frames in 2 s");
     try expect(bytes <= 4 * frames, "each spinner frame costs at most 4 outer bytes");
+    // The pane's output wakes the server, which renders in the same wake.
+    try expect(frame_wakes <= frames * 3 / 2, "a spinner frame costs about one server wake");
     try o.send("\x03");
 }
 
@@ -1540,10 +1544,14 @@ fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
     const before = try producerCounts(o);
     try prefixed(o, "1");
     try o.waitLine("$");
+    const renders = try ctx.counter("renders");
     _ = try o.pump(300);
     const bytes = try o.pump(3000);
-    std.debug.print("    10 hidden producers, 3 s: {d} outer bytes\n", .{bytes});
+    const hidden_renders = try ctx.counter("renders") - renders;
+    std.debug.print("    10 hidden producers, 3 s: {d} outer bytes, {d} renders\n", .{ bytes, hidden_renders });
     try expect(bytes == 0, "hidden producers send no outer bytes");
+    // The activity marker may still be drawn, once, after the switch.
+    try expect(hidden_renders <= 1, "hidden producers cause at most one render");
     try prefixed(o, "2");
     try o.waitFor("the producers' latest output", Ahead{ .base = before, .by = 50 }, producersAhead);
 }
