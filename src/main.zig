@@ -49,4 +49,5 @@ test {
     _ = @import("diff.zig");
     _ = @import("out_buffer.zig");
     _ = @import("layout.zig");
+    _ = @import("session.zig");
 }
