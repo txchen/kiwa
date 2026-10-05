@@ -111,7 +111,7 @@ pub const Session = struct {
         unreachable;
     }
 
-    fn nextId(s: *Session, comptime T: type) T {
+    pub fn nextId(s: *Session, comptime T: type) T {
         defer s.next_id += 1;
         return @enumFromInt(s.next_id);
     }
@@ -410,7 +410,8 @@ pub const Session = struct {
     }
 };
 
-fn rootName(root_dir: []const u8) []const u8 {
+/// A workspace's dynamic name: its root directory's basename.
+pub fn rootName(root_dir: []const u8) []const u8 {
     const base = std.fs.path.basename(root_dir);
     return if (base.len > 0) base else root_dir;
 }

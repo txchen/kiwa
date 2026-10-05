@@ -61,4 +61,6 @@ test {
     _ = @import("dialog.zig");
     _ = @import("names.zig");
     _ = @import("git.zig");
+    _ = @import("persist.zig");
+    _ = @import("session_file.zig");
 }
