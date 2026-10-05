@@ -1,6 +1,6 @@
 # 05 Workspaces, tabs, and splits
 
-Status: open
+Status: claimed
 Blocked by: 03, 04
 
 ## Scope
