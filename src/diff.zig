@@ -56,11 +56,18 @@ pub const Scroll = struct {
         }
     }
 
-    fn write(s: Scroll, w: *Writer, cols: u16) Writer.Error!void {
+    /// Margins that end at the frame's edge leave out that parameter.
+    fn write(s: Scroll, w: *Writer, cols: u16, rows: u16) Writer.Error!void {
         const r = s.rect;
         const margins = r.x > 0 or r.cols < cols;
-        if (margins) try w.print("\x1b[?69h\x1b[{d};{d}s", .{ r.x + 1, r.x + r.cols });
-        try w.print("\x1b[{d};{d}r\x1b[", .{ r.y + 1, r.y + r.rows });
+        if (margins) {
+            try w.print("\x1b[?69h\x1b[{d}", .{r.x + 1});
+            if (r.x + r.cols < cols) try w.print(";{d}", .{r.x + r.cols});
+            try w.writeByte('s');
+        }
+        try w.print("\x1b[{d}", .{r.y + 1});
+        if (r.y + r.rows < rows) try w.print(";{d}", .{r.y + r.rows});
+        try w.writeAll("r\x1b[");
         if (@abs(s.n) != 1) try w.print("{d}", .{@abs(s.n)});
         try w.writeAll(if (s.n > 0) "S\x1b[r" else "T\x1b[r");
         if (margins) try w.writeAll("\x1b[?69l");
@@ -138,7 +145,7 @@ fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rec
     var buf: [256]u8 = undefined;
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
-    if (scroll) |s| s.write(&d.writer, new.cols) catch unreachable;
+    if (scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
     for (r.y..r.y + r.rows) |y| o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
     return d.fullCount();
 }
@@ -152,7 +159,7 @@ fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer,
     var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = start, .sync = sync };
     for (scrolls) |s| {
         try o.begin();
-        try s.write(w, new.cols);
+        try s.write(w, new.cols, new.rows);
         // Setting and resetting the margins homes the cursor.
         o.pos = null;
     }
@@ -761,7 +768,7 @@ test "a pane that scrolled moves with a scroll and repaints only the row that ca
     f.new.cursor = f.old.cursor;
 
     f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = true } };
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[?69h\x1b[8;15s\x1b[2;5r\x1b[S\x1b[r\x1b[?69l\x1b[5;8Hzzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[?69h\x1b[8;15s\x1b[2r\x1b[S\x1b[r\x1b[?69l\x1b[5;8Hzzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
     // That costs more than repainting the pane's rows.
@@ -772,7 +779,7 @@ test "a pane that scrolled moves with a scroll and repaints only the row that ca
     // Without margins the whole width of the rows scrolls when that pays,
     // and the diff repaints the columns beside the pane.
     for (0..5) |y| for ([_]*Frame{ &f.old, &f.new }) |fr| @memset(fr.row(y)[0..6], .{ .cp = 'S' });
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[2;5r\x1b[S\x1b[r\x1b[5HSSSSSS zzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[2r\x1b[S\x1b[r\x1b[5HSSSSSS zzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
     // A scroll that saves nothing is not sent.
