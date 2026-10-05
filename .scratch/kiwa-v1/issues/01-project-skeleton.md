@@ -1,6 +1,6 @@
 # 01 Project skeleton
 
-Status: claimed
+Status: resolved
 Blocked by: none
 
 ## Scope
@@ -17,3 +17,7 @@ Blocked by: none
 - `zig build -Doptimize=ReleaseSmall` produces a static binary, and
   `file` reports it as statically linked.
 - `zig build test` passes on a clean checkout.
+
+## Comments
+
+- 2026-10-05: Resolved by cfc10d3. Static musl ReleaseSmall binary is 1,183,328 bytes. `zig build test`: 21/21 pass.

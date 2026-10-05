@@ -3,3 +3,4 @@ zig-out*/
 zig-pkg/
 zig-global-cache/
 .scratch/**/todo.md
+.claude/

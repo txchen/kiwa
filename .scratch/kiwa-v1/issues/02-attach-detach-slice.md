@@ -1,6 +1,6 @@
 # 02 One-pane attach and detach slice
 
-Status: claimed
+Status: resolved
 Blocked by: 01
 
 ## Scope
@@ -28,3 +28,7 @@ Blocked by: 01
 - With one quiet pane and an attached client, the server makes 0 epoll
   wakes in 10 s.
 - Resizing the client's PTY resizes the pane (`tput cols` matches).
+
+## Comments
+
+- 2026-10-05: Resolved by 4f3b487..ec53171. `zig build e2e`: 16/16 pass (8 acceptance cases plus 8 extra). Quiet 10 s with an attached client: 0 server context switches, 0 CPU ticks, 0 outer bytes. Known gaps: full redraw drops cursor shape and title; two clients racing to start a server make the loser fail; pane env comes from the first client; shutdown may block up to 1 s on the final detach; client needs stdout to be a terminal.
