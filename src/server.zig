@@ -30,6 +30,12 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .input = 25 * std.time.ns_per_ms,
 });
 
+/// Asks for the kitty keyboard flags, then for DA1. Every terminal answers
+/// DA1, so a kitty reply ahead of it means the terminal speaks the protocol.
+const probe_seq = "\x1b[?u\x1b[c";
+/// Pushes the kitty "disambiguate escape codes" flag.
+const kitty_push_seq = "\x1b[>1u";
+
 const msg = struct {
     const detached = "detached";
     const elsewhere = "detached: attached elsewhere";
@@ -46,6 +52,8 @@ const Conn = struct {
     /// Decodes the outer terminal's input inside `input` messages.
     input: input.Decoder = .{},
     prefix: prefix.Prefix = .{},
+    /// The outer terminal's keyboard protocol, learned from the probe replies.
+    keyboard: enum { probing, legacy, kitty } = .probing,
     out: OutBuffer = .{},
     state: enum {
         open,
@@ -243,12 +251,14 @@ const Server = struct {
         s.client = c;
         c.size = sanitize(h.size);
         c.redraw_pending = true;
+        c.keyboard = if (try s.pushTerminal(c, probe_seq)) .probing else .legacy;
         if (s.pane) |p| {
             p.resize(c.size) catch |e| std.log.err("pane resize: {t}", .{e});
         } else {
             try s.spawnPane(c.size, h.cwd);
         }
-        try s.render();
+        // Sends the probes, then the first frame once they are out.
+        try s.flush(c);
     }
 
     fn spawnPane(s: *Server, size: protocol.Size, cwd: []const u8) !void {
@@ -274,15 +284,46 @@ const Server = struct {
     }
 
     fn drainInput(s: *Server, c: *Conn) !void {
-        while (try c.input.next(s.gpa)) |ev| switch (c.prefix.feed(ev)) {
-            .pane => |pane_ev| if (s.pane) |p| p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e}),
-            .action => |a| switch (a) {
-                .detach => return s.detach(c, msg.detached),
-            },
-            .none => {},
-        };
+        while (try c.input.next(s.gpa)) |ev| {
+            if (ev == .reply) {
+                try s.onReply(c, ev.reply);
+                continue;
+            }
+            switch (c.prefix.feed(ev)) {
+                .pane => |pane_ev| if (s.pane) |p| p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e}),
+                .action => |a| switch (a) {
+                    .detach => return s.detach(c, msg.detached),
+                },
+                .none => {},
+            }
+        }
         try s.setDeadline(.input, if (c.input.pending()) monotonicNs() + delay_ns.get(.input) else null);
         try s.syncPaneEvents();
+    }
+
+    fn onReply(s: *Server, c: *Conn, r: input.Reply) !void {
+        if (c.keyboard != .probing) return;
+        c.keyboard = switch (r) {
+            .kitty_flags => if (try s.pushTerminal(c, kitty_push_seq)) .kitty else .legacy,
+            .device_attributes => .legacy,
+            .mode => return,
+        };
+        std.log.info("outer terminal keyboard: {t}", .{c.keyboard});
+        try s.flush(c);
+    }
+
+    /// Queues bytes for the outer terminal outside the frame stream.
+    /// Returns false if they did not fit; the dropped frames then need a
+    /// full redraw.
+    fn pushTerminal(s: *Server, c: *Conn, bytes: []const u8) !bool {
+        c.out.push(s.gpa, .{ .output = bytes }) catch |e| switch (e) {
+            error.Overflow => {
+                c.redraw_pending = true;
+                return false;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return true;
     }
 
     fn markStale(s: *Server) !void {

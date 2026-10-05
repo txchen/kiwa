@@ -20,11 +20,15 @@ const Ctx = struct {
     outers: std.ArrayList(*Outer) = .empty,
 
     fn attach(ctx: *Ctx) !*Outer {
-        return ctx.attachSized(80, 24);
+        return ctx.attachWith(.{});
     }
 
     fn attachSized(ctx: *Ctx, cols: u16, rows: u16) !*Outer {
-        const o = try Outer.spawn(ctx, &.{ ctx.kiwa.ptr, null }, cols, rows);
+        return ctx.attachWith(.{ .cols = cols, .rows = rows });
+    }
+
+    fn attachWith(ctx: *Ctx, opts: Outer.Options) !*Outer {
+        const o = try Outer.spawn(ctx, &.{ ctx.kiwa.ptr, null }, opts);
         try ctx.outers.append(ctx.gpa, o);
         return o;
     }
@@ -83,21 +87,34 @@ const Ctx = struct {
     }
 };
 
+/// The modeled outer terminal. It answers queries through the client's
+/// PTY like a real terminal, and encodes keys, pastes, and focus changes
+/// from its current modes.
 const Outer = struct {
     gpa: std.mem.Allocator,
     master: sys.fd_t,
     pid: sys.pid_t,
     term: vt.Terminal,
     stream: vt.TerminalStream,
+    keyboard: Keyboard,
     eof: bool = false,
     status: ?u32 = null,
     capture: ?*std.ArrayList(u8) = null,
 
-    fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, cols: u16, rows: u16) !*Outer {
+    const Keyboard = enum { kitty, legacy };
+
+    const Options = struct {
+        cols: u16 = 80,
+        rows: u16 = 24,
+        /// A legacy terminal ignores the kitty keyboard query.
+        keyboard: Keyboard = .kitty,
+    };
+
+    fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, opts: Options) !*Outer {
         const o = try ctx.gpa.create(Outer);
         errdefer ctx.gpa.destroy(o);
         var master: c_int = -1;
-        const ws: sys.Winsize = .{ .col = cols, .row = rows, .xpixel = 0, .ypixel = 0 };
+        const ws: sys.Winsize = .{ .col = opts.cols, .row = opts.rows, .xpixel = 0, .ypixel = 0 };
         const pid = sys.forkpty(&master, null, null, &ws);
         if (pid < 0) return error.ForkPtyFailed;
         if (pid == 0) {
@@ -109,12 +126,67 @@ const Outer = struct {
             .gpa = ctx.gpa,
             .master = master,
             .pid = pid,
-            .term = try .init(ctx.io, ctx.gpa, .{ .cols = cols, .rows = rows }),
+            .term = try .init(ctx.io, ctx.gpa, .{ .cols = opts.cols, .rows = opts.rows }),
             .stream = undefined,
+            .keyboard = opts.keyboard,
         };
-        o.stream = o.term.vtStream();
+        var handler: vt.TerminalStream.Handler = .init(&o.term);
+        handler.effects.write_pty = &answer;
+        handler.effects.device_attributes = &deviceAttributes;
+        o.stream = .init(.{ .allocator = ctx.gpa, .handler = handler });
         try sys.setCloexec(master, true);
         return o;
+    }
+
+    fn answer(h: *vt.TerminalStream.Handler, data: []const u8) void {
+        const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+        const o: *Outer = @fieldParentPtr("stream", stream);
+        const kitty_flags = std.mem.startsWith(u8, data, "\x1b[?") and std.mem.endsWith(u8, data, "u");
+        if (o.keyboard == .legacy and kitty_flags) return;
+        sys.writeAll(o.master, data) catch |e| std.debug.print("    outer reply failed: {t}\n", .{e});
+    }
+
+    fn deviceAttributes(_: *vt.TerminalStream.Handler) vt.device_attributes.Attributes {
+        return .{};
+    }
+
+    /// The kitty keyboard flags on the alternate screen, where Kiwa runs.
+    fn kittyFlags(o: *Outer) u5 {
+        const alt = o.term.screens.get(.alternate) orelse return 0;
+        return alt.kitty_keyboard.current().int();
+    }
+
+    /// Waits until the server has pushed kitty flags, so that keys after
+    /// this use the kitty encoding.
+    fn waitKitty(o: *Outer) !void {
+        const deadline = now() + 5 * std.time.ns_per_s;
+        while (o.kittyFlags() == 0) {
+            const left = deadline -| now();
+            if (left == 0 or o.eof) return error.KittyFlagsNotPushed;
+            if (try o.pollOnce(left)) _ = try o.readOnce();
+        }
+    }
+
+    fn press(o: *Outer, ev: vt.input.KeyEvent) !void {
+        var buf: [64]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try vt.input.encodeKey(&w, ev, .fromTerminal(&o.term));
+        try o.send(w.buffered());
+    }
+
+    fn paste(o: *Outer, text: []const u8) !void {
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try vt.input.encodePasteWriter(&w, text, .fromTerminal(&o.term));
+        try o.send(w.buffered());
+    }
+
+    fn focus(o: *Outer, ev: vt.input.FocusEvent) !void {
+        if (!o.term.modes.get(.focus_event)) return error.FocusReportingOff;
+        var buf: [vt.input.max_focus_encode_size]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try vt.input.encodeFocus(&w, ev);
+        try o.send(w.buffered());
     }
 
     fn destroy(o: *Outer) void {
@@ -250,6 +322,30 @@ fn sleepMs(ms: u64) void {
     _ = linux.nanosleep(&ts, null);
 }
 
+const Mods = vt.input.KeyMods;
+
+fn named(k: vt.input.Key, mods: Mods) vt.input.KeyEvent {
+    return .{ .key = k, .mods = mods };
+}
+
+/// An ASCII key as a US keyboard types it.
+fn char(comptime c: u8, mods: Mods) vt.input.KeyEvent {
+    const lower = comptime std.ascii.toLower(c);
+    var ev: vt.input.KeyEvent = .{
+        .key = comptime vt.input.Key.fromASCII(lower).?,
+        .mods = mods,
+        .utf8 = &[_]u8{c},
+        .unshifted_codepoint = lower,
+    };
+    if (c != lower) {
+        ev.mods.shift = true;
+        ev.consumed_mods.shift = true;
+    }
+    return ev;
+}
+
+const ctrl: Mods = .{ .ctrl = true };
+
 fn expect(ok: bool, what: []const u8) !void {
     if (!ok) {
         std.debug.print("    expected: {s}\n", .{what});
@@ -272,7 +368,12 @@ fn echoHello(ctx: *Ctx) !void {
 fn detachRestoresTerminal(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try expect(o.term.screens.active_key == .alternate, "the client uses the alternate screen");
-    try o.send("\x02q");
+    try expect(o.term.modes.get(.bracketed_paste), "bracketed paste is on");
+    try expect(o.term.modes.get(.focus_event), "focus events are on");
+    try o.waitKitty();
+    try expect(o.kittyFlags() == 1, "the server pushed the disambiguate flag");
+    try o.press(char('b', ctrl));
+    try o.press(char('q', .{}));
     try expect(try o.waitExit() == 0, "the client exits 0 after ctrl+b q");
     try expect(try o.hasLine("detached"), "the client prints \"detached\"");
     var t: linux.termios = undefined;
@@ -282,6 +383,36 @@ fn detachRestoresTerminal(ctx: *Ctx) !void {
     try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
     try expect(o.term.modes.get(.cursor_visible), "the cursor is visible");
     try expect(!o.term.modes.get(.synchronized_output), "synchronized output is off");
+    try expect(o.kittyFlags() == 0, "the kitty flags are popped");
+    try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
+    try expect(!o.term.modes.get(.focus_event), "focus events are off");
+}
+
+fn legacyKeyboardGetsNoKittyFlags(ctx: *Ctx) !void {
+    const o = try ctx.attachWith(.{ .keyboard = .legacy });
+    try o.waitLine("$");
+    _ = try o.pump(300);
+    try expect(o.kittyFlags() == 0, "no kitty flags were pushed");
+    try o.send("echo plain\r");
+    try o.waitLine("plain");
+    try o.send("\x02q");
+    try expect(try o.waitExit() == 0, "the client exits 0 after ctrl+b q");
+    try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
+    try expect(!o.term.modes.get(.focus_event), "focus events are off");
+}
+
+fn probeRepliesStayOutOfPanes(ctx: *Ctx) !void {
+    const a = try ctx.attachWith(.{ .keyboard = .legacy });
+    try a.waitLine("$");
+    try a.send("cat -v\r");
+    try a.waitLine("$ cat -v");
+    const b = try ctx.attach();
+    try b.waitKitty();
+    try b.send("x\r");
+    try b.waitLine("x");
+    try expect(!try b.contains("[?"), "no probe reply reached the pane");
+    try b.press(char('c', ctrl));
+    try b.waitLine("$");
 }
 
 fn paneRunsWhileDetached(ctx: *Ctx) !void {
@@ -413,7 +544,8 @@ fn fullScreenPrograms(ctx: *Ctx) !void {
 }
 
 fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
+    const o = try ctx.attachWith(.{ .keyboard = .legacy });
+    try o.waitLine("$");
     try o.send("vim -u NONE -N -c 'set showmode' notes\r");
     try o.waitText("notes");
     try o.send("iabc");
@@ -529,7 +661,9 @@ fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
 
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
-    .{ .name = "ctrl+b q restores the outer terminal", .run = detachRestoresTerminal },
+    .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
+    .{ .name = "a terminal without the kitty protocol gets no kitty flags", .run = legacyKeyboardGetsNoKittyFlags },
+    .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },
     .{ .name = "quiet server makes no wakes", .run = quietServer },
     .{ .name = "resize reaches the pane", .run = resizeReachesPane },
