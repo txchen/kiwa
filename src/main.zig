@@ -57,4 +57,5 @@ test {
     _ = @import("layout.zig");
     _ = @import("session.zig");
     _ = @import("pane.zig");
+    _ = @import("text_field.zig");
 }
