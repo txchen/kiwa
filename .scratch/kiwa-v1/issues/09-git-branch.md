@@ -1,6 +1,6 @@
 # 09 Git branch in the sidebar
 
-Status: open
+Status: claimed
 Blocked by: 06
 
 ## Scope

@@ -1,7 +1,7 @@
 # 10 Session save and restore
 
-Status: open
-Blocked by: 08
+Status: claimed
+Blocked by: 06
 
 ## Scope
 
