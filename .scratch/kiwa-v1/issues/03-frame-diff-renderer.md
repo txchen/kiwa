@@ -1,6 +1,6 @@
 # 03 Frame composer, differ, and first benchmark
 
-Status: claimed
+Status: resolved
 Blocked by: 02
 
 ## Scope
@@ -54,3 +54,9 @@ Blocked by: 02
   about 3.1 KB per line, because it never scrolls the outer terminal; tmux
   scrolls and sends about 106 bytes per line. A scroll-region path is the
   largest remaining byte gap.
+- 2026-10-05 (review): Rerun on master reproduced the table exactly for bytes
+  and within one tick for CPU. `zig build test` 33/33, `zig build e2e` 17/17.
+  For scale, the Herdr reassessment measured 21.7% for the spinner and 14% for
+  30 lines/s on the same machine. The remaining gaps to tmux move to ticket 12.
+  The agent left a stale `kb-chk-2049972` tmux socket file outside the
+  `kiwa-bench-*` naming rule; no server was alive on it, and it was removed.
