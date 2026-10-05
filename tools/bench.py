@@ -187,9 +187,16 @@ class Kiwa:
         self.env["KIWA_SOCKET"] = os.path.join(work, "kiwa.sock")
         self.env["KIWA_STATE_DIR"] = os.path.join(work, "state")
         self.work = work
+        self.server = None
         self.outer = Outer([binary], self.env, work, margins)
-        self.outer.wait_for(b"$")
-        self.server = self.find_server()
+        # On failure the caller deletes the work directory and the socket
+        # in it, so the server must stop here.
+        try:
+            self.outer.wait_for(b"$")
+            self.server = self.find_server()
+        except BaseException:
+            self.stop()
+            raise
 
     def find_server(self):
         want = f"KIWA_SOCKET={self.env['KIWA_SOCKET']}\0".encode()
@@ -216,6 +223,8 @@ class Kiwa:
         subprocess.run([self.binary, "kill-server"], env=self.env, timeout=10,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.outer.close()
+        if self.server is None:
+            return
         for _ in range(100):
             if not os.path.exists(f"/proc/{self.server}"):
                 return
