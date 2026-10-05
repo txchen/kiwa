@@ -4,6 +4,7 @@ const sys = @import("sys.zig");
 const protocol = @import("protocol.zig");
 const input = @import("input.zig");
 const encode = @import("encode.zig");
+const PaneId = @import("layout.zig").PaneId;
 
 const linux = std.os.linux;
 const Handler = vt.TerminalStream.Handler;
@@ -15,6 +16,7 @@ const read_budget = 256 * 1024;
 
 pub const Pane = struct {
     gpa: std.mem.Allocator,
+    id: PaneId,
     fd: sys.fd_t,
     pid: sys.pid_t,
     terminal: vt.Terminal,
@@ -23,8 +25,13 @@ pub const Pane = struct {
     render: vt.RenderState = .empty,
     /// Input and terminal replies the PTY has not accepted yet.
     pending: std.ArrayList(u8) = .empty,
+    /// Epoll interest for the PTY. Null once the PTY hung up.
+    events: ?u32 = null,
+    /// Set when output rang the bell; `drain` reports and clears it.
+    rang: bool = false,
 
     pub const SpawnOptions = struct {
+        id: PaneId,
         size: protocol.Size,
         shell: [:0]const u8,
         cwd: [:0]const u8,
@@ -36,6 +43,7 @@ pub const Pane = struct {
         errdefer gpa.destroy(p);
         p.* = .{
             .gpa = gpa,
+            .id = opts.id,
             .fd = -1,
             .pid = -1,
             .terminal = try .init(io, gpa, .{
@@ -51,6 +59,7 @@ pub const Pane = struct {
         var handler: Handler = .init(&p.terminal);
         handler.effects.write_pty = &writePty;
         handler.effects.device_attributes = &deviceAttributes;
+        handler.effects.bell = &bell;
         p.stream = .init(.{ .allocator = gpa, .handler = handler });
         errdefer p.stream.deinit();
 
@@ -82,22 +91,35 @@ pub const Pane = struct {
         self.gpa.destroy(self);
     }
 
-    pub const Drain = struct { bytes: usize, closed: bool };
+    pub const Drain = struct { bytes: usize, closed: bool, bell: bool };
 
     /// Reads and parses PTY output up to the per-wake budget.
     pub fn drain(self: *Pane) Drain {
         var buf: [64 * 1024]u8 = undefined;
         var total: usize = 0;
-        while (total < read_budget) {
-            const n = sys.read(self.fd, &buf) catch |e| return .{
-                .bytes = total,
-                .closed = e != error.WouldBlock,
-            };
-            if (n == 0) return .{ .bytes = total, .closed = true };
+        const closed = while (total < read_budget) {
+            const n = sys.read(self.fd, &buf) catch |e| break e != error.WouldBlock;
+            if (n == 0) break true;
             self.stream.nextSlice(buf[0..n]);
             total += n;
-        }
-        return .{ .bytes = total, .closed = false };
+        } else false;
+        defer self.rang = false;
+        return .{ .bytes = total, .closed = closed, .bell = self.rang };
+    }
+
+    /// The directory the shell last reported with OSC 7, or else the
+    /// child's current directory, read once now. Null when neither is known.
+    pub fn cwd(self: *const Pane, buf: *[linux.PATH_MAX]u8) ?[]const u8 {
+        if (self.terminal.getPwd()) |url| if (pwdPath(url, buf)) |path| return path;
+        var proc_buf: [32]u8 = undefined;
+        const proc = std.fmt.bufPrintZ(&proc_buf, "/proc/{d}/cwd", .{self.pid}) catch return null;
+        const n = sys.check(linux.readlink(proc, buf, buf.len)) catch return null;
+        return buf[0..n];
+    }
+
+    /// Hangs up the child's process group.
+    pub fn hangup(self: *const Pane) void {
+        _ = linux.kill(-self.pid, .HUP);
     }
 
     /// Writes to the PTY without blocking and queues what it does not accept.
@@ -149,4 +171,46 @@ fn writePty(h: *Handler, data: []const u8) void {
 
 fn deviceAttributes(_: *Handler) vt.device_attributes.Attributes {
     return .{};
+}
+
+fn bell(h: *Handler) void {
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+    const p: *Pane = @fieldParentPtr("stream", stream);
+    p.rang = true;
+}
+
+/// The path in an OSC 7 report, `file://host/path` with percent escapes,
+/// decoded into `buf`. A bare absolute path is taken as is.
+fn pwdPath(url: []const u8, buf: []u8) ?[]const u8 {
+    const path = if (std.mem.startsWith(u8, url, "file://")) blk: {
+        const rest = url["file://".len..];
+        break :blk rest[std.mem.indexOfScalar(u8, rest, '/') orelse return null ..];
+    } else url;
+    if (path.len == 0 or path[0] != '/') return null;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < path.len) : (n += 1) {
+        if (n == buf.len) return null;
+        if (path[i] == '%' and i + 2 < path.len) {
+            if (std.fmt.parseInt(u8, path[i + 1 ..][0..2], 16)) |b| {
+                buf[n] = b;
+                i += 3;
+                continue;
+            } else |_| {}
+        }
+        buf[n] = path[i];
+        i += 1;
+    }
+    return buf[0..n];
+}
+
+test "OSC 7 paths are taken from file URLs and percent-decoded" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/home/u/my dir", pwdPath("file://host/home/u/my%20dir", &buf).?);
+    try std.testing.expectEqualStrings("/tmp", pwdPath("file:///tmp", &buf).?);
+    try std.testing.expectEqualStrings("/a/%zz/%", pwdPath("/a/%zz/%", &buf).?);
+    try std.testing.expectEqual(null, pwdPath("file://host", &buf));
+    try std.testing.expectEqual(null, pwdPath("kitty-shell-cwd://host/x", &buf));
+    var tiny: [3]u8 = undefined;
+    try std.testing.expectEqual(null, pwdPath("/abcd", &tiny));
 }

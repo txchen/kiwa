@@ -6,8 +6,15 @@ const input = @import("input.zig");
 const prefix = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
+const session_mod = @import("session.zig");
 const Pane = @import("pane.zig").Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
+const vt = @import("ghostty-vt");
+
+const Session = session_mod.Session;
+const PaneId = session_mod.PaneId;
+const Placement = session_mod.Placement;
+const Rect = frame_mod.Rect;
 
 const linux = std.os.linux;
 const EPOLL = linux.EPOLL;
@@ -35,6 +42,9 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
 const probe_seq = "\x1b[?u\x1b[c";
 /// Pushes the kitty "disambiguate escape codes" flag.
 const kitty_push_seq = "\x1b[>1u";
+
+const border_style: vt.Style = .{ .fg_color = .{ .palette = 8 } };
+const focused_border_style: vt.Style = .{ .fg_color = .{ .palette = 6 } };
 
 const msg = struct {
     const detached = "detached";
@@ -73,8 +83,18 @@ const Conn = struct {
     /// What the outer terminal shows; meaningful only without `redraw_pending`.
     last_frame: frame_mod.Frame = .{},
     graphemes: frame_mod.Graphemes = .{},
+    /// The panes `frame` holds and where. A pane drawn at the same place
+    /// again copies only its dirty rows.
+    drawn: std.ArrayList(Placement) = .empty,
+    drawn_focus: ?PaneId = null,
+
+    fn drewAt(c: *const Conn, p: Placement) bool {
+        for (c.drawn.items) |d| if (std.meta.eql(d, p)) return true;
+        return false;
+    }
 
     fn deinit(c: *Conn, gpa: std.mem.Allocator) void {
+        c.drawn.deinit(gpa);
         c.decoder.deinit(gpa);
         c.input.deinit(gpa);
         c.out.deinit(gpa);
@@ -96,9 +116,14 @@ const Server = struct {
     timerfd: sys.fd_t,
     /// Monotonic nanoseconds; null when not armed.
     deadlines: std.EnumArray(Deadline, ?u64) = .initFill(null),
-    pane: ?*Pane = null,
-    /// Epoll interest for the PTY. Null once the PTY hung up.
-    pane_events: ?u32 = null,
+    session: Session,
+    panes: std.AutoHashMapUnmanaged(PaneId, *Pane) = .empty,
+    pane_fds: std.AutoHashMapUnmanaged(sys.fd_t, *Pane) = .empty,
+    /// The last client's size; panes are laid out for it, attached or not.
+    size: ?protocol.Size = null,
+    /// The visible panes and their rects, as `relayout` last computed them.
+    view: std.ArrayList(Placement) = .empty,
+    closed: std.ArrayList(PaneId) = .empty,
     conns: std.ArrayList(*Conn) = .empty,
     client: ?*Conn = null,
     scratch: std.ArrayList(u8) = .empty,
@@ -117,8 +142,8 @@ const Server = struct {
                     try s.onSignals();
                 } else if (fd == s.timerfd) {
                     try s.onTimer();
-                } else if (s.pane != null and fd == s.pane.?.fd) {
-                    try s.onPane(ev.events);
+                } else if (s.pane_fds.get(fd)) |p| {
+                    try s.onPane(p, ev.events);
                 } else if (s.findConn(fd)) |c| {
                     try s.onConn(c, ev.events);
                 }
@@ -168,40 +193,64 @@ const Server = struct {
         if (seen.has(.TERM) or seen.has(.HUP) or seen.has(.INT)) {
             s.exit = .{ .reason = msg.server_exited, .hangup_child = true };
         }
-        if (seen.has(.CHLD)) {
-            const p = s.pane orelse return;
+        if (seen.has(.CHLD)) try s.reapChildren();
+    }
+
+    /// Reaps every exited child. A pane whose child exited closes; a child
+    /// of a pane closed earlier is only reaped.
+    fn reapChildren(s: *Server) !void {
+        while (true) {
             var status: u32 = 0;
-            const rc = linux.waitpid(p.pid, &status, linux.W.NOHANG);
-            if (linux.errno(rc) == .SUCCESS and rc == @as(usize, @intCast(p.pid))) {
-                _ = p.drain();
-                s.exit = .{ .reason = msg.exited, .hangup_child = false };
-            }
+            const rc = linux.waitpid(-1, &status, linux.W.NOHANG);
+            if (linux.errno(rc) != .SUCCESS or rc == 0) return;
+            const pid: sys.pid_t = @intCast(rc);
+            var it = s.panes.valueIterator();
+            const p = while (it.next()) |p| {
+                if (p.*.pid == pid) break p.*;
+            } else continue;
+            _ = p.drain();
+            const id = p.id;
+            s.destroyPane(p);
+            try s.closePanes(&.{}, s.session.closePane(id));
+            if (s.exit != null) return;
         }
     }
 
-    fn onPane(s: *Server, events: u32) !void {
-        const p = s.pane.?;
+    fn onPane(s: *Server, p: *Pane, events: u32) !void {
         if (events & EPOLL.OUT != 0) p.flushPending() catch |e| std.log.err("pane write: {t}", .{e});
         if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) != 0) {
             const d = p.drain();
-            if (d.bytes > 0) try s.markStale();
+            if (d.bytes > 0) {
+                // Output in a hidden pane changes nothing on screen, except
+                // the first time it marks its workspace.
+                if (s.isVisible(p.id) or s.session.noteOutput(p.id, d.bell)) try s.markStale();
+            }
             // The child exit arrives as SIGCHLD; stop polling a hung-up PTY until then.
             if (d.closed) {
                 sys.epollCtl(s.ep, EPOLL.CTL_DEL, p.fd, 0) catch {};
-                s.pane_events = null;
+                p.events = null;
                 return;
             }
         }
-        try s.syncPaneEvents();
+        try s.syncPaneEvents(p);
     }
 
-    fn syncPaneEvents(s: *Server) !void {
-        const p = s.pane orelse return;
-        const current = s.pane_events orelse return;
+    fn syncPaneEvents(s: *Server, p: *Pane) !void {
+        const current = p.events orelse return;
         const want: u32 = EPOLL.IN | @as(u32, if (p.pending.items.len > 0) EPOLL.OUT else 0);
         if (want == current) return;
         try sys.epollCtl(s.ep, EPOLL.CTL_MOD, p.fd, want);
-        s.pane_events = want;
+        p.events = want;
+    }
+
+    fn isVisible(s: *const Server, pane: PaneId) bool {
+        for (s.view.items) |pl| if (pl.pane == pane) return true;
+        return false;
+    }
+
+    fn focusedPane(s: *const Server) ?*Pane {
+        if (s.session.isEmpty()) return null;
+        return s.panes.get(s.session.focused());
     }
 
     fn onConn(s: *Server, c: *Conn, events: u32) !void {
@@ -237,7 +286,8 @@ const Server = struct {
             .resize => |size| {
                 if (s.client != c) return;
                 c.size = sanitize(size);
-                if (s.pane) |p| p.resize(c.size) catch |e| std.log.err("pane resize: {t}", .{e});
+                s.size = c.size;
+                try s.relayout();
                 try s.render();
             },
             .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
@@ -252,16 +302,76 @@ const Server = struct {
         c.size = sanitize(h.size);
         c.redraw_pending = true;
         c.keyboard = if (try s.pushTerminal(c, probe_seq)) .probing else .legacy;
-        if (s.pane) |p| {
-            p.resize(c.size) catch |e| std.log.err("pane resize: {t}", .{e});
+        s.size = c.size;
+        if (s.session.isEmpty()) {
+            try s.openPane(try s.session.newWorkspace(h.cwd), h.cwd);
+            if (s.exit != null) return;
         } else {
-            try s.spawnPane(c.size, h.cwd);
+            try s.relayout();
         }
         // Sends the probes, then the first frame once they are out.
         try s.flush(c);
     }
 
-    fn spawnPane(s: *Server, size: protocol.Size, cwd: []const u8) !void {
+    /// The area the current tab owns in a frame of `size`.
+    fn tabArea(size: protocol.Size) Rect {
+        return .{ .cols = size.cols, .rows = size.rows };
+    }
+
+    /// Lays out the current tab for the last client size and resizes its
+    /// panes to fit. Hidden panes keep their size until they show.
+    fn relayout(s: *Server) !void {
+        s.view.clearRetainingCapacity();
+        const size = s.size orelse return;
+        if (s.session.isEmpty()) return;
+        try s.session.view(tabArea(size), &s.view);
+        for (s.view.items) |pl| {
+            const p = s.panes.get(pl.pane) orelse continue;
+            p.resize(paneSize(pl.inner)) catch |e| std.log.err("pane resize: {t}", .{e});
+        }
+    }
+
+    fn paneSize(r: Rect) protocol.Size {
+        return .{ .cols = @max(r.cols, 1), .rows = @max(r.rows, 1) };
+    }
+
+    /// Starts the child for a pane the session just created. If it cannot
+    /// start, the pane closes again as if its child had exited.
+    fn openPane(s: *Server, id: PaneId, cwd: []const u8) !void {
+        try s.relayout();
+        const size = for (s.view.items) |pl| {
+            if (pl.pane == id) break paneSize(pl.inner);
+        } else s.size orelse protocol.Size{ .cols = 80, .rows = 24 };
+        s.spawnPane(id, size, cwd) catch |e| {
+            std.log.err("pane start: {t}", .{e});
+            return s.closePanes(&.{}, s.session.closePane(id));
+        };
+        try s.markStale();
+    }
+
+    /// Stops the panes a session close removed, then shows what is left.
+    /// When the session is empty, the server exits.
+    fn closePanes(s: *Server, ids: []const PaneId, closed: session_mod.Closed) !void {
+        for (ids) |id| {
+            const p = s.panes.get(id) orelse continue;
+            p.hangup();
+            s.destroyPane(p);
+        }
+        if (closed == .session) {
+            s.exit = .{ .reason = msg.exited, .hangup_child = false };
+            return;
+        }
+        try s.relayout();
+        try s.markStale();
+    }
+
+    fn destroyPane(s: *Server, p: *Pane) void {
+        _ = s.panes.remove(p.id);
+        _ = s.pane_fds.remove(p.fd);
+        p.destroy();
+    }
+
+    fn spawnPane(s: *Server, id: PaneId, size: protocol.Size, cwd: []const u8) !void {
         var env = try s.env.clone(s.gpa);
         defer env.deinit();
         try env.put("TERM", "xterm-256color");
@@ -277,10 +387,17 @@ const Server = struct {
         const cwd_z = try s.gpa.dupeZ(u8, cwd);
         defer s.gpa.free(cwd_z);
 
-        const p = try Pane.spawn(s.gpa, s.io, .{ .size = size, .shell = shell, .cwd = cwd_z, .env = block.slice });
-        s.pane = p;
+        try s.panes.ensureUnusedCapacity(s.gpa, 1);
+        try s.pane_fds.ensureUnusedCapacity(s.gpa, 1);
+        const p = try Pane.spawn(s.gpa, s.io, .{ .id = id, .size = size, .shell = shell, .cwd = cwd_z, .env = block.slice });
+        errdefer {
+            p.hangup();
+            p.destroy();
+        }
         try sys.epollCtl(s.ep, EPOLL.CTL_ADD, p.fd, EPOLL.IN);
-        s.pane_events = EPOLL.IN;
+        p.events = EPOLL.IN;
+        s.panes.putAssumeCapacity(id, p);
+        s.pane_fds.putAssumeCapacity(p.fd, p);
     }
 
     fn drainInput(s: *Server, c: *Conn) !void {
@@ -290,15 +407,69 @@ const Server = struct {
                 continue;
             }
             switch (c.prefix.feed(ev)) {
-                .pane => |pane_ev| if (s.pane) |p| p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e}),
-                .action => |a| switch (a) {
-                    .detach => return s.detach(c, msg.detached),
+                .pane => |pane_ev| if (s.focusedPane()) |p| {
+                    p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e});
+                    try s.syncPaneEvents(p);
+                },
+                .action => |a| {
+                    if (a == .detach) return s.detach(c, msg.detached);
+                    try s.act(c, a);
+                    if (s.exit != null) return;
                 },
                 .none => {},
             }
         }
         try s.setDeadline(.input, if (c.input.pending()) monotonicNs() + delay_ns.get(.input) else null);
-        try s.syncPaneEvents();
+    }
+
+    fn act(s: *Server, c: *Conn, a: prefix.Action) !void {
+        const area = tabArea(c.size);
+        var cwd_buf: [linux.PATH_MAX]u8 = undefined;
+        const ss = &s.session;
+        const changed = switch (a) {
+            .detach => unreachable,
+            .new_tab => {
+                const cwd = s.focusedCwd(&cwd_buf);
+                return s.openPane(try ss.newTab(), cwd);
+            },
+            .new_workspace => {
+                const cwd = s.focusedCwd(&cwd_buf);
+                return s.openPane(try ss.newWorkspace(cwd), cwd);
+            },
+            .split => |axis| {
+                const cwd = s.focusedCwd(&cwd_buf);
+                const id = ss.split(area, axis) catch |e| switch (e) {
+                    error.TooSmall => return,
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                return s.openPane(id, cwd);
+            },
+            .close_pane => {
+                const id = ss.focused();
+                return s.closePanes(&.{id}, ss.closePane(id));
+            },
+            .close_tab, .close_workspace => {
+                s.closed.clearRetainingCapacity();
+                const closed = try if (a == .close_tab) ss.closeTab(&s.closed) else ss.closeWorkspace(&s.closed);
+                return s.closePanes(s.closed.items, closed);
+            },
+            .focus => |dir| try ss.focus(area, dir),
+            .resize => |dir| ss.resize(area, dir),
+            .zoom => ss.toggleZoom(),
+            .next_tab => ss.cycleTab(.next),
+            .prev_tab => ss.cycleTab(.prev),
+            .tab => |i| ss.selectTab(i),
+            .workspace => |i| ss.selectWorkspace(i),
+        };
+        if (!changed) return;
+        try s.relayout();
+        try s.markStale();
+    }
+
+    /// Where a new pane starts: the focused pane's directory.
+    fn focusedCwd(s: *const Server, buf: *[linux.PATH_MAX]u8) []const u8 {
+        const p = s.focusedPane() orelse return "/";
+        return p.cwd(buf) orelse "/";
     }
 
     fn onReply(s: *Server, c: *Conn, r: input.Reply) !void {
@@ -367,9 +538,8 @@ const Server = struct {
 
     fn render(s: *Server) Error!void {
         const c = s.client orelse return;
-        const p = s.pane orelse return;
+        if (s.session.isEmpty()) return;
         if (c.redraw_pending and !c.out.isEmpty()) return;
-        try p.render.update(s.gpa, &p.terminal);
 
         var compose_all = false;
         if (c.frame.cols != c.size.cols or c.frame.rows != c.size.rows) {
@@ -383,9 +553,7 @@ const Server = struct {
             compose_all = true;
             c.redraw_pending = true;
         }
-        const rect: frame_mod.Rect = .{ .cols = c.size.cols, .rows = c.size.rows };
-        try c.frame.composePane(s.gpa, &c.graphemes, rect, &p.render, compose_all);
-        c.frame.cursor = frame_mod.paneCursor(rect, &p.render, p.terminal.cursor.is_default);
+        try s.compose(c, compose_all);
 
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
@@ -408,6 +576,30 @@ const Server = struct {
         c.last_frame.copyFrom(&c.frame);
         c.redraw_pending = false;
         try s.flush(c);
+    }
+
+    /// Brings `c.frame` up to date with the visible panes. Panes copy only
+    /// their dirty rows unless they moved; borders redraw when anything moved
+    /// or focus changed. The boxes tile the tab area, so nothing stale is left.
+    fn compose(s: *Server, c: *Conn, all: bool) !void {
+        const focus = s.session.focused();
+        var moved = all or c.drawn.items.len != s.view.items.len;
+        c.frame.cursor = .{ .visible = false };
+        for (s.view.items) |pl| {
+            const p = s.panes.get(pl.pane) orelse continue;
+            const same = !all and c.drewAt(pl);
+            if (!same) moved = true;
+            try p.render.update(s.gpa, &p.terminal);
+            try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, !same);
+            if (pl.pane == focus) c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
+        }
+        if (moved or c.drawn_focus != focus) for (s.view.items) |pl| {
+            if (std.meta.eql(pl.box, pl.inner)) continue;
+            c.frame.drawBox(pl.box, if (pl.pane == focus) focused_border_style else border_style);
+        };
+        c.drawn.clearRetainingCapacity();
+        try c.drawn.appendSlice(s.gpa, s.view.items);
+        c.drawn_focus = focus;
     }
 
     /// Writes what the socket accepts and keeps EPOLLOUT armed only while
@@ -450,9 +642,8 @@ const Server = struct {
     /// most a second for it to read the message.
     fn shutdown(s: *Server, e: Exit) void {
         _ = linux.unlink(s.paths.socket);
-        if (s.pane) |p| if (e.hangup_child) {
-            _ = linux.kill(p.pid, .HUP);
-        };
+        var it = s.panes.valueIterator();
+        while (it.next()) |p| if (e.hangup_child) p.*.hangup();
         if (s.client) |c| {
             c.out.dropQueued();
             if (c.out.push(s.gpa, .{ .detach = e.reason })) {
@@ -465,7 +656,13 @@ const Server = struct {
         for (s.conns.items) |c| s.dropConn(c);
         s.freeDeadConns();
         s.conns.deinit(s.gpa);
-        if (s.pane) |p| p.destroy();
+        it = s.panes.valueIterator();
+        while (it.next()) |p| p.*.destroy();
+        s.panes.deinit(s.gpa);
+        s.pane_fds.deinit(s.gpa);
+        s.view.deinit(s.gpa);
+        s.closed.deinit(s.gpa);
+        s.session.deinit();
         s.scratch.deinit(s.gpa);
     }
 };
@@ -513,6 +710,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
         .listener = listener,
         .sigfd = sigfd,
         .timerfd = timerfd,
+        .session = .init(gpa, std.fs.path.basename(env.get("SHELL") orelse "/bin/sh")),
     };
     s.loop() catch |e| {
         std.log.err("server loop: {t}", .{e});

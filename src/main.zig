@@ -50,4 +50,5 @@ test {
     _ = @import("out_buffer.zig");
     _ = @import("layout.zig");
     _ = @import("session.zig");
+    _ = @import("pane.zig");
 }
