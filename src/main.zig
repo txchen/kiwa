@@ -59,4 +59,5 @@ test {
     _ = @import("pane.zig");
     _ = @import("text_field.zig");
     _ = @import("dialog.zig");
+    _ = @import("names.zig");
 }

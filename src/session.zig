@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const layout = @import("layout.zig");
+const names = @import("names.zig");
 
 pub const PaneId = layout.PaneId;
 pub const Rect = layout.Rect;
@@ -33,6 +34,8 @@ pub const Tab = struct {
     layout: layout.Layout,
     focused: PaneId,
     zoomed: bool = false,
+    /// When the dynamic name was last checked, and whether a check waits.
+    name_check: names.Limiter = .{},
 };
 
 pub const Workspace = struct {
@@ -127,6 +130,20 @@ pub const Session = struct {
     pub fn findWorkspace(s: *const Session, id: WorkspaceId) ?*Workspace {
         for (s.workspaces.items) |ws| if (ws.id == id) return ws;
         return null;
+    }
+
+    /// The tab whose layout holds `pane`.
+    pub fn tabOf(s: *const Session, pane: PaneId) ?*Tab {
+        for (s.workspaces.items) |ws| for (ws.tabs.items) |t| {
+            if (t.layout.contains(pane)) return t;
+        };
+        return null;
+    }
+
+    /// Whether the tab row shows `t`: it belongs to the active workspace.
+    pub fn showsTab(s: *const Session, t: *const Tab) bool {
+        for (s.activeWorkspace().tabs.items) |x| if (x.id == t.id) return true;
+        return false;
     }
 
     pub fn findTab(s: *const Session, id: TabId) ?*Tab {

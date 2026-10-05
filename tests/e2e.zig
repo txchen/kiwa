@@ -537,7 +537,8 @@ fn paneRunsWhileDetached(ctx: *Ctx) !void {
 
 fn quietServer(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    _ = try o.pump(500);
+    // Past the prompt's last dynamic-name check, one interval after it.
+    _ = try o.pump(1200);
     const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
     const before = try sample(ctx, pid);
     const bytes = try o.pump(10_000);
@@ -1386,6 +1387,14 @@ fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
         try o.send(try std.fmt.bufPrint(&cmd, "clear; i=0; while :; do echo {d}:$i; i=$((i+1)); sleep 0.033; done\r", .{i}));
     }
     try o.waitFor("every producer", Ahead{ .base = @splat(0), .by = 5 }, producersAhead);
+    // The loops' foreground flips between the shell and `sleep`; a fixed
+    // name keeps that out of the tab row.
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try o.press(char('u', ctrl));
+    try o.send("producers");
+    try o.press(named(.enter, .{}));
+    try o.waitText(" 2 producers ");
     const before = try producerCounts(o);
     try prefixed(o, "1");
     try o.waitLine("$");
@@ -1771,7 +1780,7 @@ fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
     try o.click(10, 1);
     try waitHighlighted(o, 1);
     const name = caseName(ctx);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: python3, 1 pane (active)\n", .{ name, name });
     try o.click(10, 2);
     try waitHighlighted(o, 2);
     try o.send("z");
@@ -1881,6 +1890,24 @@ fn renameTabWithPrefix(ctx: *Ctx) !void {
     try o.waitText(" 1 editor ");
     try listWith(ctx, "1: {s} (active)\n  1: editor, 1 pane (active)\n", .{name});
     try waitCursor(o, area.x + 2, area.y);
+    try o.send("vim -u NONE -N\r");
+    try o.waitText("~");
+    _ = try o.pump(1200);
+    try expect(try o.contains(" 1 editor "), "a fixed name stays while vim runs");
+    // Renaming to empty shows the dynamic name at once.
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try o.press(char('u', ctrl));
+    try o.press(named(.enter, .{}));
+    try o.waitText(" 1 vim ");
+    try o.send(":q\r");
+    try o.waitText(" 1 sh ");
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try o.press(char('u', ctrl));
+    try typeText(o, "editor");
+    try o.press(named(.enter, .{}));
+    try o.waitText(" 1 editor ");
 
     try prefixed(o, "T");
     try o.waitText(" rename tab ");
@@ -1935,6 +1962,38 @@ fn renameWorkspaceFromItsMenu(ctx: *Ctx) !void {
     try o.press(char('u', ctrl));
     try o.press(named(.enter, .{}));
     try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+}
+
+fn dynamicNamesFollowTheForegroundCommand(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitText(" 1 sh ");
+    _ = try o.pump(700);
+    try o.send("vim -u NONE -N\r");
+    const start = now();
+    try o.waitText(" 1 vim ");
+    const took = (now() - start) / std.time.ns_per_ms;
+    std.debug.print("    vim showed in the tab row after {d} ms\n", .{took});
+    try expect(took <= 1000, "vim shows in the tab row within 1 s");
+    try o.send(":q\r");
+    try o.waitText(" 1 sh ");
+    _ = try o.pump(700);
+    try o.send("sleep 3\r");
+    try o.waitText(" 1 sleep ");
+    try o.waitText(" 1 sh ");
+}
+
+fn quietTabsAreNotChecked(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    try o.waitLine("$");
+    _ = try o.pump(1200);
+    const before = try ctx.counter("name_checks");
+    try expect(before > 0, "the new panes' prompts were checked");
+    _ = try o.pump(3000);
+    const after = try ctx.counter("name_checks");
+    std.debug.print("    name checks: {d} before, {d} after 3 quiet s\n", .{ before, after });
+    try expect(after == before, "quiet tabs trigger no name checks");
 }
 
 fn paneClipboardWritesReachTheOuterTerminal(ctx: *Ctx) !void {
@@ -2006,6 +2065,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a drag selects text and copies it with OSC 52", .run = dragSelectionCopies },
     .{ .name = "right-click menus split, zoom, and close, and esc closes them", .run = rightClickMenus },
     .{ .name = "a pane's OSC 52 clipboard write reaches the outer terminal", .run = paneClipboardWritesReachTheOuterTerminal },
+    .{ .name = "a dynamic tab name follows the foreground command", .run = dynamicNamesFollowTheForegroundCommand },
+    .{ .name = "quiet tabs trigger no name checks", .run = quietTabsAreNotChecked },
     .{ .name = "prefix shift+t renames the tab, esc and an outside click cancel, and an empty name restores it", .run = renameTabWithPrefix },
     .{ .name = "a workspace is renamed from its menu, to a Chinese name and back", .run = renameWorkspaceFromItsMenu },
 };

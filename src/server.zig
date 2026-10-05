@@ -7,6 +7,7 @@ const prefix = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const session_mod = @import("session.zig");
+const names = @import("names.zig");
 const chrome = @import("chrome.zig");
 const hit = @import("hit.zig");
 const mouse = @import("mouse.zig");
@@ -38,11 +39,14 @@ const Deadline = enum {
     /// After input that ends inside a sequence, such as a lone ESC that
     /// could start an escape sequence or an alt chord.
     input,
+    /// The earliest dynamic-name check that had to wait.
+    names,
 };
 
 const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .render = 8 * std.time.ns_per_ms,
     .input = 25 * std.time.ns_per_ms,
+    .names = names.interval_ns,
 });
 
 /// Asks for the kitty keyboard flags, then for DA1. Every terminal answers
@@ -255,7 +259,7 @@ const Server = struct {
             _ = p.drain();
             const id = p.id;
             s.destroyPane(p);
-            try s.closePanes(&.{}, s.session.closePane(id));
+            try s.closePaneById(id);
             if (s.exit != null) return;
         }
     }
@@ -269,6 +273,7 @@ const Server = struct {
                 // Output in a hidden pane changes nothing on screen, except
                 // the first time it marks its workspace.
                 if (s.isVisible(p.id) or s.session.noteOutput(p.id, d.bell)) try s.markStale();
+                if (s.session.tabOf(p.id)) |t| if (t.focused == p.id) try s.markName(t);
             }
             // The child exit arrives as SIGCHLD; stop polling a hung-up PTY until then.
             if (d.closed) {
@@ -422,7 +427,57 @@ const Server = struct {
             std.log.err("pane start: {t}", .{e});
             return s.closePanes(&.{}, s.session.closePane(id));
         };
+        if (s.session.tabOf(id)) |t| try s.markName(t);
         try s.markStale();
+    }
+
+    /// Closes one pane, whose program is stopped already or is stopped
+    /// here, and checks the name of the tab that keeps its sibling.
+    fn closePaneById(s: *Server, id: PaneId) !void {
+        const tab = s.session.tabOf(id).?.id;
+        if (s.panes.get(id)) |p| {
+            p.hangup();
+            s.destroyPane(p);
+        }
+        try s.closePanes(&.{}, s.session.closePane(id));
+        if (s.exit != null) return;
+        if (s.session.findTab(tab)) |t| try s.markName(t);
+    }
+
+    /// Marks a tab with a dynamic name for a check of its focused pane's
+    /// command, which the names deadline runs.
+    fn markName(s: *Server, t: *session_mod.Tab) !void {
+        if (t.name != .dynamic) return;
+        try s.armNames(t.name_check.mark(monotonicNs()));
+    }
+
+    fn armNames(s: *Server, due: u64) !void {
+        try s.setDeadline(.names, @min(due, s.deadlines.get(.names) orelse due));
+    }
+
+    /// Sets a dynamic tab name to its focused pane's foreground command,
+    /// or the shell's name when that cannot be read.
+    fn checkName(s: *Server, t: *session_mod.Tab, now: u64) !void {
+        if (t.name != .dynamic) {
+            t.name_check = .{};
+            return;
+        }
+        if (t.name_check.ran(now)) |due| try s.armNames(due);
+        s.stats.name_checks += 1;
+        var buf: pane_mod.Comm = undefined;
+        const p = s.panes.get(t.focused);
+        const name = (if (p) |pane| pane.foreground(&buf) else null) orelse s.session.tab_name;
+        if (try s.session.setDynamicName(t, name) and s.session.showsTab(t)) try s.markStale();
+    }
+
+    /// Runs every name check that is due. Each re-arms the deadline for
+    /// its follow-up, and the ones not due yet keep theirs.
+    fn checkDueNames(s: *Server) !void {
+        const now = monotonicNs();
+        for (s.session.workspaces.items) |ws| for (ws.tabs.items) |t| {
+            const due = t.name_check.due orelse continue;
+            if (due <= now) try s.checkName(t, now) else try s.armNames(due);
+        };
     }
 
     /// Stops the panes a session close removed, then shows what is left.
@@ -541,16 +596,17 @@ const Server = struct {
                 };
                 return s.openPane(id, cwd);
             },
-            .close_pane => {
-                const id = ss.focused();
-                return s.closePanes(&.{id}, ss.closePane(id));
-            },
+            .close_pane => return s.closePaneById(ss.focused()),
             .close_tab, .close_workspace => {
                 s.closed.clearRetainingCapacity();
                 const closed = try if (a == .close_tab) ss.closeTab(&s.closed) else ss.closeWorkspace(&s.closed);
                 return s.closePanes(s.closed.items, closed);
             },
-            .focus => |dir| try ss.focus(area, dir),
+            .focus => |dir| blk: {
+                if (!try ss.focus(area, dir)) break :blk false;
+                try s.markName(ss.activeTab());
+                break :blk true;
+            },
             .resize => |dir| ss.resize(area, dir),
             .zoom => ss.toggleZoom(),
             .next_tab => ss.cycleTab(.next),
@@ -605,7 +661,10 @@ const Server = struct {
         var buf: TextField.Utf8Buf = undefined;
         const text = r.field.utf8(&buf);
         switch (r.target) {
-            .tab => |id| if (s.session.findTab(id)) |t| try s.session.renameTab(t, text),
+            .tab => |id| if (s.session.findTab(id)) |t| {
+                try s.session.renameTab(t, text);
+                if (t.name == .dynamic) try s.checkName(t, monotonicNs());
+            },
             .workspace => |id| if (s.session.findWorkspace(id)) |ws| try s.session.renameWorkspace(ws, text),
         }
     }
@@ -668,7 +727,10 @@ const Server = struct {
             .new_tab => try s.act(c, .new_tab),
             .focus => |f| {
                 try s.clearSelection();
-                if (s.session.focusPane(f.pane)) try s.markStale();
+                if (s.session.focusPane(f.pane)) {
+                    try s.markName(s.session.activeTab());
+                    try s.markStale();
+                }
                 if (f.deliver) try s.deliverMouse(f.pane, ev);
             },
             .deliver => |pane| try s.deliverMouse(pane, ev),
@@ -862,6 +924,7 @@ const Server = struct {
                     c.input.expire();
                     try s.drainInput(c);
                 },
+                .names => try s.checkDueNames(),
             }
         }
     }

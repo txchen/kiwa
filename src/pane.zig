@@ -127,6 +127,27 @@ pub const Pane = struct {
         return buf[0..n];
     }
 
+    /// The PTY's foreground process group; null when it cannot be read.
+    pub fn foregroundGroup(self: *const Pane) ?sys.pid_t {
+        var pgrp: sys.pid_t = 0;
+        _ = sys.check(linux.ioctl(self.fd, linux.T.IOCGPGRP, @intFromPtr(&pgrp))) catch return null;
+        return if (pgrp > 0) pgrp else null;
+    }
+
+    /// The command of the PTY's foreground process group, such as `vim`
+    /// or the shell's own name. Null when it cannot be read.
+    pub fn foreground(self: *const Pane, buf: *Comm) ?[]const u8 {
+        return readComm(self.foregroundGroup() orelse return null, buf);
+    }
+
+    /// The command in the foreground when it is not the shell: what
+    /// closing the pane would interrupt. Null when the shell is in front.
+    pub fn busy(self: *const Pane, buf: *Comm) ?[]const u8 {
+        const pgrp = self.foregroundGroup() orelse return null;
+        if (pgrp == self.pid) return null;
+        return readComm(pgrp, buf) orelse "a program";
+    }
+
     /// Hangs up the child's process group.
     pub fn hangup(self: *const Pane) void {
         _ = linux.kill(-self.pid, .HUP);
@@ -248,6 +269,19 @@ pub const Pane = struct {
         try sys.setWinsize(self.fd, size.cols, size.rows);
     }
 };
+
+/// Holds `/proc/<pid>/comm`, which the kernel caps at 15 bytes and a newline.
+pub const Comm = [32]u8;
+
+fn readComm(pid: sys.pid_t, buf: *Comm) ?[]const u8 {
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
+    const fd: sys.fd_t = @intCast(sys.check(linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)) catch return null);
+    defer sys.close(fd);
+    const n = sys.read(fd, buf) catch return null;
+    const name = std.mem.trimEnd(u8, buf[0..n], "\n");
+    return if (name.len > 0) name else null;
+}
 
 fn writePty(h: *Handler, data: []const u8) void {
     const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
