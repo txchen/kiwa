@@ -29,6 +29,10 @@ goal even when Kiwa's own CPU is low.
   last 8 ms, render immediately; otherwise arm the one-shot deadline for the
   remaining time.
 
+- **Render counter.** Expose a debug counter of renders (for example in the
+  `kiwa ls` output or a debug protocol request) so e2e can assert that hidden
+  output causes no render wakes, not only no bytes.
+
 ## Acceptance
 
 - Rerun `zig build bench`. Spinner outer bytes at most 4 per frame. 30 lines/s

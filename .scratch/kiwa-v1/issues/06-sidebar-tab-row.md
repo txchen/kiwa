@@ -1,6 +1,6 @@
 # 06 Sidebar, tab row, and mode bar
 
-Status: open
+Status: claimed
 Blocked by: 05
 
 ## Scope
