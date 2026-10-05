@@ -262,7 +262,10 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
 - **Git branch.** On workspace creation, the server walks up from
   `root_dir` once to find `.git`, resolving a `.git` file for worktrees. It
   reads `HEAD` and watches the directory that contains it with inotify, for
-  `IN_CLOSE_WRITE` and `IN_MOVED_TO`.
+  `IN_CLOSE_WRITE`, `IN_MOVED_TO`, and `IN_CREATE`. Workspaces in one
+  repository share the watch, which goes away with the last of them. Events
+  for other files in that directory are ignored, and `HEAD` is read again
+  only after an event names it.
 - **Persistence.** After any change to layout, names, or focus, the server
   arms a 1 s save deadline. The save writes
   `$XDG_STATE_HOME/kiwa/<session>/session.json` (default
