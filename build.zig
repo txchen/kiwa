@@ -53,6 +53,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     }));
+    e2e_mod.addImport("kiwa_protocol", b.createModule(.{
+        .root_source_file = b.path("src/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
     const e2e_exe = b.addExecutable(.{ .name = "kiwa-e2e", .root_module = e2e_mod });
     const e2e_run = b.addRunArtifact(e2e_exe);
     e2e_run.addArtifactArg(exe);

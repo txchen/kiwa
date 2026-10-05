@@ -5,6 +5,7 @@
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const sys = @import("kiwa_sys");
+const protocol = @import("kiwa_protocol");
 
 const linux = std.os.linux;
 
@@ -13,12 +14,17 @@ const Ctx = struct {
     io: std.Io,
     kiwa: [:0]const u8,
     dir: []const u8,
+    dir_z: [:0]const u8,
     socket: []const u8,
     env: std.process.Environ.PosixBlock,
     outers: std.ArrayList(*Outer) = .empty,
 
     fn attach(ctx: *Ctx) !*Outer {
-        const o = try Outer.spawn(ctx, &.{ ctx.kiwa.ptr, null }, 80, 24);
+        return ctx.attachSized(80, 24);
+    }
+
+    fn attachSized(ctx: *Ctx, cols: u16, rows: u16) !*Outer {
+        const o = try Outer.spawn(ctx, &.{ ctx.kiwa.ptr, null }, cols, rows);
         try ctx.outers.append(ctx.gpa, o);
         return o;
     }
@@ -94,6 +100,7 @@ const Outer = struct {
         const pid = sys.forkpty(&master, null, null, &ws);
         if (pid < 0) return error.ForkPtyFailed;
         if (pid == 0) {
+            _ = linux.chdir(ctx.dir_z);
             _ = linux.execve(argv[0].?, argv, ctx.env.slice);
             sys._exit(127);
         }
@@ -355,6 +362,127 @@ fn killServer(ctx: *Ctx) !void {
     try expect(try ctx.run("kill-server") == 1, "a second kill-server finds no server");
 }
 
+fn colorsAndWideChars(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("clear; printf '\\033[31mred\\033[0m \\344\\270\\255|\\n'\r");
+    try o.waitLine("red \u{4e2d}|");
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(ctx.gpa);
+    try rs.update(ctx.gpa, &o.term);
+    const y = for (rs.row_data.items(.cells), 0..) |cells, y| {
+        if (cells.items(.raw)[0].content.codepoint.data == 'r') break y;
+    } else return error.RowNotFound;
+    const cells = rs.row_data.items(.cells)[y];
+    const raw = cells.items(.raw);
+    try expect(raw[0].style_id != 0, "\"red\" has a style");
+    const fg = cells.items(.style)[0].fg_color;
+    try expect(fg == .palette and fg.palette == 1, "\"red\" is drawn in palette color 1");
+    try expect(raw[3].style_id == 0, "the space after \"red\" has the default style");
+    try expect(raw[4].content.codepoint.data == 0x4e2d and raw[4].wide == .wide, "\u{4e2d} is one wide cell");
+    try expect(raw[5].wide == .spacer_tail, "\u{4e2d} covers two columns");
+    try expect(raw[6].content.codepoint.data == '|', "the next character follows the wide one");
+}
+
+fn fullScreenPrograms(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("seq 1 200 > nums; less nums\r");
+    try o.waitLine("23");
+    try expect(!try o.hasLine("200"), "less shows only the first screen");
+    try o.send("G");
+    try o.waitLine("200");
+    try o.send("q");
+    try o.waitText("$ ");
+    try o.send("clear; vim -u NONE -N nums\r");
+    try o.waitText("\"nums\" 200L");
+    try o.send("G");
+    try o.waitLine("200");
+    try o.send(":q!\r");
+    try o.waitLine("$");
+    try o.send("echo back\r");
+    try o.waitLine("back");
+}
+
+fn versionMismatch(ctx: *Ctx) !void {
+    const a = try attachedWithPrompt(ctx);
+    const sock = try sys.connectUnix(ctx.socket);
+    defer sys.close(sock);
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(ctx.gpa);
+    try protocol.append(ctx.gpa, &frame, .{ .hello = .{ .version = protocol.version +% 1, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/" } });
+    try sys.writeAll(sock, frame.items);
+    var d: protocol.Decoder = .{};
+    defer d.deinit(ctx.gpa);
+    var buf: [4096]u8 = undefined;
+    const reply = while (true) {
+        const n = try sys.read(sock, &buf);
+        if (n == 0) return error.ClosedWithoutDetach;
+        try d.feed(ctx.gpa, buf[0..n]);
+        if (try d.next()) |m| break m;
+    };
+    try expect(reply == .detach and std.mem.eql(u8, reply.detach, "detached: version mismatch"), "the server answers detach{version mismatch}");
+    try a.send("echo still attached\r");
+    try a.waitLine("still attached");
+}
+
+fn staleSocketIsReplaced(ctx: *Ctx) !void {
+    const fd = try sys.unixSocket(false);
+    const addr = try sys.unixAddr(ctx.socket);
+    _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)));
+    sys.close(fd);
+    try expect(ctx.socketExists(), "a dead server's socket file exists");
+    const o = try attachedWithPrompt(ctx);
+    try o.send("echo fresh\r");
+    try o.waitLine("fresh");
+}
+
+fn nonSocketIsKept(ctx: *Ctx) !void {
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = ctx.socket, .data = "precious" });
+    const o = try ctx.attach();
+    try expect(try o.waitExit() != 0, "the client fails");
+    var buf: [16]u8 = undefined;
+    const kept = try std.Io.Dir.cwd().readFile(ctx.io, ctx.socket, &buf);
+    try expect(std.mem.eql(u8, kept, "precious"), "the file at the socket path is untouched");
+}
+
+fn signalRestoresTerminal(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    _ = linux.kill(o.pid, .TERM);
+    try expect(try o.waitExit() == 0, "the client exits 0 on SIGTERM");
+    var t: linux.termios = undefined;
+    _ = try sys.check(linux.tcgetattr(o.master, &t));
+    try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
+    try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
+    const b = try attachedWithPrompt(ctx);
+    try b.send("echo survived\r");
+    try b.waitLine("survived");
+}
+
+fn stalledClientRecovers(ctx: *Ctx) !void {
+    // A large screen makes each full redraw big enough to pass the 1 MiB limit quickly.
+    const o = try ctx.attachSized(250, 80);
+    try o.waitText("$ ");
+    try o.send("while :; do printf '\\033[H%s' $RANDOM; done\r");
+    _ = try o.pump(200);
+    sleepMs(8000);
+    _ = try o.pump(500);
+    try o.send("\x03clear; echo recovered\r");
+    try o.waitLine("recovered");
+    const log = try std.fmt.allocPrint(ctx.gpa, "{s}/state/server.log", .{ctx.dir});
+    defer ctx.gpa.free(log);
+    var buf: [64 * 1024]u8 = undefined;
+    const text = std.Io.Dir.cwd().readFile(ctx.io, log, &buf) catch "";
+    std.debug.print("    overflow logged by the server: {s}\n", .{if (std.mem.indexOf(u8, text, "overflow") != null) "yes" else "no"});
+}
+
+fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("pwd\r");
+    try o.waitLine(ctx.dir);
+    try o.send("clear; echo \"$TERM $COLORTERM ${TMUX-no-tmux} ${TMUX_PANE-no-pane}\"; echo \"$KIWA\"\r");
+    try o.waitLine("xterm-256color truecolor no-tmux no-pane");
+    try o.waitLine(ctx.socket);
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal", .run = detachRestoresTerminal },
@@ -364,6 +492,14 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "second client takes over", .run = takeover },
     .{ .name = "child exit stops the server", .run = childExitStopsServer },
     .{ .name = "kill-server stops the server", .run = killServer },
+    .{ .name = "the pane starts in the client's directory with Kiwa's environment", .run = paneStartsWithClientDirAndEnv },
+    .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
+    .{ .name = "less and vim draw", .run = fullScreenPrograms },
+    .{ .name = "version mismatch detaches only the new client", .run = versionMismatch },
+    .{ .name = "a dead server's socket is replaced", .run = staleSocketIsReplaced },
+    .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
+    .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
+    .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers },
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -394,7 +530,7 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
-    const dir = try std.fmt.allocPrint(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ linux.getpid(), index });
+    const dir = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ linux.getpid(), index }, 0);
     defer gpa.free(dir);
     try std.Io.Dir.cwd().createDirPath(io, dir);
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
@@ -406,6 +542,11 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     try env.put("SHELL", "/bin/sh");
     try env.put("PS1", "$ ");
     try env.put("TERM", "xterm-256color");
+    // Fake values that the server must strip from the pane's environment.
+    const fake_tmux = try std.fmt.allocPrint(gpa, "{s}/no-such-tmux,1,0", .{dir});
+    defer gpa.free(fake_tmux);
+    try env.put("TMUX", fake_tmux);
+    try env.put("TMUX_PANE", "%0");
     const socket = try std.fmt.allocPrint(gpa, "{s}/kiwa.sock", .{dir});
     defer gpa.free(socket);
     try env.put("KIWA_SOCKET", socket);
@@ -418,6 +559,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
         .io = io,
         .kiwa = kiwa,
         .dir = dir,
+        .dir_z = dir,
         .socket = socket,
         .env = try env.createPosixBlock(gpa, .{}),
     };
