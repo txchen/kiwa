@@ -332,7 +332,7 @@ fn named(k: vt.input.Key, mods: Mods) vt.input.KeyEvent {
 fn char(comptime c: u8, mods: Mods) vt.input.KeyEvent {
     const lower = comptime std.ascii.toLower(c);
     var ev: vt.input.KeyEvent = .{
-        .key = comptime vt.input.Key.fromASCII(lower).?,
+        .key = comptime vt.input.Key.fromASCII(lower) orelse .unidentified,
         .mods = mods,
         .utf8 = &[_]u8{c},
         .unshifted_codepoint = lower,
@@ -558,6 +558,178 @@ fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
     try o.waitLine("$");
 }
 
+fn attachedAs(ctx: *Ctx, keyboard: Outer.Keyboard) !*Outer {
+    const o = try ctx.attachWith(.{ .keyboard = keyboard });
+    try o.waitLine("$");
+    if (keyboard == .kitty) try o.waitKitty();
+    return o;
+}
+
+fn typeText(o: *Outer, comptime text: []const u8) !void {
+    inline for (text) |c| try o.press(char(c, .{}));
+}
+
+/// Leaves vim's insert mode and waits until vim shows it did.
+fn vimEscape(o: *Outer) !void {
+    try o.press(named(.escape, .{}));
+    try o.waitGone("-- INSERT --");
+}
+
+fn vimEdits(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
+    const o = try attachedAs(ctx, keyboard);
+    try o.send("printf 'one\\ntwo\\nthree\\n' > f; vim -u NONE -N -c 'set showmode' f\r");
+    try o.waitText("\"f\" 3L");
+    try o.press(named(.arrow_down, .{}));
+    try o.press(named(.arrow_down, .{}));
+    try o.press(named(.end, .{}));
+    try typeText(o, "a!");
+    try o.waitLine("three!");
+    try vimEscape(o);
+    try o.press(named(.arrow_up, .{}));
+    try o.press(named(.home, .{}));
+    try typeText(o, "i>");
+    try o.waitLine(">two");
+    try vimEscape(o);
+    try o.press(named(.home, ctrl));
+    try typeText(o, "x");
+    try o.waitLine("ne");
+    try typeText(o, ":wq");
+    try o.press(named(.enter, .{}));
+    try o.waitLine("$");
+    try o.send("clear; cat f\r");
+    try o.waitLine(">two");
+    try o.waitLine("three!");
+    try o.waitLine("ne");
+}
+
+fn vimEditsKitty(ctx: *Ctx) !void {
+    return vimEdits(ctx, .kitty);
+}
+
+fn vimEditsLegacy(ctx: *Ctx) !void {
+    return vimEdits(ctx, .legacy);
+}
+
+fn pasteIntoVimIsBracketed(ctx: *Ctx) !void {
+    const o = try attachedAs(ctx, .kitty);
+    try o.send("vim -u NONE -N -c 'set showmode' pasted\r");
+    try o.waitText("pasted");
+    // In normal mode only a bracketed paste inserts text; unbracketed, it runs as commands.
+    try o.paste("first line\nsecond line\n");
+    try o.waitLine("first line");
+    try o.waitLine("second line");
+    try expect(!try o.contains("-- INSERT --"), "vim is back in normal mode after the paste");
+    try o.send(":wq\r");
+    try o.waitLine("$");
+    try o.send("clear; od -c pasted | head -2\r");
+    try o.waitText("f   i   r   s   t       l   i   n   e  \\n");
+}
+
+fn lessPages(o: *Outer) !void {
+    try o.send("seq 1 200 > nums; less nums\r");
+    try o.waitLine("23");
+    try o.press(named(.page_down, .{}));
+    try o.waitLine("46");
+    try o.press(named(.arrow_down, .{}));
+    try o.waitLine("47");
+    try o.press(named(.end, .{}));
+    try o.waitLine("200");
+    try o.press(named(.home, .{}));
+    try o.waitLine("1");
+    try typeText(o, "q");
+    try o.waitLine("$");
+}
+
+fn htopNavigates(o: *Outer) !void {
+    try o.send("htop\r");
+    try o.waitText("PID");
+    try o.press(named(.arrow_down, .{}));
+    try o.press(named(.f6, .{}));
+    try o.waitText("Sort by");
+    try o.press(named(.escape, .{}));
+    try o.waitGone("Sort by");
+    try o.press(named(.f2, .{}));
+    try o.waitText("Display options");
+    try o.press(named(.f10, .{}));
+    try o.waitGone("Display options");
+    try typeText(o, "q");
+    try o.waitLine("$");
+}
+
+fn fzfSelects(o: *Outer) !void {
+    try o.send("clear; seq 1 100 | fzf; echo \"picked=$?\"\r");
+    try o.waitText("100/100");
+    try typeText(o, "7");
+    try o.press(named(.backspace, .{}));
+    try typeText(o, "10");
+    try o.waitText("2/100");
+    try o.press(named(.arrow_up, .{}));
+    try o.press(named(.enter, .{}));
+    try o.waitLine("100");
+    try o.waitLine("picked=0");
+}
+
+fn tuisWork(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
+    const o = try attachedAs(ctx, keyboard);
+    try lessPages(o);
+    try htopNavigates(o);
+    try fzfSelects(o);
+}
+
+fn tuisWorkKitty(ctx: *Ctx) !void {
+    return tuisWork(ctx, .kitty);
+}
+
+fn tuisWorkLegacy(ctx: *Ctx) !void {
+    return tuisWork(ctx, .legacy);
+}
+
+const raw_reader =
+    \\import os, tty
+    \\tty.setraw(0)
+    \\os.write(1, b"\x1b[>1uready\r\n")
+    \\while True:
+    \\    data = os.read(0, 64)
+    \\    os.write(1, repr(data).encode() + b"\r\n")
+    \\    if data == b"f":
+    \\        os.write(1, b"\x1b[?1004h")
+;
+
+fn kittyPaneGetsKittyKeys(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
+    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/raw.py", .{ctx.dir});
+    defer ctx.gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = raw_reader });
+    const o = try attachedAs(ctx, keyboard);
+    try o.send("python3 raw.py\r");
+    try o.waitLine("ready");
+    try o.focus(.lost);
+    try typeText(o, "x");
+    try o.waitLine("b'x'");
+    try expect(!try o.contains("[O"), "no focus change reached a pane that did not enable focus reporting");
+    try o.press(named(.enter, .{ .shift = true }));
+    try o.waitLine("b'\\x1b[13;2u'");
+    try o.press(named(.enter, .{}));
+    try o.waitLine("b'\\r'");
+    try o.press(char('b', ctrl));
+    try o.press(char('b', ctrl));
+    try o.waitLine("b'\\x1b[98;5u'");
+    try typeText(o, "f");
+    try o.waitLine("b'f'");
+    try o.focus(.gained);
+    try o.waitLine("b'\\x1b[I'");
+    try o.press(char('b', ctrl));
+    try o.press(char('q', .{}));
+    try expect(try o.waitExit() == 0, "the prefix still detaches");
+}
+
+fn kittyPaneGetsKittyKeysFromKitty(ctx: *Ctx) !void {
+    return kittyPaneGetsKittyKeys(ctx, .kitty);
+}
+
+fn kittyPaneGetsKittyKeysFromLegacy(ctx: *Ctx) !void {
+    return kittyPaneGetsKittyKeys(ctx, .legacy);
+}
+
 fn versionMismatch(ctx: *Ctx) !void {
     const a = try attachedWithPrompt(ctx);
     const sock = try sys.connectUnix(ctx.socket);
@@ -674,6 +846,13 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
     .{ .name = "less and vim draw", .run = fullScreenPrograms },
     .{ .name = "a lone esc reaches vim and leaves insert mode", .run = loneEscLeavesInsertMode },
+    .{ .name = "vim navigates, edits, and quits (kitty outer)", .run = vimEditsKitty },
+    .{ .name = "vim navigates, edits, and quits (legacy outer)", .run = vimEditsLegacy },
+    .{ .name = "a multi-line paste into vim arrives bracketed", .run = pasteIntoVimIsBracketed },
+    .{ .name = "less, htop, and fzf navigate and quit (kitty outer)", .run = tuisWorkKitty },
+    .{ .name = "less, htop, and fzf navigate and quit (legacy outer)", .run = tuisWorkLegacy },
+    .{ .name = "a kitty pane tells shift+enter from enter and focus reaches it (kitty outer)", .run = kittyPaneGetsKittyKeysFromKitty },
+    .{ .name = "a kitty pane tells shift+enter from enter and focus reaches it (legacy outer)", .run = kittyPaneGetsKittyKeysFromLegacy },
     .{ .name = "version mismatch detaches only the new client", .run = versionMismatch },
     .{ .name = "a dead server's socket is replaced", .run = staleSocketIsReplaced },
     .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
