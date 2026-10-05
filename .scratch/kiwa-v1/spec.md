@@ -46,7 +46,7 @@ Inputs to this spec:
    master                │└───────────────────┘└──────────────────┘
                          │
  new                     │
-                        «│ PREFIX  c tab  v split  ? help
+                        «│
 ```
 
 - **Sidebar.** 26 columns on the left. Each workspace has a name line and,
@@ -59,8 +59,9 @@ Inputs to this spec:
   `+`. Tab names are dynamic names until renamed (K11 decision).
 - **Panes.** A single pane has no border. Split panes get borders, and the
   focused pane's border is highlighted (D1, D2).
-- **Mode bar.** While prefix, navigate, or resize mode is active, the bottom
-  row shows the mode and its main keys (D3).
+- **Mode bar.** While prefix, navigate, or resize mode is active, the tab
+  row is replaced by the mode name and its main keys (D3). The pane area
+  keeps its size, so entering a mode never resizes panes.
 - **Outer window title.** `{hostname}: {workspace}` (D6).
 - **Cursor.** The outer terminal's cursor sits at the focused pane's cursor,
   so IME candidate windows follow it (D11).
