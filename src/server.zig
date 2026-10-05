@@ -3,7 +3,8 @@ const sys = @import("sys.zig");
 const paths_mod = @import("paths.zig");
 const protocol = @import("protocol.zig");
 const input = @import("input.zig");
-const render_full = @import("render_full.zig");
+const frame_mod = @import("frame.zig");
+const diff = @import("diff.zig");
 const Pane = @import("pane.zig").Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
 
@@ -37,9 +38,26 @@ const Conn = struct {
         /// The fd is closed; the Conn is freed after the current batch of events.
         closed,
     } = .open,
-    /// Frames were dropped on overflow; send a full redraw once `out` drains.
-    redraw_pending: bool = false,
+    /// The outer terminal's contents are unknown: after attach, a resize, or
+    /// frames dropped on overflow. The next frame is a full redraw, sent
+    /// once `out` drains.
+    redraw_pending: bool = true,
     events: u32 = EPOLL.IN,
+    size: protocol.Size = .{ .cols = 0, .rows = 0 },
+    /// The composed frame. Rows the pane did not change carry over.
+    frame: frame_mod.Frame = .{},
+    /// What the outer terminal shows; meaningful only without `redraw_pending`.
+    last_frame: frame_mod.Frame = .{},
+    graphemes: frame_mod.Graphemes = .{},
+
+    fn deinit(c: *Conn, gpa: std.mem.Allocator) void {
+        c.decoder.deinit(gpa);
+        c.out.deinit(gpa);
+        c.frame.deinit(gpa);
+        c.last_frame.deinit(gpa);
+        c.graphemes.deinit(gpa);
+        gpa.destroy(c);
+    }
 };
 
 const Server = struct {
@@ -97,9 +115,7 @@ const Server = struct {
                 continue;
             }
             _ = s.conns.swapRemove(i);
-            c.decoder.deinit(s.gpa);
-            c.out.deinit(s.gpa);
-            s.gpa.destroy(c);
+            c.deinit(s.gpa);
         }
     }
 
@@ -202,7 +218,8 @@ const Server = struct {
             },
             .resize => |size| {
                 if (s.client != c) return;
-                if (s.pane) |p| p.resize(sanitize(size)) catch |e| std.log.err("pane resize: {t}", .{e});
+                c.size = sanitize(size);
+                if (s.pane) |p| p.resize(c.size) catch |e| std.log.err("pane resize: {t}", .{e});
                 try s.render();
             },
             .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
@@ -215,11 +232,12 @@ const Server = struct {
         if (s.client) |old| if (old != c) try s.detach(old, msg.elsewhere);
         s.client = c;
         s.prefix = .{};
-        const size = sanitize(h.size);
+        c.size = sanitize(h.size);
+        c.redraw_pending = true;
         if (s.pane) |p| {
-            p.resize(size) catch |e| std.log.err("pane resize: {t}", .{e});
+            p.resize(c.size) catch |e| std.log.err("pane resize: {t}", .{e});
         } else {
-            try s.spawnPane(size, h.cwd);
+            try s.spawnPane(c.size, h.cwd);
         }
         try s.render();
     }
@@ -261,18 +279,42 @@ const Server = struct {
         const p = s.pane orelse return;
         if (c.redraw_pending and !c.out.isEmpty()) return;
         try p.render.update(s.gpa, &p.terminal);
+
+        var compose_all = false;
+        if (c.frame.cols != c.size.cols or c.frame.rows != c.size.rows) {
+            try c.frame.resize(s.gpa, c.size.cols, c.size.rows);
+            try c.last_frame.resize(s.gpa, c.size.cols, c.size.rows);
+            compose_all = true;
+            c.redraw_pending = true;
+        }
+        if (c.graphemes.count() > frame_mod.Graphemes.limit) {
+            c.graphemes.reset(s.gpa);
+            compose_all = true;
+            c.redraw_pending = true;
+        }
+        const rect: frame_mod.Rect = .{ .cols = c.size.cols, .rows = c.size.rows };
+        try c.frame.composePane(s.gpa, &c.graphemes, rect, &p.render, compose_all);
+        c.frame.cursor = frame_mod.paneCursor(rect, &p.render, p.terminal.cursor.is_default);
+
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
-        render_full.write(&aw.writer, &p.render) catch return error.OutOfMemory;
+        const written = if (c.redraw_pending)
+            diff.full(&c.frame, &c.graphemes, &aw.writer)
+        else
+            diff.diff(&c.last_frame, &c.frame, &c.graphemes, &aw.writer);
         s.scratch = aw.toArrayList();
-        c.redraw_pending = false;
+        written catch return error.OutOfMemory;
+        if (s.scratch.items.len == 0) return;
         c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
             error.Overflow => {
                 std.log.info("client output buffer overflowed; redrawing after it drains", .{});
                 c.redraw_pending = true;
+                return s.flush(c);
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
+        c.last_frame.copyFrom(&c.frame);
+        c.redraw_pending = false;
         try s.flush(c);
     }
 

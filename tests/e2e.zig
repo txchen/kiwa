@@ -249,7 +249,7 @@ fn expect(ok: bool, what: []const u8) !void {
 
 fn attachedWithPrompt(ctx: *Ctx) !*Outer {
     const o = try ctx.attach();
-    try o.waitText("$ ");
+    try o.waitLine("$");
     return o;
 }
 
@@ -391,7 +391,7 @@ fn fullScreenPrograms(ctx: *Ctx) !void {
     try o.send("G");
     try o.waitLine("200");
     try o.send("q");
-    try o.waitText("$ ");
+    try o.waitLine("$");
     try o.send("clear; vim -u NONE -N nums\r");
     try o.waitText("\"nums\" 200L");
     try o.send("G");
@@ -458,20 +458,24 @@ fn signalRestoresTerminal(ctx: *Ctx) !void {
 }
 
 fn stalledClientRecovers(ctx: *Ctx) !void {
-    // A large screen makes each full redraw big enough to pass the 1 MiB limit quickly.
+    // On a large screen, each line scrolls every row of the region, so even
+    // diffed frames pass the 1 MiB limit quickly. The region keeps lines out
+    // of the scrollback, which a Debug ghostty-vt makes slow to grow.
     const o = try ctx.attachSized(250, 80);
-    try o.waitText("$ ");
-    try o.send("while :; do printf '\\033[H%s' $RANDOM; done\r");
+    try o.waitLine("$");
+    try o.send("a=$(printf 'abcdefghij%.0s' $(seq 24)); printf '\\033[1;79r\\033[79H'; " ++
+        "while :; do printf '%s%s\\n' $RANDOM \"$a\"; sleep 0.01; done\r");
     _ = try o.pump(200);
     sleepMs(8000);
     _ = try o.pump(500);
-    try o.send("\x03clear; echo recovered\r");
+    try o.send("\x03printf '\\033[r'; clear; echo recovered\r");
     try o.waitLine("recovered");
+    try expect(!try o.contains("abcdefghij"), "the redraw after the overflow left no stale rows");
     const log = try std.fmt.allocPrint(ctx.gpa, "{s}/state/server.log", .{ctx.dir});
     defer ctx.gpa.free(log);
-    var buf: [64 * 1024]u8 = undefined;
-    const text = std.Io.Dir.cwd().readFile(ctx.io, log, &buf) catch "";
-    std.debug.print("    overflow logged by the server: {s}\n", .{if (std.mem.indexOf(u8, text, "overflow") != null) "yes" else "no"});
+    const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, log, ctx.gpa, .limited(16 * 1024 * 1024));
+    defer ctx.gpa.free(text);
+    try expect(std.mem.indexOf(u8, text, "overflow") != null, "the server logged the overflow");
 }
 
 fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
