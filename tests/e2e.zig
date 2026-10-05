@@ -145,6 +145,8 @@ const Outer = struct {
     eof: bool = false,
     status: ?u32 = null,
     capture: ?*std.ArrayList(u8) = null,
+    /// What the client last wrote to the clipboard with OSC 52.
+    clipboard: std.ArrayList(u8) = .empty,
 
     const Keyboard = enum { kitty, legacy };
 
@@ -178,6 +180,7 @@ const Outer = struct {
         var handler: vt.TerminalStream.Handler = .init(&o.term);
         handler.effects.write_pty = &answer;
         handler.effects.device_attributes = &deviceAttributes;
+        handler.effects.clipboard_write = &clipboardWrite;
         o.stream = .init(.{ .allocator = ctx.gpa, .handler = handler });
         try sys.setCloexec(master, true);
         return o;
@@ -193,6 +196,41 @@ const Outer = struct {
 
     fn deviceAttributes(_: *vt.TerminalStream.Handler) vt.device_attributes.Attributes {
         return .{};
+    }
+
+    fn clipboardWrite(h: *vt.TerminalStream.Handler, w: vt.clipboard.Write) void {
+        const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+        const o: *Outer = @fieldParentPtr("stream", stream);
+        o.clipboard.clearRetainingCapacity();
+        for (w.contents) |c| o.clipboard.appendSlice(o.gpa, c.data) catch {};
+    }
+
+    /// Sends one SGR mouse report for zero-based cell (`x`, `y`).
+    fn mouseReport(o: *Outer, code: u8, x: usize, y: usize, final: u8) !void {
+        var buf: [32]u8 = undefined;
+        try o.send(try std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ code, x + 1, y + 1, final }));
+    }
+
+    fn click(o: *Outer, x: usize, y: usize) !void {
+        try o.mouseReport(0, x, y, 'M');
+        try o.mouseReport(0, x, y, 'm');
+    }
+
+    fn rightClick(o: *Outer, x: usize, y: usize) !void {
+        try o.mouseReport(2, x, y, 'M');
+        try o.mouseReport(2, x, y, 'm');
+    }
+
+    /// A left drag from one cell to another, as a terminal in button-event
+    /// mode reports it: a press, one motion, and a release.
+    fn drag(o: *Outer, from: [2]usize, to: [2]usize) !void {
+        try o.mouseReport(0, from[0], from[1], 'M');
+        try o.mouseReport(32, to[0], to[1], 'M');
+        try o.mouseReport(0, to[0], to[1], 'm');
+    }
+
+    fn wheel(o: *Outer, up: bool, x: usize, y: usize) !void {
+        try o.mouseReport(if (up) 64 else 65, x, y, 'M');
     }
 
     /// The kitty keyboard flags on the alternate screen, where Kiwa runs.
@@ -241,6 +279,7 @@ const Outer = struct {
             _ = linux.waitpid(o.pid, &status, 0);
         }
         sys.close(o.master);
+        o.clipboard.deinit(o.gpa);
         o.stream.deinit();
         o.term.deinit(o.gpa);
         o.gpa.destroy(o);
@@ -1565,6 +1604,237 @@ fn cursorFollowsTheFocusedPane(ctx: *Ctx) !void {
     try waitCursor(o, left_half.x + 1 + 2, left_half.y + 1);
 }
 
+fn listWith(ctx: *Ctx, comptime fmt: []const u8, args: anytype) !void {
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(ctx.gpa);
+    try want.print(ctx.gpa, fmt, args);
+    try ctx.waitList(want.items);
+}
+
+fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    const name = caseName(ctx);
+    try o.click(2, 23);
+    try waitHighlighted(o, 2);
+    try listWith(ctx, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.click(10, 1);
+    try waitHighlighted(o, 1);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.waitLine("$");
+    try o.click(33, 0);
+    try o.waitText(" 2 sh ");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.click(28, 0);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.click(24, 23);
+    try waitSidebar(o, 4);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("76");
+    try o.click(2, 23);
+    try waitSidebar(o, 26);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("54");
+}
+
+fn clickFocusesPanes(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try waitAccent(o, &.{ right_half, left_half });
+    try o.click(left_half.x + 5, left_half.y + 5);
+    try waitAccent(o, &.{ left_half, right_half });
+    try o.send("echo left$((1+1))\r");
+    try waitTextIn(o, "left2", left_half.inner());
+    try o.click(right_half.x + 5, right_half.y + 5);
+    try waitAccent(o, &.{ right_half, left_half });
+    try o.send("echo right$((1+2))\r");
+    try waitTextIn(o, "right3", right_half.inner());
+}
+
+fn dragMovesTheBorder(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.drag(.{ left_half.x + left_half.cols - 1, 10 }, .{ 42, 12 });
+    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 23 };
+    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 23 };
+    try waitBoxes(o, &.{ left, right });
+    try waitAccent(o, &.{ right, left });
+    try o.send("clear; tput cols\r");
+    try waitTextIn(o, "35", right.inner());
+    // A drag from the other border cell, far past the minimum size, stops there.
+    try o.drag(.{ right.x, 3 }, .{ 2, 3 });
+    const narrow: Box = .{ .x = 26, .y = 1, .cols = 4, .rows = 23 };
+    try waitBoxes(o, &.{ narrow, .{ .x = 30, .y = 1, .cols = 50, .rows = 23 } });
+    try o.send("clear; tput cols\r");
+    try waitTextIn(o, "48", .{ .x = 31, .y = 2, .cols = 48, .rows = 21 });
+    try prefixed(o, "h");
+    try o.send("clear; tput cols\r");
+    try waitTextIn(o, "2", narrow.inner());
+}
+
+fn wheelScrollsTheScrollback(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("clear; seq 1 200; sleep 1; seq 201 210\r");
+    try o.waitLine("200");
+    try expect(!try o.hasLine("177"), "line 177 is above the screen");
+    try o.wheel(true, 40, 10);
+    try o.waitText("[3/");
+    try o.waitLine("177");
+    try o.waitText("[13/");
+    try expect(try o.hasLine("177"), "new output leaves the scrolled-back viewport where it was");
+    try expect(!try o.hasLine("210"), "new output stays below the scrolled-back viewport");
+    try o.wheel(false, 40, 10);
+    try o.waitText("[10/");
+    try o.send("x");
+    try o.waitGone("[10/");
+    try o.waitLine("$ x");
+    try o.wheel(true, 40, 10);
+    try o.waitText("[3/");
+    for (0..2) |_| try o.wheel(false, 40, 10);
+    try o.waitGone("[3/");
+    try expect(!try o.contains("[0/"), "scrolling to the bottom removes the marker");
+    try o.waitLine("$ x");
+}
+
+fn wheelScrollsLess(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("seq 1 200 > nums; less nums\r");
+    try o.waitLine("22");
+    try o.wheel(false, 40, 10);
+    try o.waitLine("25");
+    try expect(!try o.hasLine("3"), "less scrolled three lines");
+    try o.wheel(true, 40, 10);
+    try o.waitLine("3");
+    try expect(!try o.contains("[3/"), "the alternate screen has no scroll marker");
+    try o.send("q");
+    try o.waitLine("$");
+}
+
+const mouse_reader =
+    \\import os, tty
+    \\tty.setraw(0)
+    \\os.write(1, b"\x1b[?1002h\x1b[?1006hready\r\n")
+    \\while True:
+    \\    data = os.read(0, 64)
+    \\    os.write(1, repr(data).encode() + b"\r\n")
+;
+
+fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
+    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/mouse.py", .{ctx.dir});
+    defer ctx.gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = mouse_reader });
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    try o.send("clear; python3 mouse.py\r");
+    try o.waitLine("ready");
+    try o.mouseReport(0, 40, 10, 'M');
+    try o.waitLine("b'\\x1b[<0;15;10M'");
+    try o.mouseReport(32, 42, 11, 'M');
+    try o.waitLine("b'\\x1b[<32;17;11M'");
+    try o.mouseReport(0, 42, 11, 'm');
+    try o.waitLine("b'\\x1b[<0;17;11m'");
+    try o.wheel(true, 30, 5);
+    try o.waitLine("b'\\x1b[<64;5;5M'");
+    try o.mouseReport(2, 31, 6, 'M');
+    try o.waitLine("b'\\x1b[<2;6;6M'");
+    try o.mouseReport(2, 31, 6, 'm');
+    try o.waitLine("b'\\x1b[<2;6;6m'");
+    try expect(!try o.contains("Split right"), "a right click in a tracking pane opens no menu");
+    try o.click(10, 1);
+    try waitHighlighted(o, 1);
+    const name = caseName(ctx);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.click(10, 2);
+    try waitHighlighted(o, 2);
+    try o.send("z");
+    try o.waitLine("b'z'");
+    const text = try o.screen();
+    defer ctx.gpa.free(text);
+    try expect(std.mem.count(u8, text, "x1b[<0;") == 2, "the sidebar clicks did not reach the program");
+}
+
+fn reversed(o: *Outer, at: [2]usize) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    return g.style(at[0], at[1]).flags.inverse;
+}
+
+fn notReversed(o: *Outer, at: [2]usize) !bool {
+    return !try reversed(o, at);
+}
+
+fn dragSelectionCopies(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("clear; printf 'hello \\344\\270\\255\\346\\226\\207  \\n'\r");
+    try o.waitLine("hello \u{4e2d}\u{6587}");
+    const at = blk: {
+        var g: Grid = try .load(o);
+        defer g.deinit();
+        break :blk g.findIn("hello", area) orelse return error.TextNotFound;
+    };
+    // Through the tail of the last wide character and past the line's end.
+    try o.drag(at, .{ at[0] + 12, at[1] });
+    try o.waitFor("the selection drawn in reverse video", [2]usize{ at[0] + 6, at[1] }, reversed);
+    try expect(!try reversed(o, .{ at[0], at[1] + 1 }), "the next row is not selected");
+    const deadline = now() + 5 * std.time.ns_per_s;
+    while (o.clipboard.items.len == 0 and now() < deadline) _ = try o.pump(50);
+    try expect(std.mem.eql(u8, o.clipboard.items, "hello \u{4e2d}\u{6587}"), "OSC 52 carries the selected text without trailing blanks");
+    try o.send("echo more\r");
+    try o.waitLine("more");
+    try expect(try reversed(o, .{ at[0], at[1] }), "the selection survives new output");
+    try o.click(at[0] + 2, at[1] + 4);
+    try o.waitFor("the selection cleared by a click", [2]usize{ at[0], at[1] }, notReversed);
+}
+
+fn rightClickMenus(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    const name = caseName(ctx);
+    try o.rightClick(40, 10);
+    try o.waitText("Split right");
+    try o.waitText("Zoom");
+    try o.waitKitty();
+    try o.press(named(.escape, .{}));
+    try o.waitGone("Split right");
+    try waitNoBorders(o);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+
+    try o.rightClick(40, 10);
+    try o.waitText("Split right");
+    try o.click(42, 11);
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.waitGone("Split right");
+
+    try o.rightClick(left_half.x + left_half.cols - 1, 5);
+    try o.waitText("Zoom");
+    try o.rightClick(left_half.x + left_half.cols - 1, 5);
+    try o.waitGone("Zoom");
+    try o.rightClick(30, 20);
+    try o.waitText("Zoom");
+    try o.send("jj\r");
+    try waitNoBorders(o);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 2 panes, zoomed (active)\n", .{name});
+    try o.rightClick(30, 20);
+    try o.waitText("Unzoom");
+    try o.click(70, 3);
+    try o.waitGone("Unzoom");
+
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    try o.rightClick(28, 0);
+    try o.waitText("New tab");
+    try o.click(30, 2);
+    try o.waitGone("New tab");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+
+    try o.rightClick(5, 1);
+    try o.waitText("Close");
+    try o.rightClick(5, 1);
+    try o.waitGone("Close");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
@@ -1608,6 +1878,14 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "key help opens over updating panes and closes on esc", .run = keyHelpOpensAndCloses },
     .{ .name = "the outer title names the workspace and is restored on detach", .run = outerTitleNamesTheWorkspace },
     .{ .name = "the outer cursor sits at the focused pane's cursor", .run = cursorFollowsTheFocusedPane },
+    .{ .name = "clicks switch workspaces and tabs, add them, and toggle the sidebar", .run = clicksSwitchWorkspacesAndTabs },
+    .{ .name = "a click focuses a pane", .run = clickFocusesPanes },
+    .{ .name = "dragging a border resizes both panes", .run = dragMovesTheBorder },
+    .{ .name = "the wheel scrolls a shell pane's scrollback until typing returns", .run = wheelScrollsTheScrollback },
+    .{ .name = "the wheel scrolls less on the alternate screen", .run = wheelScrollsLess },
+    .{ .name = "a program that tracks the mouse gets pane-local reports; the sidebar still switches", .run = mouseReachesTrackingPrograms },
+    .{ .name = "a drag selects text and copies it with OSC 52", .run = dragSelectionCopies },
+    .{ .name = "right-click menus split, zoom, and close, and esc closes them", .run = rightClickMenus },
 };
 
 pub fn main(init: std.process.Init) !u8 {

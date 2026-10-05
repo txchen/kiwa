@@ -8,6 +8,9 @@ const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const session_mod = @import("session.zig");
 const chrome = @import("chrome.zig");
+const hit = @import("hit.zig");
+const mouse = @import("mouse.zig");
+const Menu = @import("menu.zig").Menu;
 const Pane = @import("pane.zig").Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
 const vt = @import("ghostty-vt");
@@ -94,6 +97,9 @@ const Conn = struct {
     drawn_help: bool = false,
     /// The navigate cursor, a workspace index.
     nav: usize = 0,
+    mouse: mouse.State = .idle,
+    /// The menu `frame` holds over the panes and chrome.
+    drawn_menu: ?Menu = null,
     /// The outer window title last sent.
     title: std.ArrayList(u8) = .empty,
 
@@ -143,6 +149,8 @@ const Server = struct {
     hostname: []const u8,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
+    /// The pane whose terminal holds the selection.
+    selected: ?PaneId = null,
 
     const Exit = struct { reason: []const u8, hangup_child: bool };
 
@@ -397,6 +405,7 @@ const Server = struct {
     }
 
     fn destroyPane(s: *Server, p: *Pane) void {
+        if (s.selected == p.id) s.selected = null;
         _ = s.panes.remove(p.id);
         _ = s.pane_fds.remove(p.fd);
         p.destroy();
@@ -433,15 +442,30 @@ const Server = struct {
 
     fn drainInput(s: *Server, c: *Conn) !void {
         while (try c.input.next(s.gpa)) |ev| {
-            if (ev == .reply) {
-                try s.onReply(c, ev.reply);
-                continue;
+            switch (ev) {
+                .reply => |r| {
+                    try s.onReply(c, r);
+                    continue;
+                },
+                .mouse => |m| {
+                    try s.onMouse(c, m);
+                    if (s.exit != null) return;
+                    continue;
+                },
+                .key => |k| if (c.mouse == .menu_open) {
+                    try s.menuKey(c, k);
+                    if (s.exit != null) return;
+                    continue;
+                },
+                else => {},
             }
             const mode = c.prefix.mode;
             const outcome = c.prefix.feed(ev);
             if (c.prefix.mode != mode) try s.markStale();
             switch (outcome) {
                 .pane => |pane_ev| if (s.focusedPane()) |p| {
+                    // Typing returns a scrolled-back pane to the live screen.
+                    if (pane_ev == .key or pane_ev == .paste) if (p.followLive()) try s.markStale();
                     p.send(pane_ev) catch |e| std.log.err("pane write: {t}", .{e});
                     try s.syncPaneEvents(p);
                 },
@@ -525,6 +549,162 @@ const Server = struct {
             .pick => if (s.session.selectWorkspace(c.nav)) try s.relayout(),
         }
         try s.markStale();
+    }
+
+    fn onMouse(s: *Server, c: *Conn, ev: input.Mouse) !void {
+        if (s.session.isEmpty()) return;
+        const t = s.session.activeTab();
+        const target = hit.at(.{
+            .cols = c.size.cols,
+            .rows = c.size.rows,
+            .chrome = try s.chromeView(c),
+            .panes = s.view.items,
+            .layout = if (t.zoomed) null else &t.layout,
+            .menu = if (c.mouse == .menu_open) c.mouse.menu_open else null,
+        }, ev.x, ev.y);
+        const tracking = switch (target) {
+            .pane => |l| if (s.panes.get(l.pane)) |p| p.tracksMouse() else false,
+            else => false,
+        };
+        // A click leaves prefix, resize, navigate, and help mode.
+        const button = ev.button == .left or ev.button == .middle or ev.button == .right;
+        if (ev.action == .press and button and c.prefix.mode != .normal) {
+            c.prefix.mode = .normal;
+            try s.markStale();
+        }
+        switch (mouse.feed(&c.mouse, ev, target, tracking)) {
+            .none => {},
+            .select_workspace => |i| if (s.session.selectWorkspace(i)) try s.showChanges(),
+            .select_tab => |i| if (s.session.selectTab(i)) try s.showChanges(),
+            .new_workspace => try s.act(c, .new_workspace),
+            .toggle_sidebar => try s.act(c, .toggle_sidebar),
+            .new_tab => try s.act(c, .new_tab),
+            .focus => |f| {
+                try s.clearSelection();
+                if (s.session.focusPane(f.pane)) try s.markStale();
+                if (f.deliver) try s.deliverMouse(f.pane, ev);
+            },
+            .deliver => |pane| try s.deliverMouse(pane, ev),
+            .scroll => |sc| try s.scrollPane(sc.pane, sc.up),
+            .start_selection => |from| {
+                const p = s.panes.get(from.pane) orelse return;
+                try s.clearSelection();
+                try p.select(.{ .x = from.x, .y = from.y }, s.cellIn(from.pane, ev) orelse return);
+                s.selected = from.pane;
+                try s.markStale();
+            },
+            .extend_selection => |pane| {
+                const p = s.panes.get(pane) orelse return;
+                try p.extendSelection(s.cellIn(pane, ev) orelse return);
+                try s.markStale();
+            },
+            .copy_selection => |pane| try s.copySelection(c, pane),
+            .move_divider => |d| if (!t.zoomed and t.layout.moveDivider(s.tabArea(c.size), d.split, d.at)) try s.showChanges(),
+            .open_menu, .close_menu => try s.markStale(),
+            .run_menu_item => |r| try s.runMenuItem(c, r.menu, r.item),
+        }
+    }
+
+    /// Relays out and redraws after the session changed what is visible.
+    fn showChanges(s: *Server) !void {
+        try s.relayout();
+        try s.markStale();
+    }
+
+    fn placementOf(s: *const Server, pane: PaneId) ?Placement {
+        for (s.view.items) |pl| if (pl.pane == pane) return pl;
+        return null;
+    }
+
+    /// The pane-local cell under a report, clamped into the pane.
+    fn cellIn(s: *const Server, pane: PaneId, ev: input.Mouse) ?vt.Coordinate {
+        const r = (s.placementOf(pane) orelse return null).inner;
+        if (r.cols == 0 or r.rows == 0) return null;
+        return .{
+            .x = @min(ev.x -| r.x, r.cols - 1),
+            .y = @min(ev.y -| r.y, r.rows - 1),
+        };
+    }
+
+    fn deliverMouse(s: *Server, pane: PaneId, ev: input.Mouse) !void {
+        const p = s.panes.get(pane) orelse return;
+        const r = (s.placementOf(pane) orelse return).inner;
+        p.sendMouse(ev, @as(i32, ev.x) - r.x, @as(i32, ev.y) - r.y) catch |e| std.log.err("pane write: {t}", .{e});
+        try s.syncPaneEvents(p);
+    }
+
+    /// One wheel notch over a pane whose program does not track the mouse.
+    /// The alternate screen has no scrollback, so it gets arrow keys.
+    fn scrollPane(s: *Server, pane: PaneId, up: bool) !void {
+        const lines = 3;
+        const p = s.panes.get(pane) orelse return;
+        if (p.terminal.screens.active_key == .alternate) {
+            const arrow: input.Event = .{ .key = .named(if (up) .arrow_up else .arrow_down, .{}) };
+            for (0..lines) |_| p.send(arrow) catch |e| std.log.err("pane write: {t}", .{e});
+            return s.syncPaneEvents(p);
+        }
+        p.scrollBack(if (up) lines else -lines);
+        try s.markStale();
+    }
+
+    fn clearSelection(s: *Server) !void {
+        const id = s.selected orelse return;
+        s.selected = null;
+        const p = s.panes.get(id) orelse return;
+        if (p.clearSelection()) try s.markStale();
+    }
+
+    /// Sends the selected text to the outer terminal's clipboard with OSC 52.
+    fn copySelection(s: *Server, c: *Conn, pane: PaneId) !void {
+        const p = s.panes.get(pane) orelse return;
+        const text = try p.selectionText(s.gpa) orelse return;
+        defer s.gpa.free(text);
+        if (text.len == 0) return;
+        const b64 = std.base64.standard.Encoder;
+        const head = "\x1b]52;c;";
+        const tail = "\x1b\\";
+        const osc = try s.gpa.alloc(u8, head.len + b64.calcSize(text.len) + tail.len);
+        defer s.gpa.free(osc);
+        @memcpy(osc[0..head.len], head);
+        _ = b64.encode(osc[head.len..][0..b64.calcSize(text.len)], text);
+        @memcpy(osc[osc.len - tail.len ..], tail);
+        if (try s.pushTerminal(c, osc)) try s.flush(c);
+    }
+
+    fn menuKey(s: *Server, c: *Conn, k: input.Key) !void {
+        const m = &c.mouse.menu_open;
+        switch (m.key(k)) {
+            .none => {},
+            .close => c.mouse = .idle,
+            .pick => |i| {
+                const picked = m.*;
+                c.mouse = .idle;
+                try s.markStale();
+                return s.runMenuItem(c, picked, i);
+            },
+        }
+        try s.markStale();
+    }
+
+    /// Selects or focuses the menu's subject, then runs the item's action on it.
+    fn runMenuItem(s: *Server, c: *Conn, m: Menu, item: usize) !void {
+        const ss = &s.session;
+        switch (m.subject) {
+            .workspace => |i| {
+                if (i >= ss.workspaces.items.len) return;
+                _ = ss.selectWorkspace(i);
+            },
+            .tab => |i| {
+                if (i >= ss.activeWorkspace().tabs.items.len) return;
+                _ = ss.selectTab(i);
+            },
+            .pane => |pane| {
+                if (!ss.activeTab().layout.contains(pane)) return;
+                _ = ss.focusPane(pane);
+            },
+        }
+        try s.showChanges();
+        try s.act(c, m.items()[item].action);
     }
 
     /// Where a new pane starts: the focused pane's directory.
@@ -615,12 +795,17 @@ const Server = struct {
             c.redraw_pending = true;
         }
         const help = c.prefix.mode == .help;
+        const menu: ?Menu = if (c.mouse == .menu_open) c.mouse.menu_open else null;
+        // Closing or changing a menu uncovers whatever it was drawn over.
+        const uncover = c.drawn_menu != null and !std.meta.eql(c.drawn_menu, menu);
         // Closing the help box uncovers panes and borders.
-        try s.compose(c, compose_all or (c.drawn_help and !help));
-        try s.drawChrome(c, compose_all);
+        try s.compose(c, compose_all or uncover or (c.drawn_help and !help));
+        try s.drawChrome(c, compose_all or uncover);
         if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size));
         c.drawn_help = help;
-        if (help or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
+        if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed);
+        c.drawn_menu = menu;
+        if (help or menu != null or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
 
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
@@ -658,6 +843,7 @@ const Server = struct {
             if (!same) moved = true;
             try p.render.update(s.gpa, &p.terminal);
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, !same);
+            if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);
             if (pl.pane == focus) c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
         }
         if (moved or c.drawn_focus != focus) for (s.view.items) |pl| {
@@ -672,6 +858,18 @@ const Server = struct {
     /// Redraws the sidebar and the tab row when what they show changed, and
     /// retitles the outer window with them.
     fn drawChrome(s: *Server, c: *Conn, all: bool) !void {
+        const view = try s.chromeView(c);
+        var h: std.hash.Wyhash = .init(0);
+        std.hash.autoHashStrat(&h, view, .Deep);
+        const key = h.final();
+        if (!all and c.drawn_chrome == key) return;
+        chrome.draw(&c.frame, view);
+        c.drawn_chrome = key;
+        try s.retitle(c, s.session.activeWorkspace().name.text());
+    }
+
+    /// What the chrome shows for `c` now. Valid until the next call.
+    fn chromeView(s: *Server, c: *const Conn) !chrome.View {
         const ss = &s.session;
         s.chrome_workspaces.clearRetainingCapacity();
         for (ss.workspaces.items) |ws| try s.chrome_workspaces.append(s.gpa, .{
@@ -682,7 +880,7 @@ const Server = struct {
         const current = ss.activeWorkspace();
         s.chrome_tabs.clearRetainingCapacity();
         for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .active = t.id == current.active });
-        const view: chrome.View = .{
+        return .{
             .workspaces = s.chrome_workspaces.items,
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,
@@ -694,13 +892,6 @@ const Server = struct {
                 .help => .help,
             },
         };
-        var h: std.hash.Wyhash = .init(0);
-        std.hash.autoHashStrat(&h, view, .Deep);
-        const key = h.final();
-        if (!all and c.drawn_chrome == key) return;
-        chrome.draw(&c.frame, view);
-        c.drawn_chrome = key;
-        try s.retitle(c, current.name.text());
     }
 
     /// Sends `{hostname}: {workspace}` as the outer window title when it changed.
