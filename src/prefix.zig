@@ -306,8 +306,8 @@ test "prefix q detaches in legacy and kitty encodings" {
 
 test "every table key maps to its action" {
     try expectRun("\x02c\x02v\x02-\x02z\x02x\x02n\x02p\x02X\x02N\x02D", &.{}, &.{
-        .new_tab,              .{ .split = .right }, .{ .split = .down }, .zoom,          .close_pane,
-        .next_tab,             .prev_tab,            .close_tab,          .new_workspace, .close_workspace,
+        .new_tab,  .{ .split = .right }, .{ .split = .down }, .zoom,          .close_pane,
+        .next_tab, .prev_tab,            .close_tab,          .new_workspace, .close_workspace,
     });
     try expectRun("\x02h\x02j\x02k\x02l\x02\x1b[D\x02\x1b[B\x02\x1b[A\x02\x1b[C", &.{}, &.{
         .{ .focus = .left }, .{ .focus = .down }, .{ .focus = .up }, .{ .focus = .right },
