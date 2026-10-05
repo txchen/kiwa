@@ -33,6 +33,10 @@ goal even when Kiwa's own CPU is low.
   `kiwa ls` output or a debug protocol request) so e2e can assert that hidden
   output causes no render wakes, not only no bytes.
 
+- **Flaky e2e case.** "a stalled client recovers after its buffer overflows"
+  failed once in ticket 08 and twice in ticket 10, under load. Find the root
+  cause (product bug or test timing) and fix it there.
+
 ## Acceptance
 
 - Rerun `zig build bench`. Spinner outer bytes at most 4 per frame. 30 lines/s
