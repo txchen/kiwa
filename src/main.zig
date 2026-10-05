@@ -43,6 +43,7 @@ test {
     _ = @import("protocol.zig");
     _ = @import("sgr.zig");
     _ = @import("input.zig");
+    _ = @import("prefix.zig");
     _ = @import("frame.zig");
     _ = @import("diff.zig");
     _ = @import("out_buffer.zig");

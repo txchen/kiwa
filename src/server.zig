@@ -2,7 +2,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 const paths_mod = @import("paths.zig");
 const protocol = @import("protocol.zig");
-const input = @import("input.zig");
+const prefix_mod = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const Pane = @import("pane.zig").Pane;
@@ -75,7 +75,7 @@ const Server = struct {
     pane_events: ?u32 = null,
     conns: std.ArrayList(*Conn) = .empty,
     client: ?*Conn = null,
-    prefix: input.Prefix = .{},
+    prefix: prefix_mod.Prefix = .{},
     scratch: std.ArrayList(u8) = .empty,
     exit: ?Exit = null,
 
