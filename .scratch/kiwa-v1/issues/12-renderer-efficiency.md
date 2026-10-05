@@ -1,6 +1,6 @@
 # 12 Renderer efficiency: scrolling, sync markers, and wakes
 
-Status: open
+Status: claimed
 Blocked by: 06
 
 ## Why
