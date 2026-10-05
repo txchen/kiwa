@@ -1,6 +1,6 @@
 # 08 Names and rename dialogs
 
-Status: open
+Status: claimed
 Blocked by: 06
 
 ## Scope
