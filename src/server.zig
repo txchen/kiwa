@@ -56,9 +56,10 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .save = std.time.ns_per_s,
 });
 
-/// Asks for the kitty keyboard flags, then for DA1. Every terminal answers
-/// DA1, so a kitty reply ahead of it means the terminal speaks the protocol.
-const probe_seq = "\x1b[?u\x1b[c";
+/// Asks for the kitty keyboard flags, then whether left and right margins
+/// (DECLRMM, mode 69) are known, then for DA1. Every terminal answers DA1,
+/// so a reply ahead of it means the terminal has that feature.
+const probe_seq = "\x1b[?u\x1b[?69$p\x1b[c";
 /// Pushes the kitty "disambiguate escape codes" flag.
 const kitty_push_seq = "\x1b[>1u";
 
@@ -81,8 +82,14 @@ const Conn = struct {
     /// Decodes the outer terminal's input inside `input` messages.
     input: input.Decoder = .{},
     prefix: prefix.Prefix = .{},
+    /// Whether the replies to the attach probes may still come; the DA1
+    /// reply ends them.
+    probing: bool = false,
     /// The outer terminal's keyboard protocol, learned from the probe replies.
-    keyboard: enum { probing, legacy, kitty } = .probing,
+    keyboard: enum { legacy, kitty } = .legacy,
+    /// Whether the outer terminal supports left and right margins, so that
+    /// a pane narrower than the frame can scroll alone.
+    lr_margins: bool = false,
     out: OutBuffer = .{},
     state: enum {
         open,
@@ -402,7 +409,7 @@ const Server = struct {
         s.client = c;
         c.size = sanitize(h.size);
         c.redraw_pending = true;
-        c.keyboard = if (try s.pushTerminal(c, probe_seq)) .probing else .legacy;
+        c.probing = try s.pushTerminal(c, probe_seq);
         s.size = c.size;
         if (s.session.isEmpty()) {
             if (s.restore) |*r| {
@@ -1004,14 +1011,21 @@ const Server = struct {
     }
 
     fn onReply(s: *Server, c: *Conn, r: input.Reply) !void {
-        if (c.keyboard != .probing) return;
-        c.keyboard = switch (r) {
-            .kitty_flags => if (try s.pushTerminal(c, kitty_push_seq)) .kitty else .legacy,
-            .device_attributes => .legacy,
-            .mode => return,
-        };
-        std.log.info("outer terminal keyboard: {t}", .{c.keyboard});
-        try s.flush(c);
+        if (!c.probing) return;
+        switch (r) {
+            .kitty_flags => if (c.keyboard == .legacy and try s.pushTerminal(c, kitty_push_seq)) {
+                c.keyboard = .kitty;
+                try s.flush(c);
+            },
+            // DECRPM states 1 to 3 are set, reset, and permanently set.
+            .mode => |m| if (m.mode == 69) {
+                c.lr_margins = m.state >= 1 and m.state <= 3;
+            },
+            .device_attributes => {
+                c.probing = false;
+                std.log.info("outer terminal keyboard: {t}, left and right margins: {}", .{ c.keyboard, c.lr_margins });
+            },
+        }
     }
 
     /// Queues bytes for the outer terminal outside the frame stream.

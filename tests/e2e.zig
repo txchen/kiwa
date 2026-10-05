@@ -173,6 +173,7 @@ const Outer = struct {
     term: vt.Terminal,
     stream: vt.TerminalStream,
     keyboard: Keyboard,
+    margins: bool,
     eof: bool = false,
     status: ?u32 = null,
     capture: ?*std.ArrayList(u8) = null,
@@ -186,6 +187,8 @@ const Outer = struct {
         rows: u16 = 24,
         /// A legacy terminal ignores the kitty keyboard query.
         keyboard: Keyboard = .kitty,
+        /// Without margins, the terminal does not know DECLRMM.
+        margins: bool = true,
     };
 
     fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, opts: Options) !*Outer {
@@ -207,6 +210,7 @@ const Outer = struct {
             .term = try .init(ctx.io, ctx.gpa, .{ .cols = opts.cols, .rows = opts.rows }),
             .stream = undefined,
             .keyboard = opts.keyboard,
+            .margins = opts.margins,
         };
         var handler: vt.TerminalStream.Handler = .init(&o.term);
         handler.effects.write_pty = &answer;
@@ -222,7 +226,8 @@ const Outer = struct {
         const o: *Outer = @fieldParentPtr("stream", stream);
         const kitty_flags = std.mem.startsWith(u8, data, "\x1b[?") and std.mem.endsWith(u8, data, "u");
         if (o.keyboard == .legacy and kitty_flags) return;
-        sys.writeAll(o.master, data) catch |e| std.debug.print("    outer reply failed: {t}\n", .{e});
+        const reply = if (!o.margins and std.mem.startsWith(u8, data, "\x1b[?69;")) "\x1b[?69;0$y" else data;
+        sys.writeAll(o.master, reply) catch |e| std.debug.print("    outer reply failed: {t}\n", .{e});
     }
 
     fn deviceAttributes(_: *vt.TerminalStream.Handler) vt.device_attributes.Attributes {
@@ -530,7 +535,7 @@ fn legacyKeyboardGetsNoKittyFlags(ctx: *Ctx) !void {
 }
 
 fn probeRepliesStayOutOfPanes(ctx: *Ctx) !void {
-    const a = try ctx.attachWith(.{ .keyboard = .legacy });
+    const a = try ctx.attachWith(.{ .keyboard = .legacy, .margins = false });
     try a.waitLine("$");
     try a.send("cat -v\r");
     try a.waitLine("$ cat -v");
@@ -539,6 +544,8 @@ fn probeRepliesStayOutOfPanes(ctx: *Ctx) !void {
     try b.send("x\r");
     try b.waitLine("x");
     try expect(!try b.contains("[?"), "no probe reply reached the pane");
+    try expect(try ctx.serverLogHas("keyboard: legacy, left and right margins: false"), "the server learned that the first terminal lacks margins");
+    try expect(try ctx.serverLogHas("keyboard: kitty, left and right margins: true"), "the server learned that the second terminal has margins");
     try b.press(char('c', ctrl));
     try b.waitLine("$");
 }
