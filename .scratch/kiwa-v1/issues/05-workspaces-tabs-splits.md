@@ -15,6 +15,12 @@ Blocked by: 03, 04
 - New panes start in the focused pane's directory (OSC 7, or
   `/proc/<pid>/cwd` read once).
 
+- Cap the bracketed-paste buffer (for example 8 MiB): past the cap, pass
+  the paste to the pane in chunks instead of growing memory.
+- `shift+1..9` bindings must also match the shifted punctuation that legacy
+  terminals send (`!`, `@`, `#`, ... on a US layout), since legacy input
+  carries no shift modifier for them.
+
 ## Acceptance
 
 - Layout unit tests for split, close, directional focus, resize, and zoom.
