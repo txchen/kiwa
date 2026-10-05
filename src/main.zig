@@ -48,4 +48,5 @@ test {
     _ = @import("frame.zig");
     _ = @import("diff.zig");
     _ = @import("out_buffer.zig");
+    _ = @import("layout.zig");
 }
