@@ -425,6 +425,8 @@ fn detachRestoresTerminal(ctx: *Ctx) !void {
     try expect(o.term.screens.active_key == .alternate, "the client uses the alternate screen");
     try expect(o.term.modes.get(.bracketed_paste), "bracketed paste is on");
     try expect(o.term.modes.get(.focus_event), "focus events are on");
+    try expect(o.term.modes.get(.mouse_event_button) and o.term.modes.get(.mouse_format_sgr), "button-event mouse tracking with SGR coordinates is on");
+    try expect(!o.term.modes.get(.mouse_event_any), "any-motion mouse tracking is off");
     try o.waitKitty();
     try expect(o.kittyFlags() == 1, "the server pushed the disambiguate flag");
     try o.press(char('b', ctrl));
@@ -441,6 +443,7 @@ fn detachRestoresTerminal(ctx: *Ctx) !void {
     try expect(o.kittyFlags() == 0, "the kitty flags are popped");
     try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
     try expect(!o.term.modes.get(.focus_event), "focus events are off");
+    try expect(!o.term.modes.get(.mouse_event_button) and !o.term.modes.get(.mouse_format_sgr), "mouse tracking is off");
 }
 
 fn legacyKeyboardGetsNoKittyFlags(ctx: *Ctx) !void {
@@ -836,6 +839,7 @@ fn signalRestoresTerminal(ctx: *Ctx) !void {
     _ = try sys.check(linux.tcgetattr(o.master, &t));
     try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
     try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
+    try expect(!o.term.modes.get(.mouse_event_button) and !o.term.modes.get(.mouse_format_sgr), "mouse tracking is off");
     const b = try attachedWithPrompt(ctx);
     try b.send("echo survived\r");
     try b.waitLine("survived");

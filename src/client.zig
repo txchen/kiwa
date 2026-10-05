@@ -9,13 +9,15 @@ const EPOLL = linux.EPOLL;
 
 /// Saves the window title on the terminal's title stack, since the server
 /// retitles the window, then enters the alternate screen and turns on
-/// bracketed paste and focus events.
-const enter_seq = "\x1b[22;2t\x1b[?1049h\x1b[?2004h\x1b[?1004h";
+/// bracketed paste, focus events, and button-event mouse tracking with SGR
+/// coordinates. Any-motion tracking (1003) stays off so that moving the
+/// mouse without a button sends nothing (ADR 0002).
+const enter_seq = "\x1b[22;2t\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h";
 /// Turns off everything the client, the server, or a cut-off frame may
 /// have left on, and restores the saved title. The server pushes kitty
 /// keyboard flags onto the alternate screen's stack, so the pop comes
 /// before leaving that screen.
-const leave_seq = "\x1b[?2026l\x1b[0m\x1b[?25h\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[23;2t";
+const leave_seq = "\x1b[?2026l\x1b[0m\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[23;2t";
 
 const Outcome = struct { message: []const u8, code: u8 };
 
