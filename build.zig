@@ -46,7 +46,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    e2e_mod.addImport("ghostty-vt", vt);
+    // The outer terminal model is always optimized. In Debug, ghostty-vt
+    // verifies a whole page after every row a scroll moves, which makes
+    // each scroll of a large pane cost tens of milliseconds.
+    const outer_vt = b.dependency("ghostty", .{ .target = target, .optimize = .ReleaseSafe }).module("ghostty-vt");
+    e2e_mod.addImport("ghostty-vt", outer_vt);
     e2e_mod.addImport("kiwa_sys", b.createModule(.{
         .root_source_file = b.path("src/sys.zig"),
         .target = target,
