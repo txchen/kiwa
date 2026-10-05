@@ -1,6 +1,6 @@
 # Herdr v0.9.1 UI inventory: what Kiwa keeps
 
-Status: draft for discussion
+Status: v1 scope agreed on 2026-10-05 (see Decisions)
 Date: 2026-10-05
 
 ## Purpose
@@ -11,7 +11,8 @@ with no configuration, and support the mouse. Agent features are not needed.
 
 This file lists Herdr's user-facing features and proposes, for each one,
 **v1** (first usable version), **later**, or **drop**. Nothing here is
-decided until the user confirms it.
+decided until the user confirms it. The Decisions section records
+what the user has confirmed.
 
 ## Sources
 
@@ -39,7 +40,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | ID | Herdr feature | Proposal | Note |
 | --- | --- | --- | --- |
 | S1 | Workspaces, named after the start directory | v1 | Core sidebar unit. |
-| S2 | Tabs inside a workspace, top tab row with `+` | v1 | Cheap, and part of the Herdr feel. |
+| S2 | Tabs inside a workspace, top tab row with `+` | v1 (confirmed) | Cheap, and part of the Herdr feel. |
 | S3 | Split right / split down, tree layout | v1 | Confirmed by the user. |
 | S4 | Zoom the focused pane | v1 | Layout flag only. |
 | S5 | Swap panes | later | |
@@ -52,7 +53,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | ID | Herdr feature | Proposal | Note |
 | --- | --- | --- | --- |
 | B1 | Workspace list with focus highlight | v1 | |
-| B2 | Git branch under each workspace | open | Herdr polls Git on a nominal 1.5 s interval. Kiwa could watch `.git/HEAD` with inotify, or drop the branch. |
+| B2 | Git branch under each workspace | v1 (confirmed) | Herdr polls Git on a nominal 1.5 s interval. Kiwa watches `.git/HEAD` with inotify instead. |
 | B3 | Ahead/behind counts | drop | Needs to run `git`. |
 | B4 | Rolled-up agent state icon | drop | Replace with an activity marker: bell or new output in a workspace you are not viewing. That marker is event-driven. |
 | B5 | Agents panel | drop | |
@@ -71,7 +72,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | M3 | Wheel scrolls scrollback (3 lines); forwarded when the app enabled mouse | v1 | |
 | M4 | Drag to select, copy on select (OSC 52) | v1 | With mouse capture on, this is the only way to copy text. |
 | M5 | Double-click word selection | later | |
-| M6 | Right-click menus: rename, close, split, zoom | open | Herdr's menus also hold worktree items. Those are dropped. |
+| M6 | Right-click menus: rename, close, split, zoom | v1 (confirmed) | Herdr's menus also hold worktree items. Those are dropped. |
 | M7 | Interactive pane scrollbars | later | |
 | M8 | Right-click passthrough toggle and modifier | later | |
 | M9 | `mouse_capture = false` | later | Configuration. |
@@ -80,7 +81,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 
 | ID | Herdr feature | Proposal | Note |
 | --- | --- | --- | --- |
-| K1 | Prefix `ctrl+b` and the core keys (`c`, `v`, `minus`, `h/j/k/l`, `w`, `q`) | v1 | The prefix itself is an open question. |
+| K1 | Prefix `ctrl+b` and the core keys (`c`, `v`, `minus`, `h/j/k/l`, `w`, `q`) | v1 (confirmed) | Kiwa replaces tmux, so nesting is not a concern. |
 | K2 | Tabs: `n`/`p`, `1..9`, rename, close | v1 | |
 | K3 | Workspaces: new, rename, close, `shift+1..9` | v1 | |
 | K4 | Navigate mode (`prefix+w`) | v1 | The keyboard path into the sidebar. |
@@ -90,7 +91,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | K8 | Full keybinding configuration | later | v1 needs zero configuration. |
 | K9 | Copy mode (vi movement, search) | later | M3 and M4 cover v1. |
 | K10 | Readline-style editing in name fields | v1, minimal | Typing, backspace, enter, esc. |
-| K11 | Ask for a name on every new tab (Herdr default) | open | Proposal: no prompt. Number tabs and rename on demand. |
+| K11 | Ask for a name on every new tab (Herdr default) | replaced (confirmed) | tmux-style automatic names. See Decisions. |
 | K12 | Confirm before close | v1 | Only when the pane still runs a process other than the shell. |
 
 ### Display
@@ -115,7 +116,7 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | ID | Herdr feature | Proposal | Note |
 | --- | --- | --- | --- |
 | P1 | Detach (`prefix+q`) and reattach | v1 | |
-| P2 | After a server restart, restore workspaces, tabs, panes, cwd, and layout | open | Not in the design draft. It needs a session file written on layout events. Processes do not survive. |
+| P2 | After a server restart, restore workspaces, tabs, panes, cwd, and layout | v1 (confirmed) | Not in the design draft. It needs a session file written on layout events. Processes do not survive. |
 | P3 | Replay of pane screen history | drop | |
 | P4 | Agent session resume | drop | |
 | P5 | Update handoff | drop | |
@@ -135,12 +136,34 @@ No feature may add a periodic timer, a process scan, or a screen scan.
 | I7 | macOS and Windows | later | |
 | I8 | Agent detection, states, integrations | drop | This is the per-pane screen scan that costs Herdr idle CPU. |
 
+## Decisions
+
+The user confirmed these on 2026-10-05:
+
+1. **Prefix (K1).** `ctrl+b`. Kiwa replaces tmux, so a nested-prefix
+   collision is not a concern.
+2. **Git branch (B2).** v1. Kiwa watches `.git/HEAD` with inotify, so the
+   branch line adds no polling.
+3. **Tabs (S2).** v1.
+4. **Tab names (K11).** Work like tmux `automatic-rename`. A tab with no
+   name shows a dynamic name. Renaming fixes the name. tmux 3.5a re-checks a
+   window's name only after its active pane has changed (`PANE_CHANGED`),
+   and at most every `NAME_INTERVAL` (500 ms) through a one-shot timer. Its
+   default format is `pane_current_command`. Kiwa does the same: the dynamic
+   name is the focused pane's foreground command, re-checked only after pane
+   output or focus changes and rate-limited by a one-shot deadline. A quiet
+   pane triggers no checks. Sources: tmux 3.5a `names.c`, `tmux.h`, and
+   `options-table.c`.
+5. **Right-click menus (M6).** v1, with rename, close, split, and zoom.
+6. **Layout restore (P2).** v1. After a server restart, Kiwa restores
+   workspaces, tabs, panes, cwd, and layout, and starts new shells.
+   Processes do not survive.
+
 ## Open questions
 
-1. **Prefix key (K1).** `ctrl+b` matches Herdr and tmux. Nesting Kiwa inside
-   tmux, or tmux inside Kiwa, makes the two collide.
-2. **Git branch (B2).** Watch `.git/HEAD` through inotify, or drop it?
-3. **Tabs (S2).** Does v1 need tabs, or are workspaces plus splits enough?
-4. **New tab name (K11).** Ask for a name, or number tabs automatically?
-5. **Right-click menus (M6).** v1 or later?
-6. **Layout restore (P2).** v1 or later?
+- How should a workspace pick its name: the start directory's basename
+  (Herdr), or something dynamic like a tab? Default proposal: the basename,
+  fixed after a rename.
+- Where does the session file live, and when is it written? Proposal:
+  `$XDG_STATE_HOME/kiwa/<session>/session.json`, written atomically after
+  layout events, coalesced with a one-shot deadline.
