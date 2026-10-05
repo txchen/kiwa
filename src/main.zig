@@ -17,4 +17,5 @@ test {
     _ = @import("sgr.zig");
     _ = @import("input.zig");
     _ = @import("render_full.zig");
+    _ = @import("out_buffer.zig");
 }
