@@ -49,11 +49,33 @@ for example `-- --runs 5`.
 
 ```sh
 kiwa              # attach, starting the server if needed
+kiwa ls           # print the workspaces and tabs
 kiwa kill-server  # stop the server and its panes
 kiwa --version    # version and pinned Ghostty commit
 ```
 
-`ctrl+b q` detaches. `ctrl+b ctrl+b` sends `ctrl+b` to the pane.
+The prefix is `ctrl+b`. Press it, then one of these keys:
+
+| Key | Action |
+| --- | --- |
+| `c` | New tab in the focused pane's directory |
+| `v` / `-` | Split the focused pane right / down |
+| `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
+| `z` | Zoom or unzoom the focused pane |
+| `x` | Close the focused pane |
+| `r` | Resize mode: `h/j/k/l` or arrows move the divider, `esc` or `enter` leaves |
+| `n` / `p`, `1..9` | Next / previous tab, tab by number |
+| `shift+x` | Close the tab |
+| `shift+n` / `shift+d` | New workspace in the focused pane's directory / close the workspace |
+| `shift+1..9` | Workspace by number |
+| `q` | Detach |
+| `ctrl+b` | Send `ctrl+b` to the pane |
+
+A pane closes when its program exits. The last pane of a tab closes the
+tab, the last tab closes the workspace, and the last workspace stops the
+server. Directional focus picks the nearest pane on that side that
+overlaps the focused one; among equally near panes it picks the topmost,
+then the leftmost.
 
 Kiwa decodes the outer terminal's keys and encodes them again for the
 pane from the pane's own modes. A program that asks for the kitty keyboard
