@@ -2180,6 +2180,298 @@ fn quietRepositoryReadsHeadOnlyAfterEvents(ctx: *Ctx) !void {
     try expect(try ctx.counter("head_reads") > reads, "a switch outside the pane reads HEAD again");
 }
 
+/// A file in this case's state directory.
+fn statePath(ctx: *Ctx, comptime name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(ctx.gpa, "{s}/state/" ++ name, .{ctx.dir});
+}
+
+/// What identifies one write of `session.json`: a rename gives it a new
+/// inode, and every write a new mtime.
+const Saved = struct {
+    inode: std.Io.File.INode,
+    mtime: std.Io.Timestamp,
+    text: []u8,
+
+    fn read(ctx: *Ctx) !?Saved {
+        const path = try statePath(ctx, "session.json");
+        defer ctx.gpa.free(path);
+        const st = std.Io.Dir.cwd().statFile(ctx.io, path, .{}) catch |e| switch (e) {
+            error.FileNotFound => return null,
+            else => return e,
+        };
+        const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(1024 * 1024));
+        return .{ .inode = st.inode, .mtime = st.mtime, .text = text };
+    }
+
+    fn same(a: Saved, b: Saved) bool {
+        return a.inode == b.inode and a.mtime.nanoseconds == b.mtime.nanoseconds and std.mem.eql(u8, a.text, b.text);
+    }
+};
+
+/// Waits until `session.json` exists and holds `needle`.
+fn waitSaved(ctx: *Ctx, needle: []const u8) !Saved {
+    const deadline = now() + 5 * std.time.ns_per_s;
+    while (true) {
+        if (try Saved.read(ctx)) |saved| {
+            if (std.mem.indexOf(u8, saved.text, needle) != null) return saved;
+            ctx.gpa.free(saved.text);
+        }
+        if (now() > deadline) {
+            std.debug.print("    session.json never held \"{s}\"\n", .{needle});
+            return error.Timeout;
+        }
+        sleepMs(50);
+    }
+}
+
+fn savedGone(ctx: *Ctx) !bool {
+    const saved = try Saved.read(ctx) orelse return true;
+    ctx.gpa.free(saved.text);
+    return false;
+}
+
+/// The sidebar, the tab row, and every pane border cell with its color:
+/// what a restore must bring back exactly. Pane contents are left out.
+fn chromeAndBorders(o: *Outer) ![]u8 {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    var out: std.Io.Writer.Allocating = .init(o.gpa);
+    errdefer out.deinit();
+    const w = &out.writer;
+    const sidebar = g.sidebarCols();
+    for (0..g.rs.rows) |y| {
+        for (0..g.rs.cols) |x| {
+            if (g.rs.row_data.items(.cells)[y].items(.raw)[x].wide == .spacer_tail) continue;
+            const c = g.cp(x, y);
+            if (x < sidebar or y == 0) {
+                try w.print("{u}", .{c});
+            } else if (c >= 0x2500 and c <= 0x257f) {
+                const fg = g.fg(x, y);
+                try w.print("[{d},{d} {u} {s}]", .{ x, y, c, if (fg == .palette and fg.palette == 6) "accent" else "plain" });
+            }
+        }
+        try w.writeByte('\n');
+    }
+    return out.toOwnedSlice();
+}
+
+fn chromeIs(o: *Outer, want: []const u8) !bool {
+    const got = try chromeAndBorders(o);
+    defer o.gpa.free(got);
+    return std.mem.eql(u8, got, want);
+}
+
+/// Types a name into an open rename dialog in place of its text and saves it.
+fn renameTo(o: *Outer, comptime dialog: []const u8, comptime name: []const u8) !void {
+    try o.waitText(dialog);
+    try o.press(char('u', ctrl));
+    try typeText(o, name);
+    try o.press(named(.enter, .{}));
+    try o.waitGone(dialog);
+}
+
+/// Runs `pwd` in the focused pane and waits for `dir` inside `box`.
+fn pwdIn(ctx: *Ctx, o: *Outer, comptime sub: []const u8, box: Box) !void {
+    try o.send("clear; pwd\r");
+    const dir = try std.fmt.allocPrint(ctx.gpa, "{s}" ++ sub, .{ctx.dir});
+    defer ctx.gpa.free(dir);
+    try waitTextIn(o, dir, box);
+}
+
+fn restoreRebuildsTheSession(ctx: *Ctx) !void {
+    // Wide enough for each pane's directory to fit on one line.
+    const o = try ctx.attachSized(160, 30);
+    try o.waitLine("$");
+    try o.waitKitty();
+    try o.send("mkdir -p one/left one/top one/bottom two/x && cd one/left && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-left");
+    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 29 };
+    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 29 };
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 29 }, half });
+    try o.send("cd ../top && echo in-$(basename $PWD)\r");
+    try waitTextIn(o, "in-top", half.inner());
+    try prefixed(o, "-");
+    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 15 }, .{ .x = 93, .y = 16, .cols = 67, .rows = 14 } });
+    try o.send("cd ../bottom && echo in-$(basename $PWD)\r");
+    try o.waitText("in-bottom");
+    try o.drag(.{ 92, 5 }, .{ 75, 5 });
+    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 29 };
+    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 15 };
+    const bottom: Box = .{ .x = 76, .y = 16, .cols = 84, .rows = 14 };
+    try waitBoxes(o, &.{ left, top, bottom });
+    try prefixed(o, "k");
+    try waitAccent(o, &.{ top, left, bottom });
+    try prefixed(o, "T");
+    try renameTo(o, " rename tab ", "editor");
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    try o.send("cd ../../two && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-two");
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    try o.send("cd x && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-x");
+    try prefixed(o, "W");
+    try renameTo(o, " rename workspace ", "proj");
+    try prefixed(o, "!");
+    try waitHighlighted(o, 1);
+    try prefixed(o, "1");
+    try waitBoxes(o, &.{ left, top, bottom });
+
+    const name = caseName(ctx);
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(ctx.gpa);
+    try list.print(ctx.gpa, "1: {s} (active)\n  1: editor, 3 panes (active)\n  2: sh, 1 pane\n2: proj\n  1: sh, 1 pane (active)\n", .{name});
+    try ctx.waitList(list.items);
+    _ = try o.pump(300);
+    const before = try chromeAndBorders(o);
+    defer ctx.gpa.free(before);
+
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    try expect(try ctx.run("kill-server") == 0, "kill-server exits 0");
+    try expect(try o.waitExit() == 0, "the client exits 0");
+    try ctx.waitServerGone(pid);
+    const saved = try waitSaved(ctx, "\"proj\"");
+    defer ctx.gpa.free(saved.text);
+    std.debug.print("    session.json:\n{s}", .{saved.text});
+
+    const b = try ctx.attachSized(160, 30);
+    try waitBoxes(b, &.{ left, top, bottom });
+    try ctx.waitList(list.items);
+    try b.waitFor("the same sidebar, tab row, and borders", @as([]const u8, before), chromeIs);
+    try pwdIn(ctx, b, "/one/top", top.inner());
+    try prefixed(b, "h");
+    try waitAccent(b, &.{ left, top, bottom });
+    try pwdIn(ctx, b, "/one/left", left.inner());
+    try prefixed(b, "l");
+    try prefixed(b, "j");
+    try waitAccent(b, &.{ bottom, left, top });
+    try pwdIn(ctx, b, "/one/bottom", bottom.inner());
+    try prefixed(b, "2");
+    try waitNoBorders(b);
+    try pwdIn(ctx, b, "/two", full);
+    try prefixed(b, "@");
+    try waitHighlighted(b, 2);
+    try pwdIn(ctx, b, "/two/x", full);
+}
+
+fn restoreFallsBackToTheWorkspaceRoot(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("mkdir gone && cd gone && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-gone");
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    try expect(try ctx.run("kill-server") == 0, "kill-server exits 0");
+    try ctx.waitServerGone(pid);
+    const gone = try std.fmt.allocPrint(ctx.gpa, "{s}/gone", .{ctx.dir});
+    defer ctx.gpa.free(gone);
+    const saved = try waitSaved(ctx, gone);
+    ctx.gpa.free(saved.text);
+    try std.Io.Dir.cwd().deleteDir(ctx.io, gone);
+    const b = try attachedWithPrompt(ctx);
+    try b.send("clear; pwd\r");
+    try b.waitLine(ctx.dir);
+}
+
+fn restoredWorkspaceShowsItsBranch(ctx: *Ctx) !void {
+    ctx.gpa.free(try ctx.sh("git init -q -b main && git commit -q --allow-empty -m one"));
+    const o = try attachedWithPrompt(ctx);
+    try waitSidebarRow(o, 2, "   main");
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    try expect(try ctx.run("kill-server") == 0, "kill-server exits 0");
+    try ctx.waitServerGone(pid);
+    // Switched while no server runs, so only a fresh read of HEAD shows it.
+    ctx.gpa.free(try ctx.sh("git switch -q -c restored"));
+    const b = try attachedWithPrompt(ctx);
+    try waitSidebarRow(b, 2, "   restored");
+    ctx.gpa.free(try ctx.sh("git switch -q -c later"));
+    try waitSidebarRow(b, 2, "   later");
+}
+
+fn typingDoesNotSave(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    const before = try waitSaved(ctx, "\"split\"");
+    defer ctx.gpa.free(before.text);
+    // Past the save deadline's second, so a late write would show.
+    sleepMs(1200);
+    const settled = (try Saved.read(ctx)).?;
+    defer ctx.gpa.free(settled.text);
+    try expect(settled.same(before), "nothing is written after the save the split armed");
+    try o.send("for i in 1 2 3; do echo tick$i; sleep 1; done\r");
+    try typeText(o, "echo typed ahead");
+    try waitTextIn(o, "tick3", right_half.inner());
+    try o.send("\r");
+    _ = try o.pump(1200);
+    const after = (try Saved.read(ctx)).?;
+    defer ctx.gpa.free(after.text);
+    try expect(after.same(before), "3 s of typing and output leave session.json untouched");
+
+    // A shell that reports its directory with OSC 7 saves its cd, but
+    // repeating the same directory saves nothing.
+    try o.send("clear; printf '\\033]7;file://localhost/tmp\\007'; echo reported\r");
+    try waitTextIn(o, "reported", right_half.inner());
+    const moved = try waitSaved(ctx, "\"cwd\": \"/tmp\"");
+    defer ctx.gpa.free(moved.text);
+    sleepMs(1200);
+    try o.send("clear; printf '\\033]7;file://localhost/tmp\\007'; echo again\r");
+    try waitTextIn(o, "again", right_half.inner());
+    sleepMs(1500);
+    const repeated = (try Saved.read(ctx)).?;
+    defer ctx.gpa.free(repeated.text);
+    try expect(repeated.same(moved), "a repeated OSC 7 directory leaves session.json untouched");
+}
+
+fn closingTheLastWorkspaceRemovesTheSave(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    try prefixed(o, "W");
+    try renameTo(o, " rename workspace ", "old");
+    const saved = try waitSaved(ctx, "\"old\"");
+    ctx.gpa.free(saved.text);
+    try o.send("exit\r");
+    try expect(try o.waitExit() == 0, "the client exits 0");
+    try expect(try o.hasLine("exited"), "the client prints \"exited\"");
+    try expect(try savedGone(ctx), "session.json is removed with the last workspace");
+    const b = try attachedWithPrompt(ctx);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+    try b.send("clear; pwd\r");
+    try b.waitLine(ctx.dir);
+}
+
+fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
+    const state = try statePath(ctx, "");
+    defer ctx.gpa.free(state);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, state);
+    const path = try statePath(ctx, "session.json");
+    defer ctx.gpa.free(path);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "{\"version\": 1, \"workspaces\": [" });
+    const o = try attachedWithPrompt(ctx);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+    var dir = try std.Io.Dir.openDirAbsolute(ctx.io, state, .{ .iterate = true });
+    defer dir.close(ctx.io);
+    var it = dir.iterate();
+    var bad: usize = 0;
+    while (try it.next(ctx.io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "session.json.bad-")) continue;
+        bad += 1;
+        const moved = try dir.readFileAlloc(ctx.io, entry.name, ctx.gpa, .limited(1024));
+        defer ctx.gpa.free(moved);
+        try expect(std.mem.eql(u8, moved, "{\"version\": 1, \"workspaces\": ["), "the moved file keeps the corrupt contents");
+    }
+    try expect(bad == 1, "the corrupt file was moved to one session.json.bad-* file");
+    const log = try statePath(ctx, "server.log");
+    defer ctx.gpa.free(log);
+    const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, log, ctx.gpa, .limited(1024 * 1024));
+    defer ctx.gpa.free(text);
+    try expect(std.mem.indexOf(u8, text, "session.json is not usable (MalformedJson)") != null, "the server logged why");
+    const fresh = try waitSaved(ctx, "\"version\": 1");
+    ctx.gpa.free(fresh.text);
+    try o.send("echo fresh\r");
+    try o.waitLine("fresh");
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
@@ -2241,6 +2533,12 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "the branch line follows git switch and shows a detached commit's short id", .run = branchLineFollowsHead },
     .{ .name = "only workspaces in a repository get a branch line, and a shared watch outlives a closed workspace", .run = branchLinesBelongToRepositoryWorkspaces },
     .{ .name = "a quiet repository's HEAD is read only after an inotify event", .run = quietRepositoryReadsHeadOnlyAfterEvents },
+    .{ .name = "kill-server and kiwa restore the workspaces, tabs, names, layout, and directories", .run = restoreRebuildsTheSession },
+    .{ .name = "a restored pane whose directory is gone starts in the workspace root", .run = restoreFallsBackToTheWorkspaceRoot },
+    .{ .name = "a restored workspace in a repository shows its branch and follows switches", .run = restoredWorkspaceShowsItsBranch },
+    .{ .name = "typing and output do not rewrite session.json; a new OSC 7 directory does", .run = typingDoesNotSave },
+    .{ .name = "closing the last workspace removes session.json and the next kiwa starts fresh", .run = closingTheLastWorkspaceRemovesTheSave },
+    .{ .name = "a corrupt session.json is moved aside and the server starts fresh", .run = corruptSaveIsMovedAside },
 };
 
 pub fn main(init: std.process.Init) !u8 {
