@@ -120,17 +120,23 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
         const count: usize = if (lr_margins and r.cols >= 2 and !std.meta.eql(r, rows.rect)) 2 else 1;
         // A scroll changes only its rows, so only they are compared.
         const band = sc.base.cells[@as(usize, r.y) * old.cols ..][0 .. @as(usize, r.rows) * old.cols];
+        // The narrowest candidate goes first: it usually costs least, and
+        // each later count stops once it costs more.
         var best: ?Scroll = null;
-        var best_bytes = bandBytes(&sc.base, new, g, r, null);
-        for (candidates[0..count]) |c| {
+        var best_bytes: u64 = std.math.maxInt(u64);
+        var i = count;
+        while (i > 0) {
+            i -= 1;
+            const c = candidates[i];
             @memcpy(sc.trial.cells[@as(usize, r.y) * old.cols ..][0..band.len], band);
             c.apply(&sc.trial);
-            const bytes = bandBytes(&sc.trial, new, g, r, c);
+            const bytes = bandBytes(&sc.trial, new, g, r, c, best_bytes);
             if (bytes < best_bytes) {
                 best = c;
                 best_bytes = bytes;
             }
         }
+        if (bandBytes(&sc.base, new, g, r, null, best_bytes) <= best_bytes) best = null;
         if (best) |b| {
             b.apply(&sc.base);
             sc.chosen.appendAssumeCapacity(b);
@@ -140,13 +146,17 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
 }
 
 /// The bytes that `scroll`, if any, and repainting `r`'s rows of `moved`
-/// into `new` cost, from an unknown cursor position.
-fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rect, scroll: ?Scroll) u64 {
+/// into `new` cost, from an unknown cursor position. Counting stops once
+/// it passes `limit`.
+fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rect, scroll: ?Scroll, limit: u64) u64 {
     var buf: [256]u8 = undefined;
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
     if (scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
-    for (r.y..r.y + r.rows) |y| o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
+    for (r.y..r.y + r.rows) |y| {
+        o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
+        if (d.fullCount() > limit) break;
+    }
     return d.fullCount();
 }
 
