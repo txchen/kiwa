@@ -29,7 +29,8 @@ mise exec -- zig build e2e    # end-to-end tests against the built kiwa binary
 The end-to-end harness runs each client under a PTY it owns and models the
 outer terminal with ghostty-vt. Every test sets a private `KIWA_SOCKET` and
 `KIWA_STATE_DIR` under a temporary directory, so it never touches a running
-Kiwa session.
+Kiwa session. `kiwa __stats` prints the server's debug counters, such as
+`renders` and `name_checks`, for tests and benchmarks.
 
 ## Benchmark
 
@@ -65,8 +66,8 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `x` | Close the focused pane |
 | `r` | Resize mode: `h/j/k/l` or arrows move the divider, `esc` or `enter` leaves |
 | `n` / `p`, `1..9` | Next / previous tab, tab by number |
-| `shift+x` | Close the tab |
-| `shift+n` / `shift+d` | New workspace in the focused pane's directory / close the workspace |
+| `shift+t` / `shift+x` | Rename / close the tab |
+| `shift+n` / `shift+w` / `shift+d` | New workspace in the focused pane's directory / rename / close the workspace |
 | `shift+1..9` | Workspace by number |
 | `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
 | `b` | Collapse or expand the sidebar |
@@ -83,9 +84,20 @@ active, a mode bar with the main keys takes its place. The outer window
 title is `{hostname}: {workspace}`, and the outer terminal's own title is
 restored on detach.
 
+A workspace is named after its start directory. A tab shows the command
+in the foreground of its focused pane, such as `sh`, `vim`, or `htop`,
+until you rename it. Kiwa checks that command only after the pane's output
+or a focus change, at most every 500 ms, as tmux's `automatic-rename`
+does. The rename dialog edits the current name: type, paste, `backspace`,
+`ctrl+u` to clear, `left`/`right`/`home`/`end` to move, `enter` to save,
+and `esc` or a click outside to cancel. Saving an empty name returns a tab
+to its command and a workspace to its directory's name.
+
 A pane closes when its program exits. The last pane of a tab closes the
 tab, the last tab closes the workspace, and the last workspace stops the
-server. Directional focus picks the nearest pane on that side that
+server. Closing a pane, a tab, or a workspace yourself asks first when one
+of its panes runs something other than its shell, for example
+`close pane? vim is running`; `y` closes it, and `n` or `esc` keeps it. Directional focus picks the nearest pane on that side that
 overlaps the focused one; among equally near panes it picks the topmost,
 then the leftmost.
 
@@ -103,9 +115,10 @@ Kiwa works with the mouse:
 - Drag in a pane to select text. Releasing the button copies the selection
   to the clipboard with OSC 52, so the outer terminal must allow OSC 52
   writes. A click clears the selection.
-- Right-click a workspace, a tab, or a pane for a menu. Click an item, or
-  move with `j`/`k` or the arrows and press `enter`; `esc`, a click
-  outside, or another right-click closes it.
+- Right-click a workspace (Rename, Close), a tab (New tab, Rename, Close),
+  or a pane (Rename tab, Split right, Split down, Zoom, Close pane) for a
+  menu. Click an item, or move with `j`/`k` or the arrows and press
+  `enter`; `esc`, a click outside, or another right-click closes it.
 
 When a pane's program turns on mouse reporting, as `vim` with `mouse=a`
 or `htop` do, clicks, drags, and the wheel inside the pane go to the
@@ -118,7 +131,9 @@ pane from the pane's own modes. A program that asks for the kitty keyboard
 protocol gets it when the outer terminal supports the protocol, so keys
 such as `shift+enter`, `ctrl+i` and `tab`, or `esc` and `alt` stay
 distinct. Pastes reach the pane bracketed when the pane enabled bracketed
-paste, and focus changes reach it when it enabled focus reporting. Without
+paste, and focus changes reach it when it enabled focus reporting. A
+program's OSC 52 clipboard writes go on to the outer terminal; writes over
+384 KiB are dropped, and clipboard reads are refused. Without
 kitty support in the outer terminal, a lone `esc` reaches the pane after
 25 ms with no further input.
 

@@ -256,7 +256,9 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
 - **Dynamic names.** After pane output or a focus change, the server arms a
   name check for that tab, at most once per 500 ms. The check reads the
   foreground process group with `tcgetpgrp` on the PTY master, then reads
-  `/proc/<pgid>/comm`.
+  `/proc/<pgid>/comm`. A burst of output ends with one check at least
+  500 ms after its last output, because the shell's echo of a silent
+  command such as `sleep` comes before the command takes the foreground.
 - **Git branch.** On workspace creation, the server walks up from
   `root_dir` once to find `.git`, resolving a `.git` file for worktrees. It
   reads `HEAD` and watches the directory that contains it with inotify, for
