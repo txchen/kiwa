@@ -94,6 +94,8 @@ const Conn = struct {
     drawn_help: bool = false,
     /// The navigate cursor, a workspace index.
     nav: usize = 0,
+    /// The outer window title last sent.
+    title: std.ArrayList(u8) = .empty,
 
     fn drewAt(c: *const Conn, p: Placement) bool {
         for (c.drawn.items) |d| if (std.meta.eql(d, p)) return true;
@@ -102,6 +104,7 @@ const Conn = struct {
 
     fn deinit(c: *Conn, gpa: std.mem.Allocator) void {
         c.drawn.deinit(gpa);
+        c.title.deinit(gpa);
         c.decoder.deinit(gpa);
         c.input.deinit(gpa);
         c.out.deinit(gpa);
@@ -137,6 +140,7 @@ const Server = struct {
     exit: ?Exit = null,
     /// The user's sidebar toggle; narrow clients collapse it regardless.
     collapsed: bool = false,
+    hostname: []const u8,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
 
@@ -665,7 +669,8 @@ const Server = struct {
         c.drawn_focus = focus;
     }
 
-    /// Redraws the sidebar and the tab row when what they show changed.
+    /// Redraws the sidebar and the tab row when what they show changed, and
+    /// retitles the outer window with them.
     fn drawChrome(s: *Server, c: *Conn, all: bool) !void {
         const ss = &s.session;
         s.chrome_workspaces.clearRetainingCapacity();
@@ -695,6 +700,26 @@ const Server = struct {
         if (!all and c.drawn_chrome == key) return;
         chrome.draw(&c.frame, view);
         c.drawn_chrome = key;
+        try s.retitle(c, current.name.text());
+    }
+
+    /// Sends `{hostname}: {workspace}` as the outer window title when it changed.
+    fn retitle(s: *Server, c: *Conn, workspace: []const u8) !void {
+        const osc = "\x1b]2;";
+        var buf: [256]u8 = undefined;
+        // The last byte is kept for the terminator; a longer title is cut short.
+        var w: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
+        w.print(osc ++ "{s}: {s}", .{ s.hostname, workspace }) catch {};
+        const title = w.buffered()[osc.len..];
+        // A control character would end the sequence early.
+        for (title) |*b| if (b.* < 0x20 or b.* == 0x7f) {
+            b.* = '?';
+        };
+        if (std.mem.eql(u8, title, c.title.items)) return;
+        buf[w.end] = 0x07;
+        if (!try s.pushTerminal(c, buf[0 .. w.end + 1])) return;
+        c.title.clearRetainingCapacity();
+        try c.title.appendSlice(s.gpa, title);
     }
 
     /// Writes what the socket accepts and keeps EPOLLOUT armed only while
@@ -798,6 +823,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
 
     if (ready_fd) |fd| _ = sys.write(fd, "1") catch {};
 
+    var uts: linux.utsname = undefined;
+    _ = linux.uname(&uts);
+
     var s: Server = .{
         .gpa = gpa,
         .io = io,
@@ -807,6 +835,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
         .listener = listener,
         .sigfd = sigfd,
         .timerfd = timerfd,
+        .hostname = std.mem.sliceTo(&uts.nodename, 0),
         .session = .init(gpa, std.fs.path.basename(env.get("SHELL") orelse "/bin/sh")),
     };
     s.loop() catch |e| {

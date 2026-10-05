@@ -1380,6 +1380,18 @@ fn waitCursorHidden(o: *Outer) !void {
     return o.waitFor("a hidden cursor", {}, cursorHidden);
 }
 
+fn hostname() []const u8 {
+    const S = struct {
+        var uts: linux.utsname = undefined;
+    };
+    _ = linux.uname(&S.uts);
+    return std.mem.sliceTo(&S.uts.nodename, 0);
+}
+
+fn titleIs(o: *Outer, want: []const u8) !bool {
+    return std.mem.eql(u8, o.term.getTitle() orelse "", want);
+}
+
 fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     var g: Grid = try .load(o);
@@ -1503,6 +1515,38 @@ fn keyHelpOpensAndCloses(ctx: *Ctx) !void {
     try o.waitLine("after");
 }
 
+fn outerTitleNamesTheWorkspace(ctx: *Ctx) !void {
+    const o = try ctx.attach();
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(ctx.gpa);
+    o.capture = &seen;
+    try o.waitLine("$");
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(ctx.gpa);
+    try want.print(ctx.gpa, "{s}: {s}", .{ hostname(), caseName(ctx) });
+    try o.waitFor("the outer title", want.items, titleIs);
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    _ = try o.pump(200);
+    try expect(std.mem.count(u8, seen.items, "\x1b]2;") == 1, "an unchanged title is not sent again");
+    try cdTwo(o);
+    try prefixed(o, "N");
+    var two: std.ArrayList(u8) = .empty;
+    defer two.deinit(ctx.gpa);
+    try two.print(ctx.gpa, "{s}: two", .{hostname()});
+    try o.waitFor("the new workspace's title", two.items, titleIs);
+    try prefixed(o, "!");
+    try o.waitFor("the first workspace's title", want.items, titleIs);
+    try prefixed(o, "q");
+    try expect(try o.waitExit() == 0, "the client detaches");
+    const save = std.mem.indexOf(u8, seen.items, "\x1b[22;2t") orelse return error.TitleNotSaved;
+    const restore = std.mem.lastIndexOf(u8, seen.items, "\x1b[23;2t") orelse return error.TitleNotRestored;
+    try expect(save < std.mem.indexOf(u8, seen.items, "\x1b]2;").?, "the title is saved before Kiwa sets one");
+    try expect(restore > std.mem.lastIndexOf(u8, seen.items, "\x1b]2;").?, "the title is restored after the last one Kiwa set");
+    // ghostty-vt parses CSI 22/23 t but keeps no title stack.
+    std.debug.print("    the outer model's title after detach: \"{s}\"\n", .{o.term.getTitle() orelse ""});
+}
+
 fn cursorFollowsTheFocusedPane(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("clear\r");
@@ -1558,6 +1602,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "the sidebar collapses on prefix b and below 64 columns", .run = sidebarCollapsesAndExpands },
     .{ .name = "navigate mode switches workspaces on enter and not on esc", .run = navigateModeSwitchesWorkspaces },
     .{ .name = "key help opens over updating panes and closes on esc", .run = keyHelpOpensAndCloses },
+    .{ .name = "the outer title names the workspace and is restored on detach", .run = outerTitleNamesTheWorkspace },
     .{ .name = "the outer cursor sits at the focused pane's cursor", .run = cursorFollowsTheFocusedPane },
 };
 
