@@ -50,6 +50,7 @@ test {
     _ = @import("chrome.zig");
     _ = @import("menu.zig");
     _ = @import("hit.zig");
+    _ = @import("mouse.zig");
     _ = @import("diff.zig");
     _ = @import("out_buffer.zig");
     _ = @import("layout.zig");
