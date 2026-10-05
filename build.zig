@@ -64,4 +64,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| e2e_run.addArgs(args);
     e2e_run.has_side_effects = true;
     b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);
+
+    const bench = b.addSystemCommand(&.{"python3"});
+    bench.addFileArg(b.path("tools/bench.py"));
+    bench.addArtifactArg(exe);
+    bench.addArgs(&.{ "--build", @tagName(optimize) });
+    if (b.args) |args| bench.addArgs(args);
+    bench.has_side_effects = true;
+    b.step("bench", "Compare CPU and outer bytes with tmux; use -Doptimize=ReleaseFast").dependOn(&bench.step);
 }

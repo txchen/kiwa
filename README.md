@@ -31,6 +31,20 @@ outer terminal with ghostty-vt. Every test sets a private `KIWA_SOCKET` and
 `KIWA_STATE_DIR` under a temporary directory, so it never touches a running
 Kiwa session.
 
+## Benchmark
+
+```sh
+mise exec -- zig build bench -Doptimize=ReleaseFast
+```
+
+`tools/bench.py` compares Kiwa with tmux. Each runs attached in its own PTY
+at 100x40 with `/bin/sh`, for an idle pane, a 60 Hz one-cell spinner, and
+30 lines/s of output. It reports server plus client CPU and the bytes that
+reach the outer terminal. tmux runs only as `tmux -L kiwa-bench-<pid>-<n>
+-f /dev/null`, and Kiwa uses a private `KIWA_SOCKET` and `KIWA_STATE_DIR`,
+so the benchmark never touches a running session. Pass options after `--`,
+for example `-- --runs 5`.
+
 ## Run
 
 ```sh
