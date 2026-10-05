@@ -81,12 +81,7 @@ pub const Graphemes = struct {
 };
 
 /// Where a pane's cells land in the frame.
-pub const Rect = struct {
-    x: u16 = 0,
-    y: u16 = 0,
-    cols: u16,
-    rows: u16,
-};
+pub const Rect = @import("layout.zig").Rect;
 
 /// DECSCUSR parameters. `default` leaves the shape to the outer terminal.
 pub const CursorShape = enum(u3) {
@@ -134,6 +129,27 @@ pub const Frame = struct {
 
     pub fn row(f: *const Frame, y: usize) []Cell {
         return f.cells[y * f.cols ..][0..f.cols];
+    }
+
+    /// Draws a single-line box on `r`'s edge cells. A box too small to
+    /// have corners is blanked instead.
+    pub fn drawBox(f: *Frame, r: Rect, style: vt.Style) void {
+        if (r.cols < 2 or r.rows < 2) {
+            for (r.y..r.y + r.rows) |y| @memset(f.row(y)[r.x..][0..r.cols], .blank);
+            return;
+        }
+        const right = r.x + r.cols - 1;
+        const bottom = r.y + r.rows - 1;
+        for (r.y..bottom + 1) |y| {
+            const cells = f.row(y);
+            const edge = y == r.y or y == bottom;
+            if (edge) for (cells[r.x + 1 .. right]) |*c| {
+                c.* = .{ .cp = 0x2500, .style = style };
+            };
+            const corners: [2]u21 = if (y == r.y) .{ 0x250c, 0x2510 } else if (y == bottom) .{ 0x2514, 0x2518 } else .{ 0x2502, 0x2502 };
+            cells[r.x] = .{ .cp = corners[0], .style = style };
+            cells[right] = .{ .cp = corners[1], .style = style };
+        }
     }
 
     pub fn copyFrom(f: *Frame, src: *const Frame) void {
@@ -251,6 +267,26 @@ test "composing copies dirty rows and keeps clean ones" {
 
     try f.composePane(testing.allocator, &g, rect, &rs, true);
     try testing.expectEqual(' ', f.row(0)[5].cp);
+}
+
+test "a box draws single-line edges in its style, and a tiny box is blanked" {
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 6, 4);
+    const cyan: vt.Style = .{ .fg_color = .{ .palette = 6 } };
+    f.drawBox(.{ .x = 1, .cols = 4, .rows = 3 }, cyan);
+    const want = [_][]const u21{
+        &.{ ' ', 0x250c, 0x2500, 0x2500, 0x2510, ' ' },
+        &.{ ' ', 0x2502, ' ', ' ', 0x2502, ' ' },
+        &.{ ' ', 0x2514, 0x2500, 0x2500, 0x2518, ' ' },
+        &.{ ' ', ' ', ' ', ' ', ' ', ' ' },
+    };
+    for (want, 0..) |cps, y| for (cps, f.row(y)) |cp, cell| {
+        try testing.expectEqual(cp, cell.cp);
+        try testing.expect(cell.style.eql(if (cp == ' ') .{} else cyan));
+    };
+    f.drawBox(.{ .x = 1, .cols = 4, .rows = 1 }, cyan);
+    for (f.row(0)) |cell| try testing.expect(cell.isDefaultBlank());
 }
 
 test "the cursor follows the pane's shape, visibility, and position" {
