@@ -7,6 +7,10 @@ drains that PTY. Per scenario and run, it reports server plus client CPU
 during the sample window. Producer programs run inside the pane and are not
 counted.
 
+Kiwa runs twice: once against an outer side that answers its attach probes
+like a terminal with left and right margins (DECLRMM), and once like a
+terminal without them. tmux's queries go unanswered.
+
 Kiwa uses a private KIWA_SOCKET and KIWA_STATE_DIR. tmux runs only as
 `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and only that socket is
 killed at the end, so the user's tmux and Kiwa servers are never touched.
@@ -59,11 +63,15 @@ while True:
     time.sleep(max(0.0, t - time.monotonic()))
 """
 
+# Name, producer script, and the frames per second it draws.
 SCENARIOS = [
-    ("1 idle pane", None),
-    ("60 Hz one-cell spinner", "spinner.py"),
-    ("30 lines/s of 80 bytes", "producer.py"),
+    ("1 idle pane", None, 0),
+    ("60 Hz one-cell spinner", "spinner.py", 60),
+    ("30 lines/s of 80 bytes", "producer.py", 30),
 ]
+
+DECRQM_MARGINS = b"\x1b[?69$p"
+DA1 = b"\x1b[c"
 
 
 def cpu_ticks(pid):
@@ -84,7 +92,11 @@ def context_switches(pid):
 
 
 class Outer:
-    def __init__(self, argv, env, cwd):
+    """The outer terminal. With `margins` set to True or False, it answers
+    DECRQM for mode 69 and DA1 like a terminal with or without left and
+    right margins; with None it answers nothing."""
+
+    def __init__(self, argv, env, cwd, margins=None):
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         pid = os.fork()
@@ -102,6 +114,7 @@ class Outer:
         self.pid = pid
         self.bytes = 0
         self.tail = b""
+        self.margins = margins
 
     def pump(self, seconds):
         end = time.monotonic() + seconds
@@ -120,6 +133,22 @@ class Outer:
                 return
             self.bytes += len(data)
             self.tail = (self.tail + data)[-65536:]
+            if self.margins is not None:
+                self.answer(self.tail[-(len(data) + len(DECRQM_MARGINS)):], len(data))
+
+    def answer(self, window, fresh):
+        """Answers each query that ends in the last `fresh` bytes of `window`."""
+        found = []
+        for query in (DECRQM_MARGINS, DA1):
+            at = window.find(query, max(0, len(window) - fresh - len(query) + 1))
+            while at >= 0:
+                found.append((at, query))
+                at = window.find(query, at + 1)
+        for _, query in sorted(found):
+            if query == DA1:
+                self.send(b"\x1b[?62;22c")
+            else:
+                self.send(b"\x1b[?69;%d$y" % (2 if self.margins else 0))
 
     def wait_for(self, needle, seconds=10):
         end = time.monotonic() + seconds
@@ -152,15 +181,13 @@ def base_env(home):
 
 
 class Kiwa:
-    name = "kiwa"
-
-    def __init__(self, binary, work):
+    def __init__(self, binary, work, margins):
         self.binary = binary
         self.env = base_env(work)
         self.env["KIWA_SOCKET"] = os.path.join(work, "kiwa.sock")
         self.env["KIWA_STATE_DIR"] = os.path.join(work, "state")
         self.work = work
-        self.outer = Outer([binary], self.env, work)
+        self.outer = Outer([binary], self.env, work, margins)
         self.outer.wait_for(b"$")
         self.server = self.find_server()
 
@@ -197,7 +224,6 @@ class Kiwa:
 
 
 class Tmux:
-    name = "tmux"
     count = 0
 
     def __init__(self, binary, work):
@@ -232,11 +258,11 @@ class Tmux:
                 pass
 
 
-def measure(variant_cls, binary, scenario, scripts, warmup, sample):
-    work = tempfile.mkdtemp(prefix=f"kiwa-bench-{variant_cls.name}-")
+def measure(name, start, scenario, scripts, warmup, sample):
+    work = tempfile.mkdtemp(prefix=f"kiwa-bench-{name}-")
     v = None
     try:
-        v = variant_cls(binary, work)
+        v = start(work)
         v.outer.pump(0.5)
         if scenario[1]:
             v.outer.send(f"python3 {os.path.join(scripts, scenario[1])}\r".encode())
@@ -263,13 +289,21 @@ def measure(variant_cls, binary, scenario, scripts, warmup, sample):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def check_work(scenario, result):
-    """Fails a run whose producer never reached the outer terminal."""
-    name, script = scenario
+def check_work(scenario, variant, result):
+    """Fails a run whose producer never reached the outer terminal, or
+    whose Kiwa scrolled other than its outer side's margins allow."""
+    name, script, _ = scenario
     if script == "spinner.py" and result["bytes"] == 0:
         raise RuntimeError(f"{name}: the spinner produced no outer bytes")
-    if script == "producer.py" and b"lorem" not in result["tail"]:
-        raise RuntimeError(f"{name}: producer lines never reached the outer terminal")
+    if script == "producer.py":
+        tail = result["tail"]
+        if b"lorem" not in tail:
+            raise RuntimeError(f"{name}: producer lines never reached the outer terminal")
+        if variant.startswith("kiwa") and b"S\x1b[r" not in tail:
+            raise RuntimeError(f"{name}: {variant} never scrolled the outer terminal")
+        used = b"\x1b[?69h" in tail
+        if variant.startswith("kiwa") and used != (variant == "kiwa-margins"):
+            raise RuntimeError(f"{name}: {variant} {'used' if used else 'never used'} left and right margins")
 
 
 def summarize(values, fmt):
@@ -302,17 +336,21 @@ def main():
     print(f"tick resolution: 1 tick = {1000 / CLK_TCK:g} ms = {tick_pct:.3f}% of one core over the sample",
           flush=True)
 
-    variants = {"kiwa": (Kiwa, kiwa), "tmux": (Tmux, args.tmux)}
+    variants = {
+        "kiwa-margins": (f"Kiwa ({args.build}), outer with margins", lambda work: Kiwa(kiwa, work, True)),
+        "kiwa-plain": (f"Kiwa ({args.build}), outer without margins", lambda work: Kiwa(kiwa, work, False)),
+        "tmux": (tmux_version, lambda work: Tmux(args.tmux, work)),
+    }
     results = {}
     try:
         for scenario in SCENARIOS:
             for run in range(args.runs):
-                # Alternating keeps drift and warm caches from favoring one side.
-                order = ["kiwa", "tmux"] if run % 2 == 0 else ["tmux", "kiwa"]
+                # Rotating keeps drift and warm caches from favoring one side.
+                names = list(variants)
+                order = names[run % len(names):] + names[:run % len(names)]
                 for name in order:
-                    cls, binary = variants[name]
-                    r = measure(cls, binary, scenario, scripts, args.warmup, args.sample)
-                    check_work(scenario, r)
+                    r = measure(name, variants[name][1], scenario, scripts, args.warmup, args.sample)
+                    check_work(scenario, name, r)
                     results.setdefault((scenario[0], name), []).append(r)
                     print(f"  {scenario[0]} run {run + 1} {name}: {r['ticks']} ticks, "
                           f"{r['cpu']:.3f}% CPU, {r['bytes']} bytes, "
@@ -321,17 +359,21 @@ def main():
         shutil.rmtree(scripts, ignore_errors=True)
 
     print()
-    print(f"| Scenario | Variant | CPU % of one core, median (range) | Outer bytes in {args.sample:g} s, median (range) | Ticks per run | Context switches, median |")
-    print("|---|---|---|---|---|---|")
+    print(f"| Scenario | Variant | CPU % of one core, median (range) | Outer bytes in {args.sample:g} s, median (range) "
+          "| Outer bytes per frame | Ticks per run | Context switches, median | Context switches per frame |")
+    print("|---|---|---|---|---|---|---|---|")
     for scenario in SCENARIOS:
-        for name in ("kiwa", "tmux"):
+        frames = scenario[2] * args.sample
+        for name, (label, _) in variants.items():
             rs = results[(scenario[0], name)]
             cpu = summarize([r["cpu"] for r in rs], lambda v: f"{v:.2f}")
             out = summarize([r["bytes"] for r in rs], lambda v: f"{v:,.0f}")
+            out_bytes = statistics.median(r["bytes"] for r in rs)
             ticks = ", ".join(str(r["ticks"]) for r in rs)
             switches = statistics.median(r["switches"] for r in rs)
-            label = f"Kiwa ({args.build})" if name == "kiwa" else tmux_version
-            print(f"| {scenario[0]} | {label} | {cpu} | {out} | {ticks} | {switches:,.0f} |")
+            per_frame = (f"{out_bytes / frames:,.1f} | " if frames else "- | ")
+            switches_per_frame = f"{switches / frames:.2f}" if frames else "-"
+            print(f"| {scenario[0]} | {label} | {cpu} | {out} | {per_frame}{ticks} | {switches:,.0f} | {switches_per_frame} |")
     return 0
 
 
