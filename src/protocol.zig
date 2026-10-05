@@ -52,7 +52,6 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
     }
 }
 
-/// Appends one encoded frame to `list`.
 pub fn append(gpa: std.mem.Allocator, list: *std.ArrayList(u8), msg: Message) std.mem.Allocator.Error!void {
     var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, list);
     defer list.* = aw.toArrayList();

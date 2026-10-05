@@ -39,4 +39,24 @@ pub fn build(b: *std.Build) void {
 
     const unit = b.addTest(.{ .root_module = mod });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
+
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("tests/e2e.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    e2e_mod.addImport("ghostty-vt", vt);
+    e2e_mod.addImport("kiwa_sys", b.createModule(.{
+        .root_source_file = b.path("src/sys.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }));
+    const e2e_exe = b.addExecutable(.{ .name = "kiwa-e2e", .root_module = e2e_mod });
+    const e2e_run = b.addRunArtifact(e2e_exe);
+    e2e_run.addArtifactArg(exe);
+    if (b.args) |args| e2e_run.addArgs(args);
+    e2e_run.has_side_effects = true;
+    b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);
 }
