@@ -75,5 +75,5 @@ pub fn build(b: *std.Build) void {
     bench.addArgs(&.{ "--build", @tagName(optimize) });
     if (b.args) |args| bench.addArgs(args);
     bench.has_side_effects = true;
-    b.step("bench", "Compare CPU and outer bytes with tmux; use -Doptimize=ReleaseFast").dependOn(&bench.step);
+    b.step("bench", "Compare CPU, memory, and outer bytes with tmux; use -Doptimize=ReleaseFast").dependOn(&bench.step);
 }

@@ -38,16 +38,20 @@ Kiwa session. `kiwa __stats` prints the server's debug counters, such as
 mise exec -- zig build bench -Doptimize=ReleaseFast
 ```
 
-`tools/bench.py` compares Kiwa with tmux. Each runs attached in its own PTY
-at 100x40 with `/bin/sh`, for an idle pane, a 60 Hz one-cell spinner, and
-30 lines/s of output. It reports server plus client CPU, context switches,
-and the bytes that reach the outer terminal. Kiwa runs twice, once with an
-outer side that answers its probes like a terminal with left and right
-margins and once like a terminal without them. tmux runs only as
+`tools/bench.py` compares Kiwa with tmux at 100x40 with `/bin/sh`. Its
+scenarios are 1 and 10 idle panes, a 60 Hz one-cell spinner, 30 lines/s of
+output, and 10 hidden panes that each print 30 lines/s while the focused
+pane is idle. The idle and hidden-producer scenarios also run detached,
+with no client. Kiwa's tabs and tmux's windows hold one pane each. For the
+server and the client separately, the bench reports CPU, context switches,
+and RSS at the end of the sample, plus the bytes that reach the outer
+terminal. Kiwa's outer side answers its probes like a terminal with left
+and right margins; the 30 lines/s scenario also runs Kiwa against one
+without them. Each run checks that every producer kept writing. tmux runs only as
 `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and Kiwa uses a private
 `KIWA_SOCKET` and `KIWA_STATE_DIR`, so the benchmark never touches a
-running session. Pass options after `--`,
-for example `-- --runs 5`.
+running session. Pass options after `--`, for example `-- --runs 5` or
+`-- --only detached`.
 
 ## Run
 

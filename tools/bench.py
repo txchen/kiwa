@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""CPU and outer-byte benchmark: Kiwa against an isolated, attached tmux.
+"""CPU, memory, and outer-byte benchmark: Kiwa against an isolated tmux.
 
-Each multiplexer runs attached in its own PTY at 100x40 while this script
-drains that PTY. Per scenario and run, it reports server plus client CPU
-(utime + stime from /proc/<pid>/stat) and the bytes read from the outer PTY
-during the sample window. Producer programs run inside the pane and are not
-counted.
+Each multiplexer runs at 100x40 with `/bin/sh` in every pane. An attached
+scenario runs the client in a PTY that this script drains; a detached one
+sets the session up through a client, detaches it, and measures the server
+alone. Per scenario and run, it reports the server's and the client's CPU
+(utime + stime from /proc/<pid>/stat), their context switches, their VmRSS
+at the end of the sample, and the bytes read from the outer PTY during the
+sample. Producer programs run inside panes and are not counted.
 
-Kiwa runs twice: once against an outer side that answers its attach probes
-like a terminal with left and right margins (DECLRMM), and once like a
-terminal without them. tmux's queries go unanswered.
+Kiwa's tabs and tmux's windows have the same structure: one pane each, the
+last one focused. Kiwa runs against an outer side that answers its attach
+probes like a terminal with left and right margins (DECLRMM); in the
+scrolling scenario it also runs against one without them. tmux's queries
+go unanswered.
 
 Kiwa uses a private KIWA_SOCKET and KIWA_STATE_DIR. tmux runs only as
 `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and only that socket is
@@ -32,9 +36,11 @@ import sys
 import tempfile
 import termios
 import time
+from dataclasses import dataclass
 
 COLS, ROWS = 100, 40
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+PREFIX = b"\x02"
 
 SPINNER = """\
 import sys, time
@@ -63,11 +69,41 @@ while True:
     time.sleep(max(0.0, t - time.monotonic()))
 """
 
-# Name, producer script, and the frames per second it draws.
+# Script text and the bytes per second it writes to its pane.
+SCRIPTS = {
+    "spinner.py": (SPINNER, 60 * 2),
+    "producer.py": (PRODUCER, 30 * 80),
+}
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    tabs: int = 1
+    # The script the focused (last) tab runs.
+    focused: str | None = None
+    # Every tab but the focused one runs the producer.
+    hidden: bool = False
+    attached: bool = True
+    # Frames per second the focused script draws.
+    fps: int = 0
+    # Also run Kiwa against an outer side without left and right margins.
+    plain: bool = False
+
+    def scripts(self):
+        hidden = ["producer.py"] * (self.tabs - 1) if self.hidden else []
+        return sorted(hidden + ([self.focused] if self.focused else []))
+
+
 SCENARIOS = [
-    ("1 idle pane", None, 0),
-    ("60 Hz one-cell spinner", "spinner.py", 60),
-    ("30 lines/s of 80 bytes", "producer.py", 30),
+    Scenario("1 idle pane"),
+    Scenario("60 Hz one-cell spinner", focused="spinner.py", fps=60),
+    Scenario("30 lines/s of 80 bytes", focused="producer.py", fps=30, plain=True),
+    Scenario("10 idle panes", tabs=10),
+    Scenario("1 idle pane, detached", attached=False),
+    Scenario("10 idle panes, detached", tabs=10, attached=False),
+    Scenario("10 hidden producers, focused pane idle", tabs=11, hidden=True),
+    Scenario("10 hidden producers, detached", tabs=11, hidden=True, attached=False),
 ]
 
 DECRQM_MARGINS = b"\x1b[?69$p"
@@ -82,13 +118,79 @@ def cpu_ticks(pid):
     return int(fields[11]) + int(fields[12])
 
 
-def context_switches(pid):
+def status_field(pid, *names):
     total = 0
     with open(f"/proc/{pid}/status") as f:
         for line in f:
-            if line.startswith(("voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:")):
+            if line.split(":")[0] in names:
                 total += int(line.split()[1])
     return total
+
+
+def context_switches(pid):
+    return status_field(pid, "voluntary_ctxt_switches", "nonvoluntary_ctxt_switches")
+
+
+def rss_kib(pid):
+    return status_field(pid, "VmRSS")
+
+
+def bytes_written(pid):
+    with open(f"/proc/{pid}/io") as f:
+        for line in f:
+            if line.startswith("wchar:"):
+                return int(line.split()[1])
+    raise RuntimeError(f"no wchar for {pid}")
+
+
+def script_pids(work):
+    """Maps each running bench script under `work` to its pids."""
+    found = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        for name in SCRIPTS:
+            if os.path.join(work, name).encode() in argv:
+                found.setdefault(name, []).append(int(entry))
+    return found
+
+
+def strays(work):
+    """Pids of processes that still run in `work` or name it on their command line."""
+    pids = []
+    want = work.encode()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        try:
+            cwd = os.readlink(f"/proc/{entry}/cwd")
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmdline = f.read()
+        except OSError:
+            continue
+        if cwd == work or cwd.startswith(work + "/") or want in cmdline:
+            pids.append(int(entry))
+    return pids
+
+
+def reap_strays(work):
+    for _ in range(60):
+        if not strays(work):
+            return
+        time.sleep(0.05)
+    left = strays(work)
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if left:
+        print(f"  warning: killed stray processes {left} of {work}", flush=True)
 
 
 class Outer:
@@ -112,6 +214,7 @@ class Outer:
         os.close(slave)
         self.fd = master
         self.pid = pid
+        self.reaped = False
         self.bytes = 0
         self.tail = b""
         self.margins = margins
@@ -157,15 +260,25 @@ class Outer:
                 raise RuntimeError(f"timed out waiting for {needle!r}")
             self.pump(0.05)
 
+    def wait_exit(self, seconds=10):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.pump(0.05)
+            if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
+                self.reaped = True
+                return
+        raise RuntimeError("the client did not exit")
+
     def send(self, data):
         os.write(self.fd, data)
 
     def close(self):
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os.waitpid(self.pid, 0)
+        if not self.reaped:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(self.pid, 0)
         os.close(self.fd)
 
 
@@ -180,8 +293,15 @@ def base_env(home):
     }
 
 
+def command(work, script):
+    return f"python3 {os.path.join(work, script)}"
+
+
 class Kiwa:
-    def __init__(self, binary, work, margins):
+    """Sets the scenario up through the attached client's keys: `ctrl+b c`
+    for each further tab, `ctrl+b q` to detach."""
+
+    def __init__(self, binary, work, scenario, margins):
         self.binary = binary
         self.env = base_env(work)
         self.env["KIWA_SOCKET"] = os.path.join(work, "kiwa.sock")
@@ -194,9 +314,36 @@ class Kiwa:
         try:
             self.outer.wait_for(b"$")
             self.server = self.find_server()
+            for i in range(scenario.tabs):
+                if i > 0:
+                    self.new_tab(i + 1)
+                if scenario.hidden and i < scenario.tabs - 1:
+                    self.outer.send(command(work, "producer.py").encode() + b"\r")
+            if scenario.focused:
+                self.outer.send(command(work, scenario.focused).encode() + b"\r")
+            if not scenario.attached:
+                self.outer.pump(0.5)
+                self.outer.send(PREFIX + b"q")
+                self.outer.wait_exit()
         except BaseException:
             self.stop()
             raise
+        self.client = self.outer.pid if scenario.attached else None
+
+    def new_tab(self, count):
+        self.outer.tail = b""
+        self.outer.send(PREFIX + b"c")
+        self.outer.wait_for(b"$")
+        end = time.monotonic() + 10
+        while self.tab_count() != count:
+            if time.monotonic() > end:
+                raise RuntimeError(f"tab {count} never opened")
+            self.outer.pump(0.05)
+
+    def tab_count(self):
+        listing = subprocess.run([self.binary, "ls"], env=self.env, timeout=10, check=True,
+                                 capture_output=True, text=True).stdout
+        return sum(1 for line in listing.splitlines() if line.startswith("  "))
 
     def find_server(self):
         want = f"KIWA_SOCKET={self.env['KIWA_SOCKET']}\0".encode()
@@ -216,9 +363,6 @@ class Kiwa:
             time.sleep(0.05)
         raise RuntimeError("kiwa server not found")
 
-    def pids(self):
-        return [self.server, self.outer.pid]
-
     def stop(self):
         subprocess.run([self.binary, "kill-server"], env=self.env, timeout=10,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -233,79 +377,135 @@ class Kiwa:
 
 
 class Tmux:
+    """Sets the scenario up with tmux commands: one window per Kiwa tab,
+    the last one current, and attaches only an attached scenario."""
+
     count = 0
 
-    def __init__(self, binary, work):
+    def __init__(self, binary, work, scenario):
         Tmux.count += 1
         self.binary = binary
         self.socket = f"kiwa-bench-{os.getpid()}-{Tmux.count}"
+        self.socket_path = None
         self.env = base_env(work)
         self.base = [binary, "-L", self.socket, "-f", "/dev/null"]
-        # The status line is off so both multiplexers show a 100x40 pane.
-        subprocess.run(self.base + ["new-session", "-d", "-x", str(COLS), "-y", str(ROWS),
-                                    "-c", work, "/bin/sh", ";", "set", "-g", "status", "off"],
-                       env=self.env, check=True, timeout=10)
-        pid, self.socket_path = subprocess.run(
-            self.base + ["display-message", "-p", "#{pid} #{socket_path}"],
-            env=self.env, check=True, timeout=10, capture_output=True, text=True).stdout.split()
-        self.server = int(pid)
-        self.outer = Outer(self.base + ["attach-session"], self.env, work)
-        self.outer.wait_for(b"$")
+        self.outer = None
+        try:
+            # The status line is off so both multiplexers show a 100x40 pane.
+            self.run("new-session", "-d", "-x", str(COLS), "-y", str(ROWS), "-c", work, "/bin/sh",
+                     ";", "set", "-g", "status", "off")
+            pid, self.socket_path = self.run("display-message", "-p", "#{pid} #{socket_path}").split()
+            self.server = int(pid)
+            for _ in range(scenario.tabs - 1):
+                self.run("new-window", "-c", work, "/bin/sh")
+            if scenario.hidden:
+                for i in range(scenario.tabs - 1):
+                    self.run("send-keys", "-t", f":{i}", command(work, "producer.py"), "Enter")
+            if scenario.attached:
+                self.outer = Outer(self.base + ["attach-session"], self.env, work)
+                self.outer.wait_for(b"$")
+            if scenario.focused:
+                if self.outer:
+                    self.outer.send(command(work, scenario.focused).encode() + b"\r")
+                else:
+                    self.run("send-keys", command(work, scenario.focused), "Enter")
+        except BaseException:
+            self.stop()
+            raise
+        self.client = self.outer.pid if self.outer else None
 
-    def pids(self):
-        return [self.server, self.outer.pid]
+    def run(self, *args):
+        return subprocess.run(self.base + list(args), env=self.env, check=True, timeout=10,
+                              capture_output=True, text=True).stdout
+
+    def tab_count(self):
+        return len(self.run("list-windows", "-F", "#{window_index}").split())
 
     def stop(self):
         subprocess.run(self.base + ["kill-server"], env=self.env, timeout=10,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.outer.close()
+        if self.outer:
+            self.outer.close()
         # tmux leaves its socket file behind after kill-server.
-        if os.path.basename(self.socket_path) == self.socket:
+        if self.socket_path and os.path.basename(self.socket_path) == self.socket:
             try:
                 os.unlink(self.socket_path)
             except FileNotFoundError:
                 pass
 
 
-def measure(name, start, scenario, scripts, warmup, sample):
+def wait(v, seconds):
+    if v.outer and v.client:
+        v.outer.pump(seconds)
+    else:
+        time.sleep(seconds)
+
+
+def measure(name, start, scenario, warmup, sample):
     work = tempfile.mkdtemp(prefix=f"kiwa-bench-{name}-")
+    for script, (text, _) in SCRIPTS.items():
+        with open(os.path.join(work, script), "w") as f:
+            f.write(text)
     v = None
     try:
-        v = start(work)
-        v.outer.pump(0.5)
-        if scenario[1]:
-            v.outer.send(f"python3 {os.path.join(scripts, scenario[1])}\r".encode())
-        v.outer.pump(warmup)
-        pids = v.pids()
-        before = sum(cpu_ticks(p) for p in pids)
-        switches_before = sum(context_switches(p) for p in pids)
-        v.outer.bytes = 0
-        start = time.monotonic()
-        v.outer.pump(sample)
-        elapsed = time.monotonic() - start
-        ticks = sum(cpu_ticks(p) for p in pids) - before
-        switches = sum(context_switches(p) for p in pids) - switches_before
+        v = start(work, scenario)
+        wait(v, warmup)
+        roles = {"server": v.server, "client": v.client}
+        pids = [p for p in roles.values() if p]
+        scripts = script_pids(work)
+        written = {p: bytes_written(p) for ps in scripts.values() for p in ps}
+        ticks = {role: cpu_ticks(p) for role, p in roles.items() if p}
+        switches = sum(context_switches(p) for p in pids)
+        if v.outer:
+            v.outer.bytes = 0
+            v.outer.tail = b""
+        began = time.monotonic()
+        wait(v, sample)
+        elapsed = time.monotonic() - began
+        ticks = {role: cpu_ticks(p) - ticks[role] for role, p in roles.items() if p}
+        switches = sum(context_switches(p) for p in pids) - switches
+        rss = {role: rss_kib(p) for role, p in roles.items() if p}
         return {
+            "elapsed": elapsed,
+            "ticks": sum(ticks.values()),
+            "cpu": {role: 100.0 * t / CLK_TCK / elapsed for role, t in ticks.items()},
+            "total": 100.0 * sum(ticks.values()) / CLK_TCK / elapsed,
             "switches": switches,
-            "cpu": 100.0 * ticks / CLK_TCK / elapsed,
-            "ticks": ticks,
-            "bytes": v.outer.bytes,
-            "tail": v.outer.tail,
+            "rss": rss,
+            "bytes": v.outer.bytes if v.client else None,
+            "tail": v.outer.tail if v.client else b"",
+            "tabs": v.tab_count(),
+            "scripts": {script: [bytes_written(p) - written[p] for p in ps] for script, ps in scripts.items()},
+            "load": os.getloadavg()[0],
         }
     finally:
         if v is not None:
             v.stop()
+        reap_strays(work)
         shutil.rmtree(work, ignore_errors=True)
 
 
 def check_work(scenario, variant, result):
-    """Fails a run whose producer never reached the outer terminal, or
-    whose Kiwa scrolled other than its outer side's margins allow."""
-    name, script, _ = scenario
-    if script == "spinner.py" and result["bytes"] == 0:
+    """Fails a run whose panes did not do the scenario's work, or whose Kiwa
+    scrolled other than its outer side's margins allow."""
+    name = scenario.name
+    if result["tabs"] != scenario.tabs:
+        raise RuntimeError(f"{name}: {variant} had {result['tabs']} tabs, not {scenario.tabs}")
+    running = sorted(s for s, ws in result["scripts"].items() for _ in ws)
+    if running != scenario.scripts():
+        raise RuntimeError(f"{name}: {variant} ran {running}, not {scenario.scripts()}")
+    for script, ws in result["scripts"].items():
+        want = SCRIPTS[script][1] * result["elapsed"]
+        if min(ws) < 0.9 * want:
+            raise RuntimeError(f"{name}: {variant}: a {script} wrote {min(ws)} of {want:.0f} bytes")
+    if not scenario.attached:
+        return
+    tail = result["tail"]
+    if scenario.focused == "spinner.py" and result["bytes"] == 0:
         raise RuntimeError(f"{name}: the spinner produced no outer bytes")
-    if script == "producer.py":
-        tail = result["tail"]
+    if scenario.hidden and b"lorem" in tail:
+        raise RuntimeError(f"{name}: {variant} drew a hidden producer's lines")
+    if scenario.focused == "producer.py":
         if b"lorem" not in tail:
             raise RuntimeError(f"{name}: producer lines never reached the outer terminal")
         if variant.startswith("kiwa") and b"S\x1b[r" not in tail:
@@ -317,6 +517,8 @@ def check_work(scenario, variant, result):
 
 def summarize(values, fmt):
     med = statistics.median(values)
+    if min(values) == max(values):
+        return fmt(med)
     return f"{fmt(med)} ({fmt(min(values))} to {fmt(max(values))})"
 
 
@@ -328,13 +530,10 @@ def main():
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--warmup", type=float, default=6.0)
     ap.add_argument("--sample", type=float, default=12.0)
+    ap.add_argument("--only", help="run only the scenarios whose name contains this text")
     args = ap.parse_args()
     kiwa = os.path.abspath(args.kiwa)
-
-    scripts = tempfile.mkdtemp(prefix="kiwa-bench-scripts-")
-    for name, text in (("spinner.py", SPINNER), ("producer.py", PRODUCER)):
-        with open(os.path.join(scripts, name), "w") as f:
-            f.write(text)
+    scenarios = [s for s in SCENARIOS if not args.only or args.only in s.name]
 
     tmux_version = subprocess.run([args.tmux, "-V"], capture_output=True, text=True).stdout.strip()
     kiwa_version = subprocess.run([kiwa, "--version"], capture_output=True, text=True).stdout.strip()
@@ -346,43 +545,62 @@ def main():
           flush=True)
 
     variants = {
-        "kiwa-margins": (f"Kiwa ({args.build}), outer with margins", lambda work: Kiwa(kiwa, work, True)),
-        "kiwa-plain": (f"Kiwa ({args.build}), outer without margins", lambda work: Kiwa(kiwa, work, False)),
-        "tmux": (tmux_version, lambda work: Tmux(args.tmux, work)),
+        "kiwa-margins": (f"Kiwa ({args.build}), outer with margins",
+                         lambda work, s: Kiwa(kiwa, work, s, True)),
+        "kiwa-plain": (f"Kiwa ({args.build}), outer without margins",
+                       lambda work, s: Kiwa(kiwa, work, s, False)),
+        "tmux": (tmux_version, lambda work, s: Tmux(args.tmux, work, s)),
     }
     results = {}
-    try:
-        for scenario in SCENARIOS:
-            for run in range(args.runs):
-                # Rotating keeps drift and warm caches from favoring one side.
-                names = list(variants)
-                order = names[run % len(names):] + names[:run % len(names)]
-                for name in order:
-                    r = measure(name, variants[name][1], scenario, scripts, args.warmup, args.sample)
-                    check_work(scenario, name, r)
-                    results.setdefault((scenario[0], name), []).append(r)
-                    print(f"  {scenario[0]} run {run + 1} {name}: {r['ticks']} ticks, "
-                          f"{r['cpu']:.3f}% CPU, {r['bytes']} bytes, "
-                          f"{r['switches']} context switches", flush=True)
-    finally:
-        shutil.rmtree(scripts, ignore_errors=True)
+    for scenario in scenarios:
+        names = [n for n in variants if n != "kiwa-plain" or scenario.plain]
+        for run in range(args.runs):
+            # Rotating keeps drift and warm caches from favoring one side.
+            order = names[run % len(names):] + names[:run % len(names)]
+            for name in order:
+                r = measure(name, variants[name][1], scenario, args.warmup, args.sample)
+                check_work(scenario, name, r)
+                results.setdefault((scenario.name, name), []).append(r)
+                cpu = ", ".join(f"{role} {pct:.3f}%" for role, pct in r["cpu"].items())
+                rss = ", ".join(f"{role} {kib} KiB" for role, kib in r["rss"].items())
+                print(f"  {scenario.name} run {run + 1} {name}: {r['ticks']} ticks, {cpu}, "
+                      f"{r['bytes']} bytes, {r['switches']} context switches, RSS {rss}, "
+                      f"load {r['load']:.2f}", flush=True)
 
     print()
-    print(f"| Scenario | Variant | CPU % of one core, median (range) | Outer bytes in {args.sample:g} s, median (range) "
-          "| Outer bytes per frame | Ticks per run | Context switches, median | Context switches per frame |")
-    print("|---|---|---|---|---|---|---|---|")
-    for scenario in SCENARIOS:
-        frames = scenario[2] * args.sample
+    print(f"load at the end {' '.join(f'{v:.2f}' for v in os.getloadavg())}")
+    print()
+    print("| Scenario | Variant | Server CPU % | Client CPU % | Total CPU % of one core, median (range) "
+          f"| Ticks per run | Context switches | Outer bytes in {args.sample:g} s | Outer bytes per frame "
+          "| Server RSS MiB | Client RSS MiB |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    pct = lambda v: f"{v:.2f}"
+    count = lambda v: f"{v:,.0f}"
+    mib = lambda v: f"{v / 1024:.1f}"
+    for scenario in scenarios:
+        frames = scenario.fps * args.sample
         for name, (label, _) in variants.items():
-            rs = results[(scenario[0], name)]
-            cpu = summarize([r["cpu"] for r in rs], lambda v: f"{v:.2f}")
-            out = summarize([r["bytes"] for r in rs], lambda v: f"{v:,.0f}")
-            out_bytes = statistics.median(r["bytes"] for r in rs)
-            ticks = ", ".join(str(r["ticks"]) for r in rs)
-            switches = statistics.median(r["switches"] for r in rs)
-            per_frame = (f"{out_bytes / frames:,.1f} | " if frames else "- | ")
-            switches_per_frame = f"{switches / frames:.2f}" if frames else "-"
-            print(f"| {scenario[0]} | {label} | {cpu} | {out} | {per_frame}{ticks} | {switches:,.0f} | {switches_per_frame} |")
+            rs = results.get((scenario.name, name))
+            if not rs:
+                continue
+            attached = rs[0]["bytes"] is not None
+
+            def column(get, fmt, rs=rs):
+                values = [get(r) for r in rs]
+                return "-" if None in values else summarize(values, fmt)
+
+            per_frame = (f"{statistics.median(r['bytes'] for r in rs) / frames:,.1f}"
+                         if attached and frames else "-")
+            print(f"| {scenario.name} | {label} "
+                  f"| {column(lambda r: r['cpu']['server'], pct)} "
+                  f"| {column(lambda r: r['cpu'].get('client'), pct)} "
+                  f"| {column(lambda r: r['total'], pct)} "
+                  f"| {', '.join(str(r['ticks']) for r in rs)} "
+                  f"| {column(lambda r: r['switches'], count)} "
+                  f"| {column(lambda r: r['bytes'], count)} "
+                  f"| {per_frame} "
+                  f"| {column(lambda r: r['rss']['server'], mib)} "
+                  f"| {column(lambda r: r['rss'].get('client'), mib)} |")
     return 0
 
 
