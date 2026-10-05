@@ -31,7 +31,7 @@ pub const Mode = union(enum) {
 
 pub const Workspace = struct {
     name: []const u8,
-    /// Always null until Git branches are tracked.
+    /// Null outside a Git repository.
     branch: ?[]const u8 = null,
     activity: Activity = .none,
     active: bool = false,
@@ -651,6 +651,28 @@ test "a branch line follows the name when a branch is known" {
     );
     try testing.expect(isHighlight(s.at(3, 2)));
     try testing.expect(s.at(3, 4).style.flags.faint);
+}
+
+test "a long branch ends in an ellipsis before the divider, and the collapsed sidebar shows none" {
+    const ws = [_]Workspace{.{ .name = "kiwa", .branch = "feature/a-very-long-branch-name", .active = true }};
+    var wide = try render(80, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
+    defer wide.deinit();
+    try wide.expect(
+        \\ workspaces              │ 1 sh  2 vim  +
+        \\ 1 kiwa                  │
+        \\   feature/a-very-long-b…│
+        \\ + new                  «│
+        \\
+    );
+    var narrow = try render(40, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
+    defer narrow.deinit();
+    try narrow.expect(
+        \\ 1 │ 1 sh  2 vim  +
+        \\   │
+        \\   │
+        \\  »│
+        \\
+    );
 }
 
 test "workspaces that overflow scroll to keep the active one visible" {
