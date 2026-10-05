@@ -1,5 +1,6 @@
 //! Modal dialogs, drawn as a box centered over the tab area: renaming a tab
-//! or a workspace. Pure; the server applies what a dialog returns.
+//! or a workspace, and confirming a close that would stop a running
+//! program. Pure; the server applies what a dialog returns.
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
@@ -14,6 +15,7 @@ const Rect = frame_mod.Rect;
 
 pub const Dialog = union(enum) {
     rename: Rename,
+    confirm: Confirm,
 
     /// What an input event did to the dialog.
     pub const Outcome = enum {
@@ -24,17 +26,28 @@ pub const Dialog = union(enum) {
         cancel,
         /// Rename to the field's text.
         save,
+        /// Close the confirmed target.
+        confirm,
     };
 
     pub fn feed(d: *Dialog, ev: input.Event) Outcome {
         return switch (d.*) {
             .rename => |*r| r.feed(ev),
+            .confirm => switch (ev) {
+                .key => |k| Confirm.key(k),
+                else => .none,
+            },
         };
     }
 
     pub fn box(d: *const Dialog, area: Rect) Rect {
         return switch (d.*) {
             .rename => centered(area, rename_cols, 4),
+            .confirm => |*c| blk: {
+                var buf: Confirm.Buf = undefined;
+                const cols = @max(chrome.textCols(c.message(&buf)), confirm_hint.len) + 4;
+                break :blk centered(area, @intCast(cols), 4);
+            },
         };
     }
 
@@ -54,7 +67,53 @@ pub const Dialog = union(enum) {
                 const col = try drawField(f.row(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
                 return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
             },
+            .confirm => |*c| {
+                var buf: Confirm.Buf = undefined;
+                _ = chrome.put(f.row(b.y + 1)[b.x + 2 ..][0..inner], 0, c.message(&buf), .{});
+                _ = chrome.put(f.row(b.y + 2)[b.x + 2 ..][0..inner], 0, confirm_hint, hint);
+                return hidden;
+            },
         }
+    }
+};
+
+/// Asks before a close stops a program other than a pane's shell.
+pub const Confirm = struct {
+    target: session.Target,
+    /// The running program's command; the kernel keeps 15 bytes of it.
+    program: [16]u8,
+    program_len: u8,
+
+    const Buf = [64]u8;
+
+    pub fn init(target: session.Target, program: []const u8) Confirm {
+        var c: Confirm = .{ .target = target, .program = undefined, .program_len = @intCast(@min(program.len, 16)) };
+        @memcpy(c.program[0..c.program_len], program[0..c.program_len]);
+        return c;
+    }
+
+    /// Such as `close pane? vim is running`.
+    fn message(c: *const Confirm, buf: *Buf) []const u8 {
+        const what = switch (c.target) {
+            .pane => "pane",
+            .tab => "tab",
+            .workspace => "workspace",
+        };
+        return std.fmt.bufPrint(buf, "close {s}? {s} is running", .{ what, c.program[0..c.program_len] }) catch unreachable;
+    }
+
+    fn key(k: input.Key) Dialog.Outcome {
+        if (k.action == .release) return .none;
+        const mods = k.mods.binding();
+        if (mods.ctrl or mods.alt or mods.super) return .none;
+        return switch (k.code) {
+            .named => |n| if (n == .escape) .cancel else .none,
+            .char => |c| switch (c) {
+                'y' => .confirm,
+                'n' => .cancel,
+                else => .none,
+            },
+        };
     }
 };
 
@@ -121,6 +180,7 @@ fn typedChar(k: input.Key, c: u21) u21 {
 }
 
 const rename_cols = 44;
+const confirm_hint = "y close  n cancel";
 const hint: vt.Style = .{ .flags = .{ .faint = true } };
 
 /// A `cols x rows` box centered over `area`, shrunk to fit it.
@@ -216,4 +276,31 @@ test "the rename box is centered over the tab area with its title, field, hint, 
 
     const tiny: Rect = .{ .x = 0, .y = 0, .cols = 5, .rows = 3 };
     try testing.expect(!(try d.draw(&f, testing.allocator, &g, tiny)).visible);
+}
+
+test "a close confirmation names what runs; y confirms, and n or esc cancels" {
+    var d: Dialog = .{ .confirm = .init(.{ .tab = @enumFromInt(3) }, "vim") };
+    var buf: Confirm.Buf = undefined;
+    try testing.expectEqualStrings("close tab? vim is running", d.confirm.message(&buf));
+    try testing.expectEqual(.none, d.feed(.{ .key = .typed('x') }));
+    try testing.expectEqual(.none, d.feed(.{ .key = .named(.enter, .{}) }));
+    try testing.expectEqual(.none, d.feed(.{ .key = .chord('y', .{ .ctrl = true }) }));
+    try testing.expectEqual(.confirm, d.feed(.{ .key = .typed('y') }));
+    try testing.expectEqual(.confirm, d.feed(.{ .key = .typed('Y') }));
+    try testing.expectEqual(.cancel, d.feed(.{ .key = .typed('n') }));
+    try testing.expectEqual(.cancel, d.feed(.{ .key = .named(.escape, .{}) }));
+
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    var g: frame_mod.Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    try f.resize(testing.allocator, 80, 24);
+    const area: Rect = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
+    try testing.expectEqual(Rect{ .x = 38, .y = 10, .cols = 29, .rows = 4 }, d.box(area));
+    try testing.expect(!(try d.draw(&f, testing.allocator, &g, area)).visible);
+    try testing.expectEqual(@as(u21, 'c'), f.row(11)[40].cp);
+    try testing.expectEqual(@as(u21, 'y'), f.row(12)[40].cp);
+
+    const long: Confirm = .init(.{ .workspace = @enumFromInt(1) }, "a-very-long-command-name");
+    try testing.expectEqualStrings("close workspace? a-very-long-comm is running", long.message(&buf));
 }

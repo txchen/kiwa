@@ -1325,6 +1325,8 @@ fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
         sleepMs(20);
     }
     try prefixed(o, "x");
+    try o.waitText("close pane? sleep is running");
+    try o.send("y");
     try waitNoBorders(o);
     while (try processRuns(ctx, cmdline)) {
         if (now() > deadline + 3 * std.time.ns_per_s) return error.SleepSurvivedClose;
@@ -1332,6 +1334,84 @@ fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
     }
     try o.send("echo still$((1+1))\r");
     try o.waitLine("still2");
+}
+
+/// Starts `sleep <unique number>` in the focused pane and waits until it runs.
+/// Returns its command line for `processRuns`.
+fn startSleep(ctx: *Ctx, o: *Outer) ![]u8 {
+    const arg = 4_100_000 + @as(u32, @intCast(linux.getpid()));
+    const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{d}\x00", .{arg});
+    errdefer ctx.gpa.free(cmdline);
+    var cmd: [64]u8 = undefined;
+    try o.send(try std.fmt.bufPrint(&cmd, "sleep {d}\r", .{arg}));
+    const deadline = now() + 5 * std.time.ns_per_s;
+    while (!try processRuns(ctx, cmdline)) {
+        if (now() > deadline) return error.SleepDidNotStart;
+        sleepMs(20);
+    }
+    return cmdline;
+}
+
+fn closingARunningProgramAsks(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    const name = caseName(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    const cmdline = try startSleep(ctx, o);
+    defer ctx.gpa.free(cmdline);
+    try prefixed(o, "x");
+    try o.waitText("close pane? sleep is running");
+    try expect(try o.contains("y close  n cancel"), "the dialog shows its keys");
+    try waitCursorHidden(o);
+    try o.send("n");
+    try o.waitGone("close pane?");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try prefixed(o, "x");
+    try o.waitText("close pane?");
+    try o.press(named(.escape, .{}));
+    try o.waitGone("close pane?");
+    try expect(try processRuns(ctx, cmdline), "n and esc keep the program running");
+    try prefixed(o, "x");
+    try o.waitText("close pane?");
+    try o.send("y");
+    try waitNoBorders(o);
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+
+    // An idle shell closes without asking.
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    try prefixed(o, "x");
+    try o.waitGone(" 2 sh ");
+    try expect(!try o.contains("close pane?"), "an idle shell closes without a dialog");
+
+    try prefixed(o, "c");
+    try o.waitText(" 2 sh ");
+    const in_tab = try startSleep(ctx, o);
+    defer ctx.gpa.free(in_tab);
+    try prefixed(o, "1");
+    try o.waitLine("$");
+    // The tab menu's Close asks about a program in a tab the user is not viewing.
+    try o.rightClick(33, 0);
+    try o.waitText("New tab");
+    try o.click(35, 3);
+    try o.waitText("close tab? sleep is running");
+    try o.send("y");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    const in_workspace = try startSleep(ctx, o);
+    defer ctx.gpa.free(in_workspace);
+    try prefixed(o, "D");
+    try o.waitText("close workspace? sleep is running");
+    try o.click(1, 1);
+    try o.waitGone("close workspace?");
+    try listWith(ctx, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sleep, 1 pane (active)\n", .{ name, name });
+    try prefixed(o, "D");
+    try o.waitText("close workspace? sleep is running");
+    try o.send("y");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
 }
 
 fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
@@ -2049,6 +2129,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "hidden producers draw nothing until their tab shows", .run = hiddenProducersDrawNothing },
     .{ .name = "a split survives a client shrunk below the minimum pane size", .run = tinyClientKeepsTheSplit },
     .{ .name = "prefix x closes the pane and hangs up its foreground program", .run = closingAPaneHangsUpItsProgram },
+    .{ .name = "closing a pane, tab, or workspace asks only while a program other than the shell runs", .run = closingARunningProgramAsks },
     .{ .name = "a fresh attach shows the sidebar, the tab row, and the prompt", .run = freshAttachShowsTheChrome },
     .{ .name = "output and bells mark other workspaces until viewed", .run = activityMarksOtherWorkspaces },
     .{ .name = "the sidebar collapses on prefix b and below 64 columns", .run = sidebarCollapsesAndExpands },

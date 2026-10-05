@@ -434,7 +434,7 @@ const Server = struct {
     /// Closes one pane, whose program is stopped already or is stopped
     /// here, and checks the name of the tab that keeps its sibling.
     fn closePaneById(s: *Server, id: PaneId) !void {
-        const tab = s.session.tabOf(id).?.id;
+        const tab = (s.session.tabOf(id) orelse return).id;
         if (s.panes.get(id)) |p| {
             p.hangup();
             s.destroyPane(p);
@@ -567,7 +567,10 @@ const Server = struct {
                     if (s.exit != null) return;
                 },
                 .navigate => |n| try s.navigate(c, n),
-                .dialog => |dialog_ev| try s.dialogInput(c, dialog_ev),
+                .dialog => |dialog_ev| {
+                    try s.dialogInput(c, dialog_ev);
+                    if (s.exit != null) return;
+                },
                 .none => {},
             }
         }
@@ -596,12 +599,9 @@ const Server = struct {
                 };
                 return s.openPane(id, cwd);
             },
-            .close_pane => return s.closePaneById(ss.focused()),
-            .close_tab, .close_workspace => {
-                s.closed.clearRetainingCapacity();
-                const closed = try if (a == .close_tab) ss.closeTab(&s.closed) else ss.closeWorkspace(&s.closed);
-                return s.closePanes(s.closed.items, closed);
-            },
+            .close_pane => return s.requestClose(c, .{ .pane = ss.focused() }),
+            .close_tab => return s.requestClose(c, .{ .tab = ss.activeTab().id }),
+            .close_workspace => return s.requestClose(c, .{ .workspace = ss.active }),
             .focus => |dir| blk: {
                 if (!try ss.focus(area, dir)) break :blk false;
                 try s.markName(ss.activeTab());
@@ -637,6 +637,33 @@ const Server = struct {
         try s.markStale();
     }
 
+    /// Closes `target` at once, or asks first when one of its panes runs
+    /// something other than its shell.
+    fn requestClose(s: *Server, c: *Conn, target: session_mod.Target) !void {
+        s.closed.clearRetainingCapacity();
+        try s.session.panesIn(target, &s.closed);
+        var buf: pane_mod.Comm = undefined;
+        for (s.closed.items) |id| {
+            const p = s.panes.get(id) orelse continue;
+            const program = p.busy(&buf) orelse continue;
+            return s.openDialog(c, .{ .confirm = .init(target, program) });
+        }
+        try s.close(target);
+    }
+
+    /// Closes `target` and stops its programs. A target that is gone,
+    /// such as a pane whose program exited, is left alone.
+    fn close(s: *Server, target: session_mod.Target) !void {
+        const ss = &s.session;
+        s.closed.clearRetainingCapacity();
+        const closed = switch (target) {
+            .pane => |id| return s.closePaneById(id),
+            .tab => |id| try ss.closeTab(id, &s.closed),
+            .workspace => |id| try ss.closeWorkspace(id, &s.closed),
+        } orelse return;
+        try s.closePanes(s.closed.items, closed);
+    }
+
     fn openDialog(s: *Server, c: *Conn, d: Dialog) !void {
         c.prefix.mode = .{ .dialog = d };
         try s.markStale();
@@ -651,6 +678,12 @@ const Server = struct {
             .save => {
                 try s.rename(&d.rename);
                 c.prefix.mode = .normal;
+            },
+            .confirm => {
+                const target = d.confirm.target;
+                c.prefix.mode = .normal;
+                try s.close(target);
+                if (s.exit != null) return;
             },
         }
         try s.markStale();

@@ -61,6 +61,9 @@ pub const Workspace = struct {
 /// The largest unit a close took with it.
 pub const Closed = enum { pane, tab, workspace, session };
 
+/// What a close takes away.
+pub const Target = union(enum) { pane: PaneId, tab: TabId, workspace: WorkspaceId };
+
 pub const Session = struct {
     gpa: std.mem.Allocator,
     /// Sidebar order.
@@ -296,17 +299,30 @@ pub const Session = struct {
         unreachable;
     }
 
-    /// Closes the current tab and appends its panes to `closed`.
-    pub fn closeTab(s: *Session, closed: *std.ArrayList(PaneId)) !Closed {
-        const ws = s.activeWorkspace();
-        const t = ws.activeTab();
-        try t.layout.panes(s.gpa, closed);
-        return s.dropTab(ws, t);
+    /// Appends the panes `target` holds to `out`; none once it is gone.
+    pub fn panesIn(s: *const Session, target: Target, out: *std.ArrayList(PaneId)) !void {
+        switch (target) {
+            .pane => |id| if (s.tabOf(id) != null) try out.append(s.gpa, id),
+            .tab => |id| if (s.findTab(id)) |t| try t.layout.panes(s.gpa, out),
+            .workspace => |id| if (s.findWorkspace(id)) |ws| for (ws.tabs.items) |t| try t.layout.panes(s.gpa, out),
+        }
     }
 
-    /// Closes the current workspace and appends its panes to `closed`.
-    pub fn closeWorkspace(s: *Session, closed: *std.ArrayList(PaneId)) !Closed {
-        const ws = s.activeWorkspace();
+    /// Closes a tab and appends its panes to `closed`. Null when there is
+    /// no such tab.
+    pub fn closeTab(s: *Session, id: TabId, closed: *std.ArrayList(PaneId)) !?Closed {
+        for (s.workspaces.items) |ws| for (ws.tabs.items) |t| {
+            if (t.id != id) continue;
+            try t.layout.panes(s.gpa, closed);
+            return s.dropTab(ws, t);
+        };
+        return null;
+    }
+
+    /// Closes a workspace and appends its panes to `closed`. Null when
+    /// there is no such workspace.
+    pub fn closeWorkspace(s: *Session, id: WorkspaceId, closed: *std.ArrayList(PaneId)) !?Closed {
+        const ws = s.findWorkspace(id) orelse return null;
         for (ws.tabs.items) |t| try t.layout.panes(s.gpa, closed);
         return s.dropWorkspace(ws);
     }
@@ -446,8 +462,8 @@ test "ids are never reused after closes" {
             @intFromEnum(s.active),
         };
         for (ids) |id| try testing.expect(try seen.fetchPut(testing.allocator, id, {}) == null);
-        try testing.expectEqual(.workspace, try s.closeWorkspace(&closed));
-        try testing.expectEqual(.tab, try s.closeTab(&closed));
+        try testing.expectEqual(.workspace, (try s.closeWorkspace(s.active, &closed)).?);
+        try testing.expectEqual(.tab, (try s.closeTab(s.activeTab().id, &closed)).?);
     }
     try testing.expectEqual(first, s.focused());
 }
@@ -507,19 +523,19 @@ test "closing the current tab or workspace lists its panes and selects a neighbo
     const t3a = try s.newTab();
     const t3b = try s.split(screen, .down);
     try testing.expect(s.selectTab(1));
-    try testing.expectEqual(.tab, try s.closeTab(&closed));
+    try testing.expectEqual(.tab, (try s.closeTab(s.activeTab().id, &closed)).?);
     try testing.expectEqualSlices(PaneId, &.{t2}, closed.items);
     try testing.expectEqual(t3b, s.focused());
 
     closed.clearRetainingCapacity();
     const other = try s.newWorkspace("/two");
     try testing.expect(s.selectWorkspace(0));
-    try testing.expectEqual(.workspace, try s.closeWorkspace(&closed));
+    try testing.expectEqual(.workspace, (try s.closeWorkspace(s.active, &closed)).?);
     try testing.expectEqual(3, closed.items.len);
     try testing.expect(std.mem.indexOfScalar(PaneId, closed.items, t3a) != null);
     try testing.expectEqual(other, s.focused());
     closed.clearRetainingCapacity();
-    try testing.expectEqual(.session, try s.closeWorkspace(&closed));
+    try testing.expectEqual(.session, (try s.closeWorkspace(s.active, &closed)).?);
     try testing.expectEqualSlices(PaneId, &.{other}, closed.items);
 }
 
@@ -640,4 +656,36 @@ test "a renamed workspace keeps its name; an empty name returns it to its direct
     try testing.expectEqualDeep(Name{ .dynamic = "kiwa" }, ws.name);
     try s.renameWorkspace(s.activeWorkspace(), "");
     try testing.expectEqualStrings("/", s.activeWorkspace().name.text());
+}
+
+test "a close target lists its panes and closes by id, and a gone target does nothing" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    var panes: std.ArrayList(PaneId) = .empty;
+    defer panes.deinit(testing.allocator);
+    const a = try s.newWorkspace("/one");
+    const b = try s.split(screen, .right);
+    const first_tab = s.activeTab().id;
+    const first_ws = s.active;
+    const c = try s.newTab();
+    try s.panesIn(.{ .pane = a }, &panes);
+    try s.panesIn(.{ .tab = first_tab }, &panes);
+    try testing.expectEqualSlices(PaneId, &.{ a, a, b }, panes.items);
+    panes.clearRetainingCapacity();
+    try s.panesIn(.{ .workspace = first_ws }, &panes);
+    try testing.expectEqual(3, panes.items.len);
+
+    panes.clearRetainingCapacity();
+    try testing.expectEqual(.tab, (try s.closeTab(first_tab, &panes)).?);
+    try testing.expectEqualSlices(PaneId, &.{ a, b }, panes.items);
+    try testing.expectEqual(c, s.focused());
+    try testing.expectEqual(null, try s.closeTab(first_tab, &panes));
+    panes.clearRetainingCapacity();
+    try s.panesIn(.{ .pane = a }, &panes);
+    try s.panesIn(.{ .tab = first_tab }, &panes);
+    try testing.expectEqual(0, panes.items.len);
+    _ = try s.newWorkspace("/two");
+    try testing.expectEqual(.workspace, (try s.closeWorkspace(first_ws, &panes)).?);
+    try testing.expectEqual(null, try s.closeWorkspace(first_ws, &panes));
+    try testing.expectEqualStrings("two", s.activeWorkspace().name.text());
 }
