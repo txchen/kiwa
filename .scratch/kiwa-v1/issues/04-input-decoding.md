@@ -1,6 +1,6 @@
 # 04 Input decoding and re-encoding
 
-Status: open
+Status: claimed
 Blocked by: 02
 
 ## Scope
