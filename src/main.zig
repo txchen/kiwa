@@ -10,3 +10,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 }
+
+test {
+    _ = @import("paths.zig");
+    _ = @import("protocol.zig");
+    _ = @import("sgr.zig");
+    _ = @import("input.zig");
+    _ = @import("render_full.zig");
+}
