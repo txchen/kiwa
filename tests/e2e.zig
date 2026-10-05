@@ -48,6 +48,51 @@ const Ctx = struct {
         return linux.W.EXITSTATUS(status);
     }
 
+    /// Runs `kiwa <arg>` without a terminal and returns what it printed.
+    fn output(ctx: *Ctx, arg: [:0]const u8) ![]u8 {
+        const argv = [_:null]?[*:0]const u8{ ctx.kiwa.ptr, arg.ptr, null };
+        var pipe: [2]i32 = undefined;
+        _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+        const pid = sys.fork();
+        if (pid == 0) {
+            const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0));
+            _ = linux.dup2(devnull, 0);
+            _ = linux.dup2(pipe[1], 1);
+            _ = linux.dup2(devnull, 2);
+            _ = linux.execve(ctx.kiwa, &argv, ctx.env.slice);
+            sys._exit(127);
+        }
+        sys.close(pipe[1]);
+        defer sys.close(pipe[0]);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(ctx.gpa);
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = try sys.read(pipe[0], &buf);
+            if (n == 0) break;
+            try out.appendSlice(ctx.gpa, buf[0..n]);
+        }
+        var status: u32 = 0;
+        _ = linux.waitpid(pid, &status, 0);
+        if (linux.W.EXITSTATUS(status) != 0) return error.CommandFailed;
+        return out.toOwnedSlice(ctx.gpa);
+    }
+
+    /// Waits until `kiwa ls` prints `want`.
+    fn waitList(ctx: *Ctx, want: []const u8) !void {
+        const deadline = now() + 5 * std.time.ns_per_s;
+        while (true) {
+            const got = try ctx.output("ls");
+            defer ctx.gpa.free(got);
+            if (std.mem.eql(u8, got, want)) return;
+            if (now() > deadline) {
+                std.debug.print("    kiwa ls printed:\n{s}    want:\n{s}", .{ got, want });
+                return error.Timeout;
+            }
+            sleepMs(50);
+        }
+    }
+
     /// The pid of the server whose environment names this case's socket.
     fn serverPid(ctx: *Ctx) !?sys.pid_t {
         var proc = try std.Io.Dir.openDirAbsolute(ctx.io, "/proc", .{ .iterate = true });
@@ -269,9 +314,14 @@ const Outer = struct {
     }
 
     fn waitUntil(o: *Outer, what: []const u8, comptime pred: fn (*Outer, []const u8) anyerror!bool) !void {
+        return o.waitFor(what, what, pred);
+    }
+
+    /// Feeds output into the model until `pred(o, arg)` holds.
+    fn waitFor(o: *Outer, what: []const u8, arg: anytype, comptime pred: fn (*Outer, @TypeOf(arg)) anyerror!bool) !void {
         const deadline = now() + 5 * std.time.ns_per_s;
         while (true) {
-            if (try pred(o, what)) return;
+            if (try pred(o, arg)) return;
             const left = deadline -| now();
             if (left == 0 or o.eof) break;
             if (try o.pollOnce(left)) _ = try o.readOnce();
@@ -831,6 +881,401 @@ fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
     try o.waitLine(ctx.socket);
 }
 
+/// A cell rectangle on the modeled outer screen.
+const Box = struct {
+    x: u16,
+    y: u16,
+    cols: u16,
+    rows: u16,
+
+    fn contains(b: Box, x: usize, y: usize) bool {
+        return x >= b.x and x < b.x + b.cols and y >= b.y and y < b.y + b.rows;
+    }
+
+    /// The cells inside the border.
+    fn inner(b: Box) Box {
+        return .{ .x = b.x + 1, .y = b.y + 1, .cols = b.cols - 2, .rows = b.rows - 2 };
+    }
+};
+
+/// The modeled outer screen's cells, read through a render state.
+const Grid = struct {
+    rs: vt.RenderState = .empty,
+    gpa: std.mem.Allocator,
+
+    fn load(o: *Outer) !Grid {
+        var g: Grid = .{ .gpa = o.gpa };
+        try g.rs.update(o.gpa, &o.term);
+        return g;
+    }
+
+    fn deinit(g: *Grid) void {
+        g.rs.deinit(g.gpa);
+    }
+
+    fn cp(g: *const Grid, x: usize, y: usize) u21 {
+        const raw = g.rs.row_data.items(.cells)[y].items(.raw)[x];
+        if (raw.content_tag != .codepoint and raw.content_tag != .codepoint_grapheme) return ' ';
+        return if (raw.content.codepoint.data == 0) ' ' else raw.content.codepoint.data;
+    }
+
+    fn fg(g: *const Grid, x: usize, y: usize) vt.Style.Color {
+        const cells = g.rs.row_data.items(.cells)[y];
+        if (cells.items(.raw)[x].style_id == 0) return .none;
+        return cells.items(.style)[x].fg_color;
+    }
+
+    /// Where ASCII `needle` starts on screen, top row first.
+    fn find(g: *const Grid, needle: []const u8) ?[2]usize {
+        for (0..g.rs.rows) |y| {
+            var x: usize = 0;
+            while (x + needle.len <= g.rs.cols) : (x += 1) {
+                for (needle, 0..) |c, i| {
+                    if (g.cp(x + i, y) != c) break;
+                } else return .{ x, y };
+            }
+        }
+        return null;
+    }
+
+    /// Whether `b` is drawn as a single-line box.
+    fn isBox(g: *const Grid, b: Box) bool {
+        const r = b.x + b.cols - 1;
+        const bot = b.y + b.rows - 1;
+        if (g.cp(b.x, b.y) != 0x250c or g.cp(r, b.y) != 0x2510) return false;
+        if (g.cp(b.x, bot) != 0x2514 or g.cp(r, bot) != 0x2518) return false;
+        for (b.x + 1..r) |x| if (g.cp(x, b.y) != 0x2500 or g.cp(x, bot) != 0x2500) return false;
+        for (b.y + 1..bot) |y| if (g.cp(b.x, y) != 0x2502 or g.cp(r, y) != 0x2502) return false;
+        return true;
+    }
+
+    fn hasBoxChars(g: *const Grid) bool {
+        for (0..g.rs.rows) |y| for (0..g.rs.cols) |x| switch (g.cp(x, y)) {
+            0x2500...0x257f => return true,
+            else => {},
+        };
+        return false;
+    }
+};
+
+const TextIn = struct { text: []const u8, box: Box };
+
+/// Whether `t.text` is on screen inside `t.box`.
+fn textIn(o: *Outer, t: TextIn) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    const at = g.find(t.text) orelse return false;
+    return t.box.contains(at[0], at[1]) and t.box.contains(at[0] + t.text.len - 1, at[1]);
+}
+
+fn waitTextIn(o: *Outer, text: []const u8, box: Box) !void {
+    return o.waitFor(text, TextIn{ .text = text, .box = box }, textIn);
+}
+
+fn boxesDrawn(o: *Outer, boxes: []const Box) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    for (boxes) |b| if (!g.isBox(b)) return false;
+    return true;
+}
+
+fn waitBoxes(o: *Outer, boxes: []const Box) !void {
+    return o.waitFor("pane borders", boxes, boxesDrawn);
+}
+
+fn noBorders(o: *Outer, _: void) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    return !g.hasBoxChars();
+}
+
+fn waitNoBorders(o: *Outer) !void {
+    return o.waitFor("no pane borders", {}, noBorders);
+}
+
+/// Whether the box's corners use the accent color, and only those boxes.
+fn accentIs(o: *Outer, boxes: []const Box) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    for (boxes, 0..) |b, i| {
+        const fg = g.fg(b.x, b.y);
+        const accent = fg == .palette and fg.palette == 6;
+        if (accent != (i == 0)) return false;
+    }
+    return true;
+}
+
+/// Waits until `boxes[0]` alone has the accent border.
+fn waitAccent(o: *Outer, boxes: []const Box) !void {
+    return o.waitFor("the accent border", boxes, accentIs);
+}
+
+/// Sends the prefix and then `keys`.
+fn prefixed(o: *Outer, comptime keys: []const u8) !void {
+    try o.send("\x02" ++ keys);
+}
+
+/// Moves the focused shell into a new `two` directory and waits until it is there.
+fn cdTwo(o: *Outer) !void {
+    try o.send("mkdir two && cd two && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-two");
+}
+
+fn caseName(ctx: *Ctx) []const u8 {
+    return std.fs.path.basename(ctx.dir);
+}
+
+const left_half: Box = .{ .x = 0, .y = 0, .cols = 40, .rows = 24 };
+const right_half: Box = .{ .x = 40, .y = 0, .cols = 40, .rows = 24 };
+const right_top: Box = .{ .x = 40, .y = 0, .cols = 40, .rows = 12 };
+const right_bottom: Box = .{ .x = 40, .y = 12, .cols = 40, .rows = 12 };
+
+fn workspacesTabsAndSplits(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try prefixed(o, "-");
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    try waitAccent(o, &.{ right_bottom, left_half, right_top });
+
+    try prefixed(o, "h");
+    try waitAccent(o, &.{ left_half, right_top, right_bottom });
+    try o.send("echo left$((10+1))\r");
+    try waitTextIn(o, "left11", left_half.inner());
+    try prefixed(o, "l");
+    try waitAccent(o, &.{ right_top, left_half, right_bottom });
+    try o.send("echo top$((10+2))\r");
+    try waitTextIn(o, "top12", right_top.inner());
+    try prefixed(o, "j");
+    try waitAccent(o, &.{ right_bottom, left_half, right_top });
+    try o.send("echo bottom$((10+3))\r");
+    try waitTextIn(o, "bottom13", right_bottom.inner());
+    try prefixed(o, "k");
+    try waitAccent(o, &.{ right_top, left_half, right_bottom });
+    try o.send("\x02\x1b[B");
+    try waitAccent(o, &.{ right_bottom, left_half, right_top });
+
+    const name = caseName(ctx);
+    try prefixed(o, "c");
+    try waitNoBorders(o);
+    try o.waitLine("$");
+    try cdTwo(o);
+    try prefixed(o, "N");
+    try prefixed(o, "c");
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(ctx.gpa);
+    try want.print(ctx.gpa, "1: {s}\n  1: sh, 3 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
+    try ctx.waitList(want.items);
+
+    try prefixed(o, "!");
+    try prefixed(o, "1");
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    try waitTextIn(o, "left11", left_half.inner());
+    try waitTextIn(o, "top12", right_top.inner());
+    try waitTextIn(o, "bottom13", right_bottom.inner());
+    try waitAccent(o, &.{ right_bottom, left_half, right_top });
+
+    try prefixed(o, "x");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try waitAccent(o, &.{ right_half, left_half });
+    try waitTextIn(o, "top12", right_half.inner());
+    try prefixed(o, "x");
+    try waitNoBorders(o);
+    try o.waitText("left11");
+    try o.send("clear; tput cols; tput lines\r");
+    try o.waitLine("80");
+    try o.waitLine("24");
+    want.clearRetainingCapacity();
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: two\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
+    try ctx.waitList(want.items);
+}
+
+fn zoomAndUnzoom(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("clear; tput cols\r");
+    try waitTextIn(o, "38", right_half.inner());
+    try prefixed(o, "z");
+    try waitNoBorders(o);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("80");
+    try prefixed(o, "z");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("clear; tput cols\r");
+    try waitTextIn(o, "38", right_half.inner());
+}
+
+fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try prefixed(o, "rhh");
+    // An unambiguous escape: a raw ESC followed at once by typing would read as alt+c.
+    try o.waitKitty();
+    try o.press(named(.escape, .{}));
+    try waitBoxes(o, &.{ .{ .x = 0, .y = 0, .cols = 32, .rows = 24 }, .{ .x = 32, .y = 0, .cols = 48, .rows = 24 } });
+    try o.send("clear; tput cols\r");
+    try o.waitText("46");
+    try prefixed(o, "h");
+    try o.send("clear; tput cols\r");
+    try o.waitText("30");
+}
+
+fn exitCascadesToTheServer(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    try prefixed(o, "v");
+    try prefixed(o, "c");
+    try cdTwo(o);
+    try prefixed(o, "N");
+    const name = caseName(ctx);
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(ctx.gpa);
+    try want.print(ctx.gpa, "1: {s}\n  1: sh, 2 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try ctx.waitList(want.items);
+
+    try o.send("exit\r");
+    want.clearRetainingCapacity();
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 2 panes\n  2: sh, 1 pane (active)\n", .{name});
+    try ctx.waitList(want.items);
+    try o.send("exit\r");
+    want.clearRetainingCapacity();
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 2 panes (active)\n", .{name});
+    try ctx.waitList(want.items);
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("exit\r");
+    try waitNoBorders(o);
+    try o.send("exit\r");
+    try expect(try o.waitExit() == 0, "the client exits 0");
+    try expect(try o.hasLine("exited"), "the client prints \"exited\"");
+    try ctx.waitServerGone(pid);
+}
+
+fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("mkdir sub && cd sub && echo in-$(basename $PWD)\r");
+    try o.waitLine("in-sub");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("clear; pwd\r");
+    const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
+    defer ctx.gpa.free(sub);
+    try waitTextIn(o, sub, right_half.inner());
+    // A reported OSC 7 directory wins over the shell's actual one.
+    try o.send("clear; mkdir '../o d'; printf '\\033]7;file://localhost%s/o%%20d\\007' \"$(dirname \"$PWD\")\"\r");
+    _ = try o.pump(200);
+    try prefixed(o, "c");
+    try waitNoBorders(o);
+    try o.send("pwd\r");
+    const osc = try std.fmt.allocPrint(ctx.gpa, "{s}/o d", .{ctx.dir});
+    defer ctx.gpa.free(osc);
+    try o.waitLine(osc);
+}
+
+/// Whether a process runs with exactly this command line.
+fn processRuns(ctx: *Ctx, cmdline: []const u8) !bool {
+    var proc = try std.Io.Dir.openDirAbsolute(ctx.io, "/proc", .{ .iterate = true });
+    defer proc.close(ctx.io);
+    var it = proc.iterate();
+    var buf: [4096]u8 = undefined;
+    while (try it.next(ctx.io)) |entry| {
+        _ = std.fmt.parseInt(sys.pid_t, entry.name, 10) catch continue;
+        var path: [64]u8 = undefined;
+        const got = proc.readFile(ctx.io, try std.fmt.bufPrint(&path, "{s}/cmdline", .{entry.name}), &buf) catch continue;
+        if (std.mem.eql(u8, got, cmdline)) return true;
+    }
+    return false;
+}
+
+fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    const arg = try std.fmt.allocPrint(ctx.gpa, "{d}", .{4_000_000 + @as(u32, @intCast(linux.getpid()))});
+    defer ctx.gpa.free(arg);
+    const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{s}\x00", .{arg});
+    defer ctx.gpa.free(cmdline);
+    var cmd: [64]u8 = undefined;
+    try o.send(try std.fmt.bufPrint(&cmd, "sleep {s}\r", .{arg}));
+    const deadline = now() + 5 * std.time.ns_per_s;
+    while (!try processRuns(ctx, cmdline)) {
+        if (now() > deadline) return error.SleepDidNotStart;
+        sleepMs(20);
+    }
+    try prefixed(o, "x");
+    try waitNoBorders(o);
+    while (try processRuns(ctx, cmdline)) {
+        if (now() > deadline + 3 * std.time.ns_per_s) return error.SleepSurvivedClose;
+        sleepMs(20);
+    }
+    try o.send("echo still$((1+1))\r");
+    try o.waitLine("still2");
+}
+
+fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try prefixed(o, "-");
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    for ([_][2]u16{ .{ 5, 3 }, .{ 2, 1 }, .{ 9, 2 } }) |size| {
+        try o.resize(size[0], size[1]);
+        _ = try o.pump(200);
+    }
+    try o.resize(80, 24);
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    try o.send("clear; tput cols; tput lines\r");
+    try waitTextIn(o, "38", right_bottom.inner());
+    try waitTextIn(o, "10", right_bottom.inner());
+}
+
+/// The highest counter each producer `N:` shows on screen.
+fn producerCounts(o: *Outer) ![10]u32 {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    var best: [10]u32 = @splat(0);
+    for (0..g.rs.rows) |y| for (0..g.rs.cols) |x| {
+        const d = g.cp(x, y);
+        if (d < '0' or d > '9' or x + 2 >= g.rs.cols or g.cp(x + 1, y) != ':') continue;
+        if (x > 0 and g.cp(x - 1, y) != ' ' and g.cp(x - 1, y) != 0x2502) continue;
+        var n: u32 = 0;
+        var i = x + 2;
+        while (i < g.rs.cols and g.cp(i, y) >= '0' and g.cp(i, y) <= '9') : (i += 1) n = n * 10 + (g.cp(i, y) - '0');
+        if (i == x + 2) continue;
+        best[d - '0'] = @max(best[d - '0'], n);
+    };
+    return best;
+}
+
+const Ahead = struct { base: [10]u32, by: u32 };
+
+fn producersAhead(o: *Outer, a: Ahead) !bool {
+    const now_counts = try producerCounts(o);
+    for (now_counts, a.base) |n, b| if (n < b + a.by) return false;
+    return true;
+}
+
+fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
+    const o = try ctx.attachSized(240, 64);
+    try o.waitLine("$");
+    try prefixed(o, "c");
+    for (0..10) |i| {
+        if (i > 0) try o.send(if (i % 2 == 1) "\x02v" else "\x02-");
+        var cmd: [96]u8 = undefined;
+        try o.send(try std.fmt.bufPrint(&cmd, "clear; i=0; while :; do echo {d}:$i; i=$((i+1)); sleep 0.033; done\r", .{i}));
+    }
+    try o.waitFor("every producer", Ahead{ .base = @splat(0), .by = 5 }, producersAhead);
+    const before = try producerCounts(o);
+    try prefixed(o, "1");
+    try o.waitLine("$");
+    _ = try o.pump(300);
+    const bytes = try o.pump(3000);
+    std.debug.print("    10 hidden producers, 3 s: {d} outer bytes\n", .{bytes});
+    try expect(bytes == 0, "hidden producers send no outer bytes");
+    try prefixed(o, "2");
+    try o.waitFor("the producers' latest output", Ahead{ .base = before, .by = 50 }, producersAhead);
+}
+
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
@@ -859,6 +1304,14 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
     .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers },
     .{ .name = "a one-cell spinner costs bytes per frame, not per screen", .run = spinnerCostsBytesPerFrame },
+    .{ .name = "workspaces, tabs, and a 3-pane split: focus, borders, and closes", .run = workspacesTabsAndSplits },
+    .{ .name = "zoom fills the tab and unzoom restores the split", .run = zoomAndUnzoom },
+    .{ .name = "resize mode moves the divider", .run = resizeModeMovesTheDivider },
+    .{ .name = "exit cascades from panes to tabs, workspaces, and the server", .run = exitCascadesToTheServer },
+    .{ .name = "new panes start in the focused pane's directory", .run = newPanesStartInTheFocusedDirectory },
+    .{ .name = "hidden producers draw nothing until their tab shows", .run = hiddenProducersDrawNothing },
+    .{ .name = "a split survives a client shrunk below the minimum pane size", .run = tinyClientKeepsTheSplit },
+    .{ .name = "prefix x closes the pane and hangs up its foreground program", .run = closingAPaneHangsUpItsProgram },
 };
 
 pub fn main(init: std.process.Init) !u8 {
