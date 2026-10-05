@@ -9,6 +9,7 @@ const Frame = frame.Frame;
 const Cell = frame.Cell;
 const Cursor = frame.Cursor;
 const Graphemes = frame.Graphemes;
+const Rect = frame.Rect;
 const Writer = std.Io.Writer;
 
 const sync_begin = "\x1b[?2026h";
@@ -21,12 +22,142 @@ const replacement = "\u{fffd}";
 /// frames write nothing. Assumes the outer cursor is at `old.cursor` with
 /// the default pen, which is where every diff and full redraw leaves it.
 pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
-    std.debug.assert(old.cols == new.cols and old.rows == new.rows);
+    return emit(old, new, g, w, &.{}, .{ .x = old.cursor.x, .y = old.cursor.y });
+}
+
+/// Content that moved `n` rows inside `rect`: up when positive, as SU
+/// moves it, and down when negative. A rect that spans the frame's width
+/// scrolls with top and bottom margins alone; a narrower one also needs
+/// left and right margins (DECLRMM).
+pub const Scroll = struct {
+    rect: Rect,
+    n: i32,
+
+    /// Applies the scroll to a model of the outer terminal, as the outer
+    /// terminal applies the bytes `write` sends. Rows that scroll in are
+    /// blank. A wide character cut by a side margin becomes unknown.
+    fn apply(s: Scroll, f: *Frame) void {
+        const r = s.rect;
+        const n: usize = @abs(s.n);
+        std.debug.assert(r.rows >= 2 and n > 0 and n < r.rows and r.x + r.cols <= f.cols);
+        const cut_left = r.x > 0 and straddles(f, r, r.x);
+        const cut_right = r.x + r.cols < f.cols and straddles(f, r, r.x + r.cols);
+        const keep = r.rows - n;
+        for (0..keep) |i| {
+            const to, const from = if (s.n > 0) .{ i, i + n } else .{ r.rows - 1 - i, r.rows - 1 - i - n };
+            @memcpy(f.row(r.y + to)[r.x..][0..r.cols], f.row(r.y + from)[r.x..][0..r.cols]);
+        }
+        const blank_from = if (s.n > 0) keep else 0;
+        for (r.y + blank_from..r.y + blank_from + n) |y| @memset(f.row(y)[r.x..][0..r.cols], .blank);
+        for (r.y..r.y + r.rows) |y| {
+            const cells = f.row(y);
+            if (cut_left) @memset(cells[r.x - 1 ..][0..2], unknown);
+            if (cut_right) @memset(cells[r.x + r.cols - 1 ..][0..2], unknown);
+        }
+    }
+
+    fn write(s: Scroll, w: *Writer, cols: u16) Writer.Error!void {
+        const r = s.rect;
+        const margins = r.x > 0 or r.cols < cols;
+        if (margins) try w.print("\x1b[?69h\x1b[{d};{d}s", .{ r.x + 1, r.x + r.cols });
+        try w.print("\x1b[{d};{d}r\x1b[", .{ r.y + 1, r.y + r.rows });
+        if (@abs(s.n) != 1) try w.print("{d}", .{@abs(s.n)});
+        try w.writeAll(if (s.n > 0) "S\x1b[r" else "T\x1b[r");
+        if (margins) try w.writeAll("\x1b[?69l");
+    }
+};
+
+/// Whether a wide character in `r`'s rows sits across the line between
+/// columns `x - 1` and `x`.
+fn straddles(f: *const Frame, r: Rect, x: usize) bool {
+    for (r.y..r.y + r.rows) |y| if (f.row(y)[x].width == .tail) return true;
+    return false;
+}
+
+/// A cell whose outer contents are not known. No composed cell equals it,
+/// so the diff always rewrites it.
+const unknown: Cell = .{ .cp = std.math.maxInt(u21) };
+
+/// Frames that `diffScrolling` works in, kept between diffs so that they
+/// allocate only when the size changes.
+pub const Scratch = struct {
+    base: Frame = .{},
+    trial: Frame = .{},
+    chosen: std.ArrayList(Scroll) = .empty,
+
+    pub fn deinit(sc: *Scratch, gpa: std.mem.Allocator) void {
+        sc.base.deinit(gpa);
+        sc.trial.deinit(gpa);
+        sc.chosen.deinit(gpa);
+    }
+};
+
+pub const DiffError = Writer.Error || std.mem.Allocator.Error;
+
+/// Like `diff`, but first scrolls the outer terminal for each of `scrolls`
+/// where that writes fewer bytes. Each scroll can move the whole width of
+/// its rows or, when the outer terminal supports left and right margins
+/// (`lr_margins`), only its rect. The cell diff that follows repaints
+/// whatever else moved.
+pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
+    if (scrolls.len == 0) return diff(old, new, g, w);
+    try sc.base.resize(gpa, old.cols, old.rows);
+    try sc.trial.resize(gpa, old.cols, old.rows);
+    sc.base.copyFrom(old);
+    sc.chosen.clearRetainingCapacity();
+    try sc.chosen.ensureTotalCapacity(gpa, scrolls.len);
+    for (scrolls) |s| {
+        const r = s.rect;
+        const rows: Scroll = .{ .rect = .{ .y = r.y, .cols = old.cols, .rows = r.rows }, .n = s.n };
+        const candidates: [2]Scroll = .{ rows, s };
+        const count: usize = if (lr_margins and r.cols >= 2 and !std.meta.eql(r, rows.rect)) 2 else 1;
+        // A scroll changes only its rows, so only they are compared.
+        const band = sc.base.cells[@as(usize, r.y) * old.cols ..][0 .. @as(usize, r.rows) * old.cols];
+        var best: ?Scroll = null;
+        var best_bytes = bandBytes(&sc.base, new, g, r, null);
+        for (candidates[0..count]) |c| {
+            @memcpy(sc.trial.cells[@as(usize, r.y) * old.cols ..][0..band.len], band);
+            c.apply(&sc.trial);
+            const bytes = bandBytes(&sc.trial, new, g, r, c);
+            if (bytes < best_bytes) {
+                best = c;
+                best_bytes = bytes;
+            }
+        }
+        if (best) |b| {
+            b.apply(&sc.base);
+            sc.chosen.appendAssumeCapacity(b);
+        }
+    }
+    try emit(&sc.base, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y });
+}
+
+/// The bytes that `scroll`, if any, and repainting `r`'s rows of `moved`
+/// into `new` cost, from an unknown cursor position.
+fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rect, scroll: ?Scroll) u64 {
+    var buf: [256]u8 = undefined;
+    var d: Writer.Discarding = .init(&buf);
+    var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
+    if (scroll) |s| s.write(&d.writer, new.cols) catch unreachable;
+    for (r.y..r.y + r.rows) |y| o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
+    return d.fullCount();
+}
+
+/// Writes `scrolls`, then what turns `moved`, the old frame with `scrolls`
+/// applied, into `new`. The outer cursor starts at `start`.
+fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, start: Pos) Writer.Error!void {
+    std.debug.assert(moved.cols == new.cols and moved.rows == new.rows);
     // One row's write cannot tear, so it needs no synchronized output.
-    const sync = changedRows(old, new) > 1;
-    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = old.cursor.x, .y = old.cursor.y }, .sync = sync };
-    for (0..new.rows) |y| try o.row(old.row(y), new.row(y), @intCast(y));
-    try o.cursor(old.cursor, new.cursor);
+    const sync = scrolls.len > 0 or changedRows(moved, new) > 1;
+    var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = start, .sync = sync };
+    for (scrolls) |s| {
+        try o.begin();
+        try s.write(w, new.cols);
+        // Setting and resetting the margins homes the cursor.
+        o.pos = null;
+    }
+    for (0..new.rows) |y| try o.row(moved.row(y), new.row(y), @intCast(y));
+    try o.cursor(moved.cursor, new.cursor);
     try o.finish();
 }
 
@@ -63,8 +194,8 @@ const Out = struct {
     sync: bool,
     started: bool = false,
     pen: vt.Style = .{},
-    /// Null after a write to the last column, which leaves the outer cursor
-    /// in pending wrap.
+    /// Null when unknown: after a scroll, or after a write to the last
+    /// column, which leaves the outer cursor in pending wrap.
     pos: ?Pos,
 
     fn begin(o: *Out) Writer.Error!void {
@@ -233,6 +364,15 @@ const Fixture = struct {
     old: Frame = .{},
     new: Frame = .{},
     out: Writer.Allocating,
+    how: How = .plain,
+    scratch: Scratch = .{},
+
+    const How = union(enum) {
+        plain,
+        /// Sends these scrolls whether or not they save bytes.
+        forced: []const Scroll,
+        choose: struct { scrolls: []const Scroll, lr_margins: bool },
+    };
 
     fn create() Fixture {
         return .{ .out = .init(alloc) };
@@ -248,6 +388,7 @@ const Fixture = struct {
         f.old.deinit(alloc);
         f.new.deinit(alloc);
         f.out.deinit();
+        f.scratch.deinit(alloc);
     }
 
     fn both(f: *Fixture, x: usize, y: usize, text: []const u8) void {
@@ -259,8 +400,23 @@ const Fixture = struct {
 
     fn diffBytes(f: *Fixture) ![]const u8 {
         f.out.clearRetainingCapacity();
-        try diff(&f.old, &f.new, &f.g, &f.out.writer);
+        try f.diffInto(&f.out.writer);
         return f.out.written();
+    }
+
+    fn diffInto(f: *Fixture, w: *Writer) !void {
+        const start: Pos = .{ .x = f.old.cursor.x, .y = f.old.cursor.y };
+        switch (f.how) {
+            .plain => try diff(&f.old, &f.new, &f.g, w),
+            .forced => |scrolls| {
+                const base = &f.scratch.base;
+                try base.resize(alloc, f.old.cols, f.old.rows);
+                base.copyFrom(&f.old);
+                for (scrolls) |sc| sc.apply(base);
+                try emit(base, &f.new, &f.g, w, scrolls, start);
+            },
+            .choose => |c| try diffScrolling(alloc, &f.scratch, &f.old, &f.new, &f.g, w, c.scrolls, c.lr_margins),
+        }
     }
 
     fn expectRoundTrip(f: *Fixture) !void {
@@ -277,9 +433,7 @@ const Fixture = struct {
         try full(&f.old, &f.g, &f.out.writer);
         outer.stream.nextSlice(f.out.written());
         try outer.expectShows(&f.g, &f.old);
-        f.out.clearRetainingCapacity();
-        try diff(&f.old, &f.new, &f.g, &f.out.writer);
-        outer.stream.nextSlice(f.out.written());
+        outer.stream.nextSlice(try f.diffBytes());
         try outer.expectShows(&f.g, &f.new);
     }
 };
@@ -585,6 +739,92 @@ test "random frame pairs round-trip through a ghostty-vt outer terminal" {
         }
         f.expectRoundTripOn(&outer) catch |e| {
             std.debug.print("iteration {d}, {d}x{d}\n", .{ i, cols, rows });
+            return e;
+        };
+    }
+}
+
+test "a pane that scrolled moves with a scroll and repaints only the row that came in" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(16, 5);
+    for (0..5) |y| {
+        for (0..6) |x| f.old.row(y)[x] = .{ .cp = @intCast('A' + y) };
+        for (0..8) |x| f.old.row(y)[7 + x] = .{ .cp = @intCast('a' + y) };
+    }
+    f.new.copyFrom(&f.old);
+    const pane: Rect = .{ .x = 7, .y = 1, .cols = 8, .rows = 4 };
+    const up: Scroll = .{ .rect = pane, .n = 1 };
+    up.apply(&f.new);
+    for (0..8) |x| f.new.row(4)[7 + x] = .{ .cp = 'z' };
+    f.old.cursor = .{ .x = 7, .y = 4 };
+    f.new.cursor = f.old.cursor;
+
+    f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = true } };
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[?69h\x1b[8;15s\x1b[2;5r\x1b[S\x1b[r\x1b[?69l\x1b[5;8Hzzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
+    try f.expectRoundTrip();
+
+    // That costs more than repainting the pane's rows.
+    f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = false } };
+    try testing.expect(std.mem.indexOf(u8, try f.diffBytes(), "\x1b[S") == null);
+    try f.expectRoundTrip();
+
+    // Without margins the whole width of the rows scrolls when that pays,
+    // and the diff repaints the columns beside the pane.
+    for (0..5) |y| for ([_]*Frame{ &f.old, &f.new }) |fr| @memset(fr.row(y)[0..6], .{ .cp = 'S' });
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[2;5r\x1b[S\x1b[r\x1b[5HSSSSSS zzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
+    try f.expectRoundTrip();
+
+    // A scroll that saves nothing is not sent.
+    f.new.copyFrom(&f.old);
+    f.new.row(2)[9] = .{ .cp = 'q' };
+    try testing.expectEqualStrings("\x1b[3;10Hq\x1b[5;8H", try f.diffBytes());
+    try f.expectRoundTrip();
+}
+
+/// Makes a row valid again after a scroll cut wide characters at a margin.
+fn repair(row: []Cell) void {
+    for (row, 0..) |*c, x| {
+        if (c.eql(unknown)) c.* = .blank;
+        if (c.width == .tail and (x == 0 or row[x - 1].width != .wide)) c.* = .blank;
+        if (c.width == .wide and (x + 1 == row.len or row[x + 1].width != .tail)) c.* = .blank;
+    }
+}
+
+test "random scrolled frames round-trip through a ghostty-vt outer terminal" {
+    var prng: Rng.DefaultPrng = .init(0x7363726f);
+    const r = prng.random();
+    var f: Fixture = .create();
+    defer f.deinit();
+    var outer: Outer = undefined;
+    try outer.init(2, 2);
+    defer outer.deinit();
+    var scrolls: [2]Scroll = undefined;
+    for (0..2000) |i| {
+        const cols = 2 + r.uintLessThan(u16, 14);
+        const rows = 2 + r.uintLessThan(u16, 6);
+        try f.init(cols, rows);
+        try fillRandom(r, &f.g, &f.old);
+        f.new.copyFrom(&f.old);
+        const count = 1 + r.uintLessThan(usize, 2);
+        for (scrolls[0..count]) |*sc| {
+            const h = 2 + r.uintLessThan(u16, rows - 1);
+            const y = r.uintLessThan(u16, rows - h + 1);
+            const w = 2 + r.uintLessThan(u16, cols - 1);
+            const x = r.uintLessThan(u16, cols - w + 1);
+            const n: i32 = 1 + r.uintLessThan(u16, h - 1);
+            sc.* = .{ .rect = .{ .x = x, .y = y, .cols = w, .rows = h }, .n = if (r.boolean()) n else -n };
+            sc.apply(&f.new);
+            for (0..rows) |row| repair(f.new.row(row));
+        }
+        try editRandom(r, &f.g, &f.new, r.uintLessThan(usize, 4));
+        const kind = r.uintLessThan(u8, 3);
+        f.how = switch (kind) {
+            0 => .{ .forced = scrolls[0..count] },
+            else => .{ .choose = .{ .scrolls = scrolls[0..count], .lr_margins = kind == 2 } },
+        };
+        f.expectRoundTripOn(&outer) catch |e| {
+            std.debug.print("iteration {d}, {d}x{d}, {any}, how {t}\n", .{ i, cols, rows, scrolls[0..count], f.how });
             return e;
         };
     }

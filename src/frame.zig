@@ -217,6 +217,55 @@ fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Sty
     };
 }
 
+/// The ids of a pane's rows when a frame last drew them. Comparing them
+/// with the next render tells how far the pane's content scrolled.
+pub const DrawnRows = struct {
+    ids: std.ArrayList(vt.RenderState.Row.Id) = .empty,
+
+    /// A shift that keeps fewer rows than this does not pay for a scroll.
+    const min_kept = 2;
+
+    pub fn deinit(d: *DrawnRows, gpa: std.mem.Allocator) void {
+        d.ids.deinit(gpa);
+    }
+
+    /// Records the rows of `rs` and returns how many rows its content moved
+    /// since the last record: positive when it moved up, as output at the
+    /// bottom scrolls it, negative when it moved down. Null when it did not
+    /// move or moved too few rows along.
+    pub fn update(d: *DrawnRows, gpa: std.mem.Allocator, rs: *const vt.RenderState) !?i32 {
+        const rows = rs.row_data.slice();
+        const n = @min(rs.rows, rows.len);
+        var shift: ?i32 = null;
+        if (d.ids.items.len == n and n > 0) {
+            const old = d.ids.items;
+            const top = rows.get(0).id();
+            for (old[1..], 1..) |id, k| if (id.eql(top)) {
+                shift = kept(old[k..], rows, 0, k);
+                break;
+            };
+            if (shift == null) for (1..n) |k| if (rows.get(k).id().eql(old[0])) {
+                if (kept(old[0 .. n - k], rows, k, k)) |m| shift = -m;
+                break;
+            };
+        }
+        try d.ids.resize(gpa, n);
+        for (d.ids.items, 0..) |*id, i| id.* = rows.get(i).id();
+        return shift;
+    }
+
+    /// `k` when most of `old` reappears in `rows` from `from` on, and is
+    /// at least `min_kept` rows long.
+    fn kept(old: []const vt.RenderState.Row.Id, rows: std.MultiArrayList(vt.RenderState.Row).Slice, from: usize, k: usize) ?i32 {
+        if (old.len < min_kept) return null;
+        var same: usize = 0;
+        for (old, from..) |id, i| {
+            if (id.eql(rows.get(i).id())) same += 1;
+        }
+        return if (same * 2 >= old.len) @intCast(k) else null;
+    }
+};
+
 /// The outer cursor for the focused pane drawn at `rect`. `shape_is_default`
 /// is the pane terminal's `cursor.is_default`, which the render state omits.
 pub fn paneCursor(rect: Rect, rs: *const vt.RenderState, shape_is_default: bool) Cursor {
@@ -335,4 +384,36 @@ test "the cursor follows the pane's shape, visibility, and position" {
     s.nextSlice("\x1b[5 q\x1b[?25l");
     try rs.update(testing.allocator, &t);
     try testing.expectEqual(Cursor{ .x = 3, .y = 1, .visible = false, .shape = .blinking_bar }, paneCursor(rect, &rs, t.cursor.is_default));
+}
+
+test "drawn rows tell how far a pane scrolled" {
+    var t: vt.Terminal = try .init(testing.io, testing.allocator, .{ .cols = 6, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(testing.allocator);
+    var d: DrawnRows = .{};
+    defer d.deinit(testing.allocator);
+
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
+    s.nextSlice("a\r\nb\r\nc\r\nd\r\ne");
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
+    s.nextSlice("\r\nf\r\ng");
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(2, try d.update(testing.allocator, &rs));
+
+    // Scrolling back moves the content down; most of the screen is gone
+    // after a clear, which is no scroll.
+    t.scrollViewport(.{ .delta = -1 });
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(-1, try d.update(testing.allocator, &rs));
+    t.scrollViewport(.bottom);
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(1, try d.update(testing.allocator, &rs));
+    s.nextSlice("\r\n1\r\n2\r\n3\r\n4");
+    try rs.update(testing.allocator, &t);
+    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
 }

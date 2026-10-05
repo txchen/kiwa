@@ -984,6 +984,33 @@ fn spinnerCostsBytesPerFrame(ctx: *Ctx) !void {
     try o.send("\x03");
 }
 
+fn scrollingCostsBytesPerLine(ctx: *Ctx, margins: bool) !void {
+    const o = try ctx.attachWith(.{ .margins = margins });
+    try o.waitLine("$");
+    try o.send("clear; i=0; while [ $i -lt 40 ]; do i=$((i+1)); echo \"line $i scrolls by\"; sleep 0.05; done\r");
+    try o.waitLine("line 1 scrolls by");
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(ctx.gpa);
+    o.capture = &seen;
+    try o.waitLine("line 40 scrolls by");
+    o.capture = null;
+    for (19..41) |i| {
+        var buf: [32]u8 = undefined;
+        try o.waitLine(try std.fmt.bufPrint(&buf, "line {d} scrolls by", .{i}));
+    }
+    std.debug.print("    39 lines, margins {}: {d} outer bytes, {d} per line\n", .{ margins, seen.items.len, seen.items.len / 39 });
+    try expect(std.mem.indexOf(u8, seen.items, "S\x1b[r") != null, "the outer terminal scrolled");
+    try expect(seen.items.len <= 100 * 39, "each line costs at most 100 outer bytes");
+}
+
+fn scrollingCostsBytesPerLineWithMargins(ctx: *Ctx) !void {
+    return scrollingCostsBytesPerLine(ctx, true);
+}
+
+fn scrollingCostsBytesPerLineWithoutMargins(ctx: *Ctx) !void {
+    return scrollingCostsBytesPerLine(ctx, false);
+}
+
 fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("pwd\r");
@@ -2525,6 +2552,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
     .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers },
     .{ .name = "a one-cell spinner costs bytes per frame, not per screen", .run = spinnerCostsBytesPerFrame },
+    .{ .name = "scrolling output costs bytes per line, not per screen (margins)", .run = scrollingCostsBytesPerLineWithMargins },
+    .{ .name = "scrolling output costs bytes per line, not per screen (no margins)", .run = scrollingCostsBytesPerLineWithoutMargins },
     .{ .name = "workspaces, tabs, and a 3-pane split: focus, borders, and closes", .run = workspacesTabsAndSplits },
     .{ .name = "zoom fills the tab and unzoom restores the split", .run = zoomAndUnzoom },
     .{ .name = "resize mode moves the divider", .run = resizeModeMovesTheDivider },

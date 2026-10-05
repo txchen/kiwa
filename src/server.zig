@@ -108,6 +108,10 @@ const Conn = struct {
     frame: frame_mod.Frame = .{},
     /// What the outer terminal shows; meaningful only without `redraw_pending`.
     last_frame: frame_mod.Frame = .{},
+    /// Panes whose content moved since `last_frame`, which the diff may
+    /// scroll instead of repainting.
+    scrolls: std.ArrayList(diff.Scroll) = .empty,
+    diff_scratch: diff.Scratch = .{},
     graphemes: frame_mod.Graphemes = .{},
     /// The panes `frame` holds and where. A pane drawn at the same place
     /// again copies only its dirty rows.
@@ -140,6 +144,8 @@ const Conn = struct {
         c.out.deinit(gpa);
         c.frame.deinit(gpa);
         c.last_frame.deinit(gpa);
+        c.scrolls.deinit(gpa);
+        c.diff_scratch.deinit(gpa);
         c.graphemes.deinit(gpa);
         gpa.destroy(c);
     }
@@ -1123,7 +1129,7 @@ const Server = struct {
         const written = if (c.redraw_pending)
             diff.full(&c.frame, &c.graphemes, &aw.writer)
         else
-            diff.diff(&c.last_frame, &c.frame, &c.graphemes, &aw.writer);
+            diff.diffScrolling(s.gpa, &c.diff_scratch, &c.last_frame, &c.frame, &c.graphemes, &aw.writer, c.scrolls.items, c.lr_margins);
         // Taken back before the error check so that `scratch` keeps its buffer.
         s.scratch = aw.toArrayList();
         written catch return error.OutOfMemory;
@@ -1148,11 +1154,16 @@ const Server = struct {
         const focus = s.session.focused();
         var moved = all or c.drawn.items.len != s.view.items.len;
         c.frame.cursor = .{ .visible = false };
+        c.scrolls.clearRetainingCapacity();
         for (s.view.items) |pl| {
             const p = s.panes.get(pl.pane) orelse continue;
             const same = !all and c.drewAt(pl);
             if (!same) moved = true;
             try p.render.update(s.gpa, &p.terminal);
+            const shift = try p.drawn_rows.update(s.gpa, &p.render);
+            if (shift) |n| if (c.drewAt(pl) and p.render.rows == pl.inner.rows) {
+                try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n });
+            };
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, !same);
             if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);
             if (pl.pane == focus) c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);

@@ -4,6 +4,7 @@ const sys = @import("sys.zig");
 const protocol = @import("protocol.zig");
 const input = @import("input.zig");
 const encode = @import("encode.zig");
+const frame = @import("frame.zig");
 const PaneId = @import("layout.zig").PaneId;
 
 const linux = std.os.linux;
@@ -28,6 +29,8 @@ pub const Pane = struct {
     /// Persistent, so escape sequences split across reads still parse.
     stream: vt.TerminalStream,
     render: vt.RenderState = .empty,
+    /// The rows of `render` when the client's frame last drew them.
+    drawn_rows: frame.DrawnRows = .{},
     /// Input and terminal replies the PTY has not accepted yet.
     pending: std.ArrayList(u8) = .empty,
     /// Epoll interest for the PTY. Null once the PTY hung up.
@@ -106,6 +109,7 @@ pub const Pane = struct {
         self.pending.deinit(self.gpa);
         self.clipboard.deinit(self.gpa);
         self.render.deinit(self.gpa);
+        self.drawn_rows.deinit(self.gpa);
         self.stream.deinit();
         self.terminal.deinit(self.gpa);
         self.gpa.destroy(self);
