@@ -149,6 +149,14 @@ const Ctx = struct {
         return error.NoSuchCounter;
     }
 
+    fn serverLogHas(ctx: *Ctx, needle: []const u8) !bool {
+        const log = try std.fmt.allocPrint(ctx.gpa, "{s}/state/server.log", .{ctx.dir});
+        defer ctx.gpa.free(log);
+        const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, log, ctx.gpa, .limited(16 * 1024 * 1024));
+        defer ctx.gpa.free(text);
+        return std.mem.indexOf(u8, text, needle) != null;
+    }
+
     fn socketExists(ctx: *Ctx) bool {
         _ = std.Io.Dir.cwd().statFile(ctx.io, ctx.socket, .{}) catch return false;
         return true;
@@ -929,19 +937,25 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     // A 250x80 pane, beside the sidebar and under the tab row.
     const o = try ctx.attachSized(276, 81);
     try o.waitLine("$");
+    // The loop ends on a file, not on ctrl+c: under load, the shell
+    // sometimes kept looping after a ctrl+c.
     try o.send("a=$(printf 'abcdefghij%.0s' $(seq 24)); printf '\\033[1;79r\\033[79H'; " ++
-        "while :; do printf '%s%s\\n' $RANDOM \"$a\"; sleep 0.01; done\r");
+        "while [ ! -e stop ]; do printf '%s%s\\n' $RANDOM \"$a\"; sleep 0.01; done\r");
     _ = try o.pump(200);
-    sleepMs(8000);
+    // Not reading stalls the client. How long the producer takes to fill
+    // the buffer depends on the machine's load, so wait for the overflow.
+    const deadline = now() + 60 * std.time.ns_per_s;
+    while (!try ctx.serverLogHas("overflow")) {
+        if (now() > deadline) return error.NoOverflow;
+        sleepMs(100);
+    }
     _ = try o.pump(500);
-    try o.send("\x03printf '\\033[r'; clear; echo recovered\r");
+    const stop = try std.fmt.allocPrint(ctx.gpa, "{s}/stop", .{ctx.dir});
+    defer ctx.gpa.free(stop);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = stop, .data = "" });
+    try o.send("printf '\\033[r'; clear; echo recovered\r");
     try o.waitLine("recovered");
     try expect(!try o.contains("abcdefghij"), "the redraw after the overflow left no stale rows");
-    const log = try std.fmt.allocPrint(ctx.gpa, "{s}/state/server.log", .{ctx.dir});
-    defer ctx.gpa.free(log);
-    const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, log, ctx.gpa, .limited(16 * 1024 * 1024));
-    defer ctx.gpa.free(text);
-    try expect(std.mem.indexOf(u8, text, "overflow") != null, "the server logged the overflow");
 }
 
 fn spinnerCostsBytesPerFrame(ctx: *Ctx) !void {
