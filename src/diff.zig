@@ -65,7 +65,7 @@ const Out = struct {
         if (o.pos) |p| if (p.x == x and p.y == y) return;
         try o.begin();
         if (o.pos != null and o.pos.?.y == y) {
-            try o.w.print("\x1b[{d}G", .{x + 1});
+            if (x == 0) try o.w.writeByte('\r') else try o.w.print("\x1b[{d}G", .{x + 1});
         } else if (x == 0) {
             try o.w.print("\x1b[{d}H", .{y + 1});
         } else {
@@ -362,13 +362,13 @@ test "changing either half of a wide character rewrites the whole character" {
     f.old.row(0)[3] = .tail;
     f.new.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
     f.new.row(0)[3] = .tail;
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\x1b[1G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
     // Only the tail differs: the old wide character was half overwritten.
     f.old.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
     f.old.row(0)[3] = .{ .cp = 'q' };
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\x1b[1G\x1b[?2026l", try f.diffBytes());
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[3G\u{6587}\r\x1b[?2026l", try f.diffBytes());
 }
 
 test "a write to the last column is followed by an absolute move" {
@@ -420,7 +420,7 @@ test "a default blank tail is erased, a colored one is written" {
     try f.init(20, 1);
     for ("hello world, again", 0..) |ch, i| f.old.row(0)[i] = .{ .cp = ch };
     f.both(0, 0, "hi");
-    try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\x1b[1G\x1b[?2026l"));
+    try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\r\x1b[?2026l"));
     try f.expectRoundTrip();
 
     for (f.new.row(0)[2..]) |*c| c.style = .{ .bg_color = .{ .palette = 4 } };
