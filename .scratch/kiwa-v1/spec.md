@@ -242,8 +242,13 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
   screen, SGR mouse with button motion (`1002` + `1006`), bracketed paste
   (`2004`), and focus events (`1004`). It does not enable any-motion
   tracking (`1003`), so moving the mouse without a button generates no
-  traffic. On detach, on error, and on `SIGTERM`/`SIGHUP`, the client
-  restores every mode it set and leaves raw mode.
+  traffic. On attach the server also sends `CSI ? u` and then DA1
+  (`CSI c`) through the output stream. A kitty flags reply that arrives
+  before the DA1 reply means the outer terminal supports the kitty
+  keyboard protocol, and the server pushes the disambiguate flag
+  (`CSI > 1 u`). Probe replies never reach a pane. On detach, on error,
+  and on `SIGTERM`/`SIGHUP`, the client pops the kitty flags (`CSI < u`),
+  restores every mode it set, and leaves raw mode.
 - **Terminal replies.** `write_pty` effects go straight to the pane's PTY.
   A DA query is answered as ghostty's default. OSC 52 writes from a pane are
   forwarded to the outer terminal. OSC 52 reads are refused.

@@ -55,6 +55,15 @@ kiwa --version    # version and pinned Ghostty commit
 
 `ctrl+b q` detaches. `ctrl+b ctrl+b` sends `ctrl+b` to the pane.
 
+Kiwa decodes the outer terminal's keys and encodes them again for the
+pane from the pane's own modes. A program that asks for the kitty keyboard
+protocol gets it when the outer terminal supports the protocol, so keys
+such as `shift+enter`, `ctrl+i` and `tab`, or `esc` and `alt` stay
+distinct. Pastes reach the pane bracketed when the pane enabled bracketed
+paste, and focus changes reach it when it enabled focus reporting. Without
+kitty support in the outer terminal, a lone `esc` reaches the pane after
+25 ms with no further input.
+
 `KIWA_SOCKET` overrides the socket path (default
 `$XDG_RUNTIME_DIR/kiwa/default.sock`, or `/tmp/kiwa-<uid>/default.sock`).
 `KIWA_STATE_DIR` overrides the state directory (default
