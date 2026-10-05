@@ -89,6 +89,30 @@ server. Directional focus picks the nearest pane on that side that
 overlaps the focused one; among equally near panes it picks the topmost,
 then the leftmost.
 
+Kiwa works with the mouse:
+
+- Click a workspace or a tab to switch to it, `+ new` for a new workspace,
+  `+` in the tab row for a new tab, and `«` or `»` to collapse or expand
+  the sidebar.
+- Click a pane to focus it. Drag the border between two panes to resize
+  them.
+- The wheel scrolls a pane's scrollback 3 lines per notch, and
+  `[{lines back}/{scrollback}]` in the pane's top-right corner shows how far.
+  Typing or scrolling back down returns to the live screen. On the
+  alternate screen, such as in `less`, the wheel sends up and down arrows.
+- Drag in a pane to select text. Releasing the button copies the selection
+  to the clipboard with OSC 52, so the outer terminal must allow OSC 52
+  writes. A click clears the selection.
+- Right-click a workspace, a tab, or a pane for a menu. Click an item, or
+  move with `j`/`k` or the arrows and press `enter`; `esc`, a click
+  outside, or another right-click closes it.
+
+When a pane's program turns on mouse reporting, as `vim` with `mouse=a`
+or `htop` do, clicks, drags, and the wheel inside the pane go to the
+program. A right-click on the pane's border still opens the pane menu. To
+use the outer terminal's own selection instead, hold `shift` while you
+drag; most terminals then bypass Kiwa's mouse capture.
+
 Kiwa decodes the outer terminal's keys and encodes them again for the
 pane from the pane's own modes. A program that asks for the kitty keyboard
 protocol gets it when the outer terminal supports the protocol, so keys
