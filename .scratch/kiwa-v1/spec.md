@@ -266,11 +266,15 @@ outer terminal <-> kiwa client <-> Unix socket <-> kiwa server
   repository share the watch, which goes away with the last of them. Events
   for other files in that directory are ignored, and `HEAD` is read again
   only after an event names it.
-- **Persistence.** After any change to layout, names, or focus, the server
-  arms a 1 s save deadline. The save writes
+- **Persistence.** After any change to layout, names, focus, zoom, the
+  active workspace or tab, or the sidebar toggle, and after an OSC 7 report
+  of a new directory, the server arms a 1 s save deadline. The save writes
   `$XDG_STATE_HOME/kiwa/<session>/session.json` (default
-  `~/.local/state/kiwa/...`) to a temporary file and renames it into place.
-  The format carries a `version` field.
+  `~/.local/state/kiwa/...`) to a temporary file, syncs it, and renames it
+  into place. The format carries a `version` field and refers to panes by
+  their position in their tab's layout. The server reads the file at start
+  and rebuilds the session on the first attach, when the client's size is
+  known.
 - **Sockets.** The socket is `$XDG_RUNTIME_DIR/kiwa/<session>.sock`, or
   `/tmp/kiwa-<uid>/<session>.sock` when `XDG_RUNTIME_DIR` is unset. The
   directory has mode 0700. Before removing a stale socket, the server checks

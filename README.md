@@ -101,6 +101,21 @@ of its panes runs something other than its shell, for example
 overlaps the focused one; among equally near panes it picks the topmost,
 then the leftmost.
 
+Kiwa saves the session's shape to `session.json` in the state directory:
+the workspaces and tabs in order, fixed names, layouts and divider
+positions, focus, zoom, the sidebar toggle, and each pane's working
+directory. It writes the file 1 s after a change to any of these, and at
+once when `kiwa kill-server` or `SIGTERM`/`SIGHUP` stops the server. Typing
+and output alone never write it; a shell that reports a new directory with
+OSC 7 does. After the server restarts, `kiwa` rebuilds that session with a
+new shell in each pane's saved directory, or in the workspace's root, then
+`$HOME`, then `/` when that directory is gone. Programs, screen contents,
+and activity markers are not restored. Closing the last workspace deletes
+the file, so the next `kiwa` starts fresh in the current directory. A file
+Kiwa cannot read is renamed to `session.json.bad-<unix seconds>`, the reason
+goes to `server.log`, and the server starts fresh; Kiwa keeps the newest
+three such files.
+
 Kiwa works with the mouse:
 
 - Click a workspace or a tab to switch to it, `+ new` for a new workspace,
@@ -141,4 +156,4 @@ kitty support in the outer terminal, a lone `esc` reaches the pane after
 `$XDG_RUNTIME_DIR/kiwa/default.sock`, or `/tmp/kiwa-<uid>/default.sock`).
 `KIWA_STATE_DIR` overrides the state directory (default
 `$XDG_STATE_HOME/kiwa/default`, or `~/.local/state/kiwa/default`), which
-holds `server.log`.
+holds `server.log` and `session.json`.
