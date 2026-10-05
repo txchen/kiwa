@@ -4,3 +4,4 @@ zig-pkg/
 zig-global-cache/
 .scratch/**/todo.md
 .claude/
+__pycache__/

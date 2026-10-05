@@ -1,6 +1,6 @@
 # 12 Renderer efficiency: scrolling, sync markers, and wakes
 
-Status: claimed
+Status: resolved
 Blocked by: 06
 
 ## Why
@@ -110,3 +110,11 @@ goal even when Kiwa's own CPU is low.
   left and right margins. With scrolling frames, the hidden-producers case
   could not keep up. The first e2e build takes about 80 s longer; later
   e2e edits rebuild in about 9 s.
+- 2026-10-05 (review): Resolved by 4c0f143..82f15c5. Review rerun: `zig build
+  test` 152/152, `zig build e2e` 68/68 twice, `zig fmt --check` clean. My
+  bench rerun matched: spinner 2.0 bytes/frame and 1.17 to 1.33% CPU (tmux
+  0.50%); 30 lines/s 52,752 bytes with margins and 82,552 without (tmux
+  38,160), 1.50 to 1.58% CPU (tmux 0.42%). The CPU gap per frame remains
+  with equal bytes and equal context switches, so it is Kiwa's own per-frame
+  work; ticket 11 should profile it. Removed the tracked
+  `tools/__pycache__` file.
