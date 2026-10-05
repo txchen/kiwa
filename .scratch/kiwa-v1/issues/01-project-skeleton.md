@@ -1,6 +1,6 @@
 # 01 Project skeleton
 
-Status: open
+Status: claimed
 Blocked by: none
 
 ## Scope

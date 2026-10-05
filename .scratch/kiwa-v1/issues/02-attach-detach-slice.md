@@ -1,6 +1,6 @@
 # 02 One-pane attach and detach slice
 
-Status: open
+Status: claimed
 Blocked by: 01
 
 ## Scope
@@ -9,7 +9,8 @@ Blocked by: 01
   attaches. Socket paths, `KIWA_SOCKET`, and stale-socket checks follow the
   spec.
 - The server runs one pane with `$SHELL` in the client's directory.
-- The client enters raw mode, enables the outer modes, forwards input and
+- The client enters raw mode and the alternate screen (mouse, paste, and
+  focus modes wait for tickets 04 and 07), forwards input and
   resizes, and writes server output. It restores the outer terminal on
   detach, on error, and on `SIGTERM`/`SIGHUP`.
 - `prefix q` detaches. A second client detaches the first.
