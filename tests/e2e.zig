@@ -91,6 +91,8 @@ const Outer = struct {
     stream: vt.TerminalStream,
     eof: bool = false,
     status: ?u32 = null,
+    /// When set, every byte read from the client is appended here too.
+    capture: ?*std.ArrayList(u8) = null,
 
     fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, cols: u16, rows: u16) !*Outer {
         const o = try ctx.gpa.create(Outer);
@@ -156,6 +158,7 @@ const Outer = struct {
             else => return e,
         };
         if (n == 0) o.eof = true;
+        if (o.capture) |c| try c.appendSlice(o.gpa, buf[0..n]);
         o.stream.nextSlice(buf[0..n]);
         return n;
     }
@@ -478,6 +481,22 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     try expect(std.mem.indexOf(u8, text, "overflow") != null, "the server logged the overflow");
 }
 
+fn spinnerCostsBytesPerFrame(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("while :; do for c in '|' / - '\\'; do printf '\\r%s' \"$c\"; sleep 0.016; done; done\r");
+    _ = try o.pump(500);
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(ctx.gpa);
+    o.capture = &seen;
+    const bytes = try o.pump(2000);
+    o.capture = null;
+    const frames = std.mem.count(u8, seen.items, "\x1b[?2026h");
+    std.debug.print("    spinner 2 s: {d} frames, {d} outer bytes, {d} bytes per frame\n", .{ frames, bytes, bytes / @max(frames, 1) });
+    try expect(frames >= 40, "the spinner drew at least 40 frames in 2 s");
+    try expect(bytes <= 32 * frames, "each spinner frame costs at most 32 outer bytes");
+    try o.send("\x03");
+}
+
 fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("pwd\r");
@@ -504,6 +523,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
     .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
     .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers },
+    .{ .name = "a one-cell spinner costs bytes per frame, not per screen", .run = spinnerCostsBytesPerFrame },
 };
 
 pub fn main(init: std.process.Init) !u8 {
