@@ -154,7 +154,92 @@ pub const Layout = struct {
         s.ratio = old;
         return false;
     }
+
+    /// The divider whose border cells cover (x, y) when `area` is laid out:
+    /// the last column or row of a split's `a` box, or the first of its `b`
+    /// box. Null for every other cell, including a pane's outer edges.
+    pub fn dividerAt(l: *const Layout, area: Rect, x: u16, y: u16) ?Divider {
+        if (x < area.x or x >= area.right() or y < area.y or y >= area.bottom()) return null;
+        var n: *const Node = l.root;
+        var box = area;
+        var path: SplitPath = .{};
+        while (true) {
+            const s = switch (n.*) {
+                .pane => return null,
+                .split => |s| s,
+            };
+            const parts = divide(box, s.axis, s.ratio);
+            const p, const at = switch (s.axis) {
+                .right => .{ x, parts[1].x },
+                .down => .{ y, parts[1].y },
+            };
+            if (p == at or p + 1 == at) return .{ .split = path, .axis = s.axis, .at = at };
+            const side = @intFromBool(p > at);
+            if (path.len == std.math.maxInt(u5)) return null;
+            path.bits |= @as(u32, side) << path.len;
+            path.len += 1;
+            n = if (side == 1) s.b else s.a;
+            box = parts[side];
+        }
+    }
+
+    /// Moves the divider of the split at `path` so that its `b` box starts at
+    /// `at`, or as near as the minimum pane size allows. Returns whether it moved.
+    pub fn moveDivider(l: *Layout, area: Rect, path: SplitPath, at: i32) bool {
+        var n = l.root;
+        var box = area;
+        for (0..path.len) |i| {
+            const s = switch (n.*) {
+                .pane => return false,
+                .split => |s| s,
+            };
+            const side: u1 = @truncate(path.bits >> @intCast(i));
+            box = divide(box, s.axis, s.ratio)[side];
+            n = if (side == 1) s.b else s.a;
+        }
+        const s = switch (n.*) {
+            .pane => return false,
+            .split => |*s| s,
+        };
+        const start: i32, const extent: i32 = switch (s.axis) {
+            .right => .{ box.x, box.cols },
+            .down => .{ box.y, box.rows },
+        };
+        if (extent < 2) return false;
+        const old = s.ratio;
+        const current: i32 = switch (s.axis) {
+            .right => divide(box, s.axis, old)[0].cols,
+            .down => divide(box, s.axis, old)[0].rows,
+        };
+        // Steps from the wanted size back toward the current one until the
+        // layout fits.
+        var a = std.math.clamp(at - start, 1, extent - 1);
+        while (a != current) : (a += if (a < current) 1 else -1) {
+            s.ratio = ratioFor(@intCast(a), @intCast(extent));
+            if (s.ratio != old and fits(l.root, area)) return true;
+        }
+        s.ratio = old;
+        return false;
+    }
 };
+
+/// A split in a layout, as the turns from the root: bit `i` set means that
+/// step `i` goes to the split's `b` side.
+pub const SplitPath = struct {
+    bits: u32 = 0,
+    len: u5 = 0,
+};
+
+/// A split's divider: the boundary where its `b` box starts, `at` columns
+/// or rows into the frame.
+pub const Divider = struct { split: SplitPath, axis: Axis, at: u16 };
+
+/// The ratio that gives a split's `a` side exactly `a` of `extent` cells,
+/// when one exists.
+fn ratioFor(a: u32, extent: u32) u16 {
+    const r = (a * ratio_full -| ratio_full / 2 + extent - 1) / extent;
+    return @intCast(std.math.clamp(r, 1, ratio_full - 1));
+}
 
 /// The pane whose box lies next to `from`'s in `dir`: the nearest box on
 /// that side that overlaps `from`'s box on the other axis. Ties go to the
@@ -488,6 +573,57 @@ test "random splits, resizes, and closes always tile the area exactly" {
                 };
             }
             for (covered) |row| for (row) |c| try testing.expectEqual(1, c);
+        }
+    }
+}
+
+test "a divider is found on both border cells next to it, and outer edges have none" {
+    var f: Fixture = try .three();
+    defer f.deinit();
+    const root: Divider = .{ .split = .{}, .axis = .right, .at = 40 };
+    try testing.expectEqual(root, f.l.dividerAt(screen, 39, 5).?);
+    try testing.expectEqual(root, f.l.dividerAt(screen, 40, 0).?);
+    const inner: Divider = .{ .split = .{ .bits = 1, .len = 1 }, .axis = .down, .at = 12 };
+    try testing.expectEqual(inner, f.l.dividerAt(screen, 60, 11).?);
+    try testing.expectEqual(inner, f.l.dividerAt(screen, 79, 12).?);
+    try testing.expectEqual(null, f.l.dividerAt(screen, 0, 5));
+    try testing.expectEqual(null, f.l.dividerAt(screen, 60, 0));
+    try testing.expectEqual(null, f.l.dividerAt(screen, 79, 5));
+    try testing.expectEqual(null, f.l.dividerAt(screen, 41, 5));
+    try testing.expectEqual(null, f.l.dividerAt(screen, 80, 5));
+    var lone: Fixture = try .init();
+    defer lone.deinit();
+    try testing.expectEqual(null, lone.l.dividerAt(screen, 40, 5));
+}
+
+test "moving a divider follows the pointer and stops at the minimum pane size" {
+    var f: Fixture = try .three();
+    defer f.deinit();
+    try testing.expect(f.l.moveDivider(screen, .{}, 30));
+    try testing.expectEqual(Rect{ .cols = 30, .rows = 24 }, try f.box(1));
+    try testing.expectEqual(Rect{ .x = 30, .cols = 50, .rows = 12 }, try f.box(2));
+    try testing.expect(!f.l.moveDivider(screen, .{}, 30));
+    try testing.expect(f.l.moveDivider(screen, .{}, -5));
+    try testing.expectEqual(Rect{ .cols = min_box_cols, .rows = 24 }, try f.box(1));
+    try testing.expect(f.l.moveDivider(screen, .{}, 500));
+    try testing.expectEqual(Rect{ .x = 80 - min_box_cols, .cols = min_box_cols, .rows = 12 }, try f.box(2));
+
+    const inner: SplitPath = .{ .bits = 1, .len = 1 };
+    try testing.expect(f.l.moveDivider(screen, inner, 20));
+    try testing.expectEqual(Rect{ .x = 76, .y = 20, .cols = 4, .rows = 4 }, try f.box(3));
+    try testing.expect(f.l.moveDivider(screen, inner, 23));
+    try testing.expectEqual(Rect{ .x = 76, .y = 24 - min_box_rows, .cols = 4, .rows = min_box_rows }, try f.box(3));
+    try testing.expect(!f.l.moveDivider(screen, .{ .bits = 0, .len = 1 }, 10));
+    try testing.expect(!f.l.moveDivider(screen, .{ .bits = 3, .len = 2 }, 10));
+}
+
+test "a ratio exists for every divider position up to 1000 cells" {
+    var extent: u32 = 2;
+    while (extent <= 1000) : (extent += 1) {
+        var a: u32 = 1;
+        while (a < extent) : (a += 1) {
+            const parts = divide(.{ .cols = @intCast(extent), .rows = 1 }, .right, ratioFor(a, extent));
+            try testing.expectEqual(a, parts[0].cols);
         }
     }
 }

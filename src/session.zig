@@ -168,6 +168,14 @@ pub const Session = struct {
         return true;
     }
 
+    /// Focuses `pane` if the active tab shows it. Returns whether focus moved.
+    pub fn focusPane(s: *Session, pane: PaneId) bool {
+        const t = s.activeTab();
+        if (t.focused == pane or t.zoomed or !t.layout.contains(pane)) return false;
+        t.focused = pane;
+        return true;
+    }
+
     /// Resizes the focused pane by one step. A zoomed tab does not resize.
     pub fn resize(s: *Session, area: Rect, dir: layout.Dir) bool {
         const t = s.activeTab();
@@ -477,6 +485,22 @@ test "a split takes focus and leaves zoom; closing the focused pane hands focus 
     try testing.expectEqual(c, s.focused());
     try testing.expect(s.resize(screen, .right));
     try testing.expect(s.activeTab().layout.contains(a));
+}
+
+test "a pane is focused directly only when the active tab shows it" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    const a = try s.newWorkspace("/w");
+    const b = try s.split(screen, .right);
+    try testing.expect(s.focusPane(a));
+    try testing.expectEqual(a, s.focused());
+    try testing.expect(!s.focusPane(a));
+    const other = try s.newTab();
+    try testing.expect(!s.focusPane(b));
+    try testing.expectEqual(other, s.focused());
+    try testing.expect(s.selectTab(0));
+    try testing.expect(s.toggleZoom());
+    try testing.expect(!s.focusPane(b));
 }
 
 test "only the visible tab is placed, and a zoomed pane fills the area" {

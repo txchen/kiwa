@@ -83,10 +83,11 @@ const accent: Style.Color = .{ .palette = 6 };
 const plain: Style = .{};
 const dim: Style = .{ .flags = .{ .faint = true } };
 const divider: Style = .{ .fg_color = .{ .palette = 8 } };
-const highlight: Style = .{ .fg_color = .{ .palette = 0 }, .bg_color = accent };
+pub const highlight: Style = .{ .fg_color = .{ .palette = 0 }, .bg_color = accent };
 const mode_label: Style = .{ .fg_color = .{ .palette = 0 }, .bg_color = accent, .flags = .{ .bold = true } };
 const marker_fg: Style.Color = .{ .palette = 3 };
-const help_border: Style = .{ .fg_color = accent };
+/// The border of the boxes drawn over panes: key help and menus.
+pub const box_border: Style = .{ .fg_color = accent };
 
 const ellipsis = 0x2026;
 const nav_mark = 0x25b6;
@@ -110,6 +111,45 @@ pub fn draw(f: *Frame, v: View) void {
     }
 }
 
+/// What a click on the chrome lands on. Indexes are positions in the
+/// view's lists, from 0.
+pub const Hit = union(enum) {
+    none,
+    workspace: usize,
+    new_workspace,
+    toggle_sidebar,
+    tab: usize,
+    new_tab,
+};
+
+/// What the chrome drawn by `draw` shows at (x, y), or null when the point
+/// is in the tab area.
+pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
+    const g: Geometry = .of(cols, rows, v.collapsed);
+    if (x < g.sidebar) {
+        const expanded = g.sidebar == sidebar_cols;
+        const list: List = .of(rows, expanded);
+        if (y == list.end and list.end < rows) {
+            // The `«` and the cells around it toggle; the rest of the footer is `+ new`.
+            return if (!expanded or x >= sidebar_cols - 3) .toggle_sidebar else .new_workspace;
+        }
+        var entries: Entries = .init(v, list, expanded);
+        while (entries.next()) |e| {
+            if (y >= e.y and y < e.y + e.rows) return .{ .workspace = e.index };
+        }
+        return .none;
+    }
+    if (!g.tab_row or y != 0) return null;
+    if (v.mode != .normal and v.mode != .help) return .none;
+    const rel = x - g.sidebar;
+    var slots: TabSlots = .init(v.tabs, cols - g.sidebar);
+    while (slots.next()) |slot| {
+        if (rel >= slot.x and rel < slot.x + slot.cols) return .{ .tab = slot.index };
+    }
+    if (slots.plusX()) |px| if (rel >= px and rel < px + plus.len) return .new_tab;
+    return .none;
+}
+
 /// The rows of a sidebar list: between the header and the footer when
 /// there is room for them.
 const List = struct {
@@ -122,6 +162,38 @@ const List = struct {
 
     fn height(l: List) u16 {
         return l.end - l.top;
+    }
+};
+
+/// The workspaces a sidebar list shows, top to bottom.
+const Entries = struct {
+    workspaces: []const Workspace,
+    expanded: bool,
+    end: u16,
+    index: usize,
+    y: u16,
+
+    const Entry = struct { index: usize, y: u16, rows: u16 };
+
+    fn init(v: View, list: List, expanded: bool) Entries {
+        return .{
+            .workspaces = v.workspaces,
+            .expanded = expanded,
+            .end = list.end,
+            .index = firstShown(v, list.height(), expanded),
+            .y = list.top,
+        };
+    }
+
+    fn next(e: *Entries) ?Entry {
+        if (e.index >= e.workspaces.len) return null;
+        const rows = entryRows(e.workspaces[e.index], e.expanded);
+        if (e.y + rows > e.end) return null;
+        defer {
+            e.index += 1;
+            e.y += rows;
+        }
+        return .{ .index = e.index, .y = e.y, .rows = rows };
     }
 };
 
@@ -175,13 +247,13 @@ fn drawSidebar(f: *Frame, v: View) void {
         footer[width - 1] = .{ .cp = 0x00ab };
     }
 
-    var y = list.top;
-    const first = firstShown(v, list.height(), true);
-    for (v.workspaces[first..], first..) |ws, i| {
-        if (y + entryRows(ws, true) > list.end) break;
+    var entries: Entries = .init(v, list, true);
+    while (entries.next()) |e| {
+        const i = e.index;
+        const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
         const style = lineStyle(ws, cursor);
-        const line = f.row(y)[0..width];
+        const line = f.row(e.y)[0..width];
         for (line) |*c| c.style = style;
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         var num: [24]u8 = undefined;
@@ -193,14 +265,12 @@ fn drawSidebar(f: *Frame, v: View) void {
             ms.fg_color = marker_fg;
             line[width - 2] = .{ .cp = cp, .style = ms };
         }
-        y += 1;
-        if (ws.branch) |branch| {
-            const bl = f.row(y)[0..width];
+        if (e.rows == 2) {
+            const bl = f.row(e.y + 1)[0..width];
             var bs = style;
             bs.flags.faint = !ws.active;
             for (bl) |*c| c.style = bs;
-            fit(bl, 3, branch, bs);
-            y += 1;
+            fit(bl, 3, ws.branch.?, bs);
         }
     }
 }
@@ -214,13 +284,13 @@ fn drawCollapsed(f: *Frame, v: View) void {
     }
     const list: List = .of(f.rows, false);
     if (list.end < f.rows) f.row(list.end)[width - 1] = .{ .cp = 0x00bb };
-    const first = firstShown(v, list.height(), false);
-    for (v.workspaces[first..], first..) |ws, i| {
-        const y = list.top + (i - first);
-        if (y >= list.end) break;
+    var entries: Entries = .init(v, list, false);
+    while (entries.next()) |e| {
+        const i = e.index;
+        const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
         const style = lineStyle(ws, cursor);
-        const line = f.row(y)[0..width];
+        const line = f.row(e.y)[0..width];
         for (line) |*c| c.style = style;
         var num: [24]u8 = undefined;
         const text = std.fmt.bufPrint(&num, "{d}", .{i + 1}) catch unreachable;
@@ -241,41 +311,74 @@ fn tabWidth(index: usize, name_cols: usize) usize {
 
 const plus = " + ";
 
+/// Where each tab and the `+` sit in a tab row `cols` wide. Names are
+/// shortened, longest first, until every tab fits, down to one column per
+/// name; then the row scrolls to keep the active tab visible.
+const TabSlots = struct {
+    tabs: []const Tab,
+    cols: usize,
+    cap: usize,
+    index: usize,
+    x: usize = 0,
+    /// Set once every tab from the first shown one fit.
+    all_fit: bool = false,
+
+    const Slot = struct { index: usize, x: usize, cols: usize };
+
+    fn init(tabs: []const Tab, cols: usize) TabSlots {
+        var active: usize = 0;
+        var widest: usize = 0;
+        for (tabs, 0..) |t, i| {
+            if (t.active) active = i;
+            widest = @max(widest, textCols(t.name));
+        }
+        var cap = widest;
+        while (cap > 1) : (cap -= 1) {
+            var total: usize = plus.len;
+            for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap));
+            if (total <= cols) break;
+        }
+        var first: usize = 0;
+        while (first < active) : (first += 1) {
+            var used: usize = plus.len;
+            for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap));
+            if (used <= cols) break;
+        }
+        return .{ .tabs = tabs, .cols = cols, .cap = cap, .index = first };
+    }
+
+    fn next(s: *TabSlots) ?Slot {
+        if (s.index >= s.tabs.len) {
+            s.all_fit = true;
+            return null;
+        }
+        const w = tabWidth(s.index + 1, @min(textCols(s.tabs[s.index].name), s.cap));
+        if (s.x + w > s.cols) return null;
+        defer {
+            s.index += 1;
+            s.x += w;
+        }
+        return .{ .index = s.index, .x = s.x, .cols = w };
+    }
+
+    /// Where the `+` goes once `next` returned null; null when it does not fit.
+    fn plusX(s: *const TabSlots) ?usize {
+        return if (s.all_fit and s.tabs.len > 0 and s.x + plus.len <= s.cols) s.x else null;
+    }
+};
+
 fn drawTabs(row: []Cell, tabs: []const Tab) void {
-    if (tabs.len == 0) return;
-    var active: usize = 0;
-    var widest: usize = 0;
-    for (tabs, 0..) |t, i| {
-        if (t.active) active = i;
-        widest = @max(widest, textCols(t.name));
-    }
-    // Shorten the longest names first until every tab fits, down to one
-    // column per name.
-    var cap = widest;
-    while (cap > 1) : (cap -= 1) {
-        var total: usize = plus.len;
-        for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap));
-        if (total <= row.len) break;
-    }
-    var first: usize = 0;
-    while (first < active) : (first += 1) {
-        var used: usize = plus.len;
-        for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap));
-        if (used <= row.len) break;
-    }
-    var x: usize = 0;
-    for (tabs[first..], first + 1..) |t, i| {
-        const w = tabWidth(i, @min(textCols(t.name), cap));
-        if (x + w > row.len) return;
+    var slots: TabSlots = .init(tabs, row.len);
+    while (slots.next()) |slot| {
+        const t = tabs[slot.index];
         const style = if (t.active) highlight else plain;
-        const cell = row[x..][0..w];
+        const cell = row[slot.x..][0..slot.cols];
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
-        const after = put(cell, 1, std.fmt.bufPrint(&num, "{d} ", .{i}) catch unreachable, style);
-        fit(cell[0 .. w - 1], after, t.name, style);
-        x += w;
+        const after = put(cell, 1, std.fmt.bufPrint(&num, "{d} ", .{slot.index + 1}) catch unreachable, style);
+        fit(cell[0 .. slot.cols - 1], after, t.name, style);
     }
-    if (x + plus.len <= row.len) _ = put(row, x, plus, plain);
+    if (slots.plusX()) |x| _ = put(row, x, plus, plain);
 }
 
 fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8) void {
@@ -302,13 +405,13 @@ pub fn drawHelp(f: *Frame, area: Rect) void {
     const rows: u16 = @intCast(@min(want_rows, area.rows));
     const box: Rect = .{ .x = area.x + (area.cols - cols) / 2, .y = area.y + (area.rows - rows) / 2, .cols = cols, .rows = rows };
     for (box.y..box.y + box.rows) |y| @memset(f.row(y)[box.x..][0..box.cols], .blank);
-    f.drawBox(box, help_border);
+    f.drawBox(box, box_border);
     if (box.cols < 4 or box.rows < 3) return;
     const top = f.row(box.y)[box.x..][0..box.cols];
-    _ = put(top[0 .. top.len - 1], 2, " keys ", help_border);
+    _ = put(top[0 .. top.len - 1], 2, " keys ", box_border);
     const bottom = f.row(box.y + box.rows - 1)[box.x..][0..box.cols];
     const close = " esc close ";
-    if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, help_border);
+    if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, box_border);
     for (prefix.help[0..@min(prefix.help.len, box.rows - 2)], box.y + 1..) |h, y| {
         const line = f.row(y)[box.x + 1 ..][0 .. box.cols - 2];
         _ = put(line, 1, h.keys, .{ .flags = .{ .bold = true } });
@@ -318,7 +421,7 @@ pub fn drawHelp(f: *Frame, area: Rect) void {
 
 /// Writes `text` into `row` from column `x`, clipped at the row's end.
 /// Returns the column after the last cell written.
-fn put(row: []Cell, x: usize, text: []const u8, style: Style) usize {
+pub fn put(row: []Cell, x: usize, text: []const u8, style: Style) usize {
     var col = x;
     var it: Codepoints = .{ .bytes = text };
     while (it.next()) |cp| {
@@ -351,7 +454,7 @@ fn fit(row: []Cell, x: usize, text: []const u8, style: Style) void {
     row[row.len - 1] = .{ .cp = ellipsis, .style = style };
 }
 
-fn textCols(text: []const u8) usize {
+pub fn textCols(text: []const u8) usize {
     var n: usize = 0;
     var it: Codepoints = .{ .bytes = text };
     while (it.next()) |cp| n += vt.unicode.codepointWidth(cp);
@@ -645,5 +748,101 @@ test "a tiny frame draws what fits without crashing" {
         var s = try render(size[0], size[1], .{ .workspaces = &three, .tabs = &tabs2, .mode = .prefix });
         defer s.deinit();
         drawHelp(&s.f, Geometry.of(size[0], size[1], false).area);
+    }
+}
+
+/// Where `text` starts on screen, top row first.
+fn find(s: *const Screen, text: []const u8) ?[2]u16 {
+    const got = s.text() catch return null;
+    defer testing.allocator.free(got);
+    var lines = std.mem.splitScalar(u8, got, '\n');
+    var y: u16 = 0;
+    while (lines.next()) |line| : (y += 1) {
+        const at = std.mem.indexOf(u8, line, text) orelse continue;
+        const cols = std.unicode.utf8CountCodepoints(line[0..at]) catch return null;
+        return .{ @intCast(cols), y };
+    }
+    return null;
+}
+
+fn expectHit(v: View, s: *const Screen, text: []const u8, want: ?Hit) !void {
+    const at = find(s, text) orelse return error.TextNotOnScreen;
+    try testing.expectEqualDeep(want, hit(v, s.f.cols, s.f.rows, at[0], at[1]));
+}
+
+test "clicks land on the workspace, tab, or button drawn there" {
+    const v: View = .{ .workspaces = &three, .tabs = &tabs2 };
+    var s = try render(120, 6, v);
+    defer s.deinit();
+    try expectHit(v, &s, "1 kiwa", .{ .workspace = 0 });
+    try expectHit(v, &s, "a-very", .{ .workspace = 1 });
+    try expectHit(v, &s, "3 notes", .{ .workspace = 2 });
+    try expectHit(v, &s, "+ new", .new_workspace);
+    try expectHit(v, &s, "\u{ab}", .toggle_sidebar);
+    try expectHit(v, &s, "workspaces", .none);
+    try expectHit(v, &s, "1 sh", .{ .tab = 0 });
+    try expectHit(v, &s, "2 vim", .{ .tab = 1 });
+    try testing.expectEqualDeep(@as(?Hit, .new_tab), hit(v, 120, 6, 26 + 13, 0));
+    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 26 + 16, 0));
+    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 1, 4));
+    try testing.expectEqual(null, hit(v, 120, 6, 26, 1));
+    try testing.expectEqual(null, hit(v, 120, 6, 119, 5));
+}
+
+test "a collapsed sidebar hits by row, and its footer toggles" {
+    for ([_]View{ .{ .workspaces = &three, .tabs = &tabs2 }, .{ .workspaces = &three, .tabs = &tabs2, .collapsed = true } }) |v| {
+        var s = try render(if (v.collapsed) 120 else 40, 6, v);
+        defer s.deinit();
+        try expectHit(v, &s, " 1", .{ .workspace = 0 });
+        try expectHit(v, &s, " 3", .{ .workspace = 2 });
+        try expectHit(v, &s, "\u{bb}", .toggle_sidebar);
+        try testing.expectEqualDeep(@as(?Hit, .toggle_sidebar), hit(v, s.f.cols, 6, 0, 5));
+        try testing.expectEqualDeep(@as(?Hit, .none), hit(v, s.f.cols, 6, 1, 4));
+        try expectHit(v, &s, "2 vim", .{ .tab = 1 });
+        try testing.expectEqual(null, hit(v, s.f.cols, 6, 4, 1));
+    }
+}
+
+test "branch lines belong to their workspace, and a scrolled list hits what it shows" {
+    const ws = [_]Workspace{ .{ .name = "kiwa", .branch = "main", .active = true }, .{ .name = "other", .branch = "dev" } };
+    const v: View = .{ .workspaces = &ws, .tabs = &tabs2 };
+    var s = try render(80, 6, v);
+    defer s.deinit();
+    try expectHit(v, &s, "main", .{ .workspace = 0 });
+    try expectHit(v, &s, "dev", .{ .workspace = 1 });
+
+    var many: [8]Workspace = undefined;
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
+    for (&many, names) |*w, n| w.* = .{ .name = n };
+    many[6].active = true;
+    const scrolled: View = .{ .workspaces = &many, .tabs = &tabs2 };
+    var t = try render(80, 5, scrolled);
+    defer t.deinit();
+    try expectHit(scrolled, &t, "5 e", .{ .workspace = 4 });
+    try expectHit(scrolled, &t, "7 g", .{ .workspace = 6 });
+}
+
+test "scrolled tabs hit the tab drawn there, and a mode bar has no tabs" {
+    var many: [12]Tab = undefined;
+    for (&many) |*t| t.* = .{ .name = "sh" };
+    many[10].active = true;
+    const v: View = .{ .workspaces = &one, .tabs = &many, .collapsed = true };
+    var s = try render(4 + 20, 2, v);
+    defer s.deinit();
+    try expectHit(v, &s, "9 s", .{ .tab = 8 });
+    try expectHit(v, &s, "11 s", .{ .tab = 10 });
+
+    const bar: View = .{ .workspaces = &one, .tabs = &tabs2, .mode = .prefix };
+    var p = try render(100, 3, bar);
+    defer p.deinit();
+    try expectHit(bar, &p, "PREFIX", .none);
+}
+
+test "hits on tiny frames stay in bounds" {
+    for ([_][2]u16{ .{ 2, 1 }, .{ 5, 3 }, .{ 9, 2 }, .{ 70, 1 }, .{ 70, 2 } }) |size| {
+        const v: View = .{ .workspaces = &three, .tabs = &tabs2 };
+        for (0..size[1]) |y| for (0..size[0]) |x| {
+            _ = hit(v, size[0], size[1], @intCast(x), @intCast(y));
+        };
     }
 }
