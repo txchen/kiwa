@@ -1828,7 +1828,7 @@ fn rightClickMenus(ctx: *Ctx) !void {
 
     try o.rightClick(40, 10);
     try o.waitText("Split right");
-    try o.click(42, 11);
+    try o.click(42, 12);
     try waitBoxes(o, &.{ left_half, right_half });
     try o.waitGone("Split right");
 
@@ -1838,7 +1838,7 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try o.waitGone("Zoom");
     try o.rightClick(30, 20);
     try o.waitText("Zoom");
-    try o.send("jj\r");
+    try o.send("jjj\r");
     try waitNoBorders(o);
     try listWith(ctx, "1: {s} (active)\n  1: sh, 2 panes, zoomed (active)\n", .{name});
     try o.rightClick(30, 20);
@@ -1850,7 +1850,7 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try o.waitText(" 2 sh ");
     try o.rightClick(28, 0);
     try o.waitText("New tab");
-    try o.click(30, 2);
+    try o.click(30, 3);
     try o.waitGone("New tab");
     try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
 
@@ -1859,6 +1859,82 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try o.rightClick(5, 1);
     try o.waitGone("Close");
     try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+}
+
+/// Where the rename dialog's field starts in an 80x24 outer terminal.
+const rename_field: [2]usize = .{ 33, 11 };
+
+fn renameTabWithPrefix(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    const name = caseName(ctx);
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try expect(try o.contains("enter save  esc cancel"), "the dialog shows its keys");
+    try waitTextIn(o, "sh", .{ .x = rename_field[0], .y = rename_field[1], .cols = 2, .rows = 1 });
+    try waitCursor(o, rename_field[0] + 2, rename_field[1]);
+    try o.press(char('u', ctrl));
+    try typeText(o, "editor");
+    try waitCursor(o, rename_field[0] + 6, rename_field[1]);
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" rename tab ");
+    try o.waitText(" 1 editor ");
+    try listWith(ctx, "1: {s} (active)\n  1: editor, 1 pane (active)\n", .{name});
+    try waitCursor(o, area.x + 2, area.y);
+
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try typeText(o, "zzz");
+    try o.press(named(.escape, .{}));
+    try o.waitGone(" rename tab ");
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    // A click outside the dialog cancels it and does nothing else.
+    try o.click(2, 23);
+    try o.waitGone(" rename tab ");
+    try listWith(ctx, "1: {s} (active)\n  1: editor, 1 pane (active)\n", .{name});
+
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    // A click inside is ignored.
+    try o.click(rename_field[0], rename_field[1]);
+    try o.press(char('u', ctrl));
+    try o.press(named(.enter, .{}));
+    try o.waitText(" 1 sh ");
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+}
+
+fn renameWorkspaceFromItsMenu(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    try o.rightClick(5, 1);
+    try o.waitText("Rename");
+    try o.click(7, 2);
+    try o.waitText(" rename workspace ");
+    try o.press(char('u', ctrl));
+    try o.send("\u{4e2d}\u{6587}");
+    try o.paste("-ws\n");
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" rename workspace ");
+    try o.waitText(" 1 \u{4e2d}\u{6587}-ws");
+    var title: std.ArrayList(u8) = .empty;
+    defer title.deinit(ctx.gpa);
+    try title.print(ctx.gpa, "{s}: \u{4e2d}\u{6587}-ws", .{hostname()});
+    try o.waitFor("the renamed workspace's title", title.items, titleIs);
+    try listWith(ctx, "1: \u{4e2d}\u{6587}-ws (active)\n  1: sh, 1 pane (active)\n", .{});
+
+    try prefixed(o, "W");
+    try o.waitText(" rename workspace ");
+    // The wide name ends four columns after the field's start, with the cursor after it.
+    try waitCursor(o, rename_field[0] + 7, rename_field[1]);
+    try o.press(named(.backspace, .{}));
+    try o.press(named(.backspace, .{}));
+    try o.press(named(.backspace, .{}));
+    try o.press(named(.backspace, .{}));
+    try waitCursor(o, rename_field[0] + 2, rename_field[1]);
+    try o.press(char('u', ctrl));
+    try o.press(named(.enter, .{}));
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
 }
 
 fn paneClipboardWritesReachTheOuterTerminal(ctx: *Ctx) !void {
@@ -1930,6 +2006,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a drag selects text and copies it with OSC 52", .run = dragSelectionCopies },
     .{ .name = "right-click menus split, zoom, and close, and esc closes them", .run = rightClickMenus },
     .{ .name = "a pane's OSC 52 clipboard write reaches the outer terminal", .run = paneClipboardWritesReachTheOuterTerminal },
+    .{ .name = "prefix shift+t renames the tab, esc and an outside click cancel, and an empty name restores it", .run = renameTabWithPrefix },
+    .{ .name = "a workspace is renamed from its menu, to a Chinese name and back", .run = renameWorkspaceFromItsMenu },
 };
 
 pub fn main(init: std.process.Init) !u8 {

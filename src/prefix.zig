@@ -3,11 +3,13 @@
 //! the same key behave alike. Three bindings enter a mode that keeps
 //! taking keys: `prefix r` resizes until `esc` or `enter`, `prefix w`
 //! navigates the sidebar until `enter`, `esc`, or `q`, and `prefix ?`
-//! shows key help until `esc`, `q`, or `?`.
+//! shows key help until `esc`, `q`, or `?`. While a dialog is open, it
+//! takes every key and paste.
 
 const std = @import("std");
 const input = @import("input.zig");
 const layout = @import("layout.zig");
+const Dialog = @import("dialog.zig").Dialog;
 
 pub const Action = union(enum) {
     detach,
@@ -22,8 +24,10 @@ pub const Action = union(enum) {
     prev_tab,
     /// Zero-based.
     tab: u8,
+    rename_tab,
     close_tab,
     new_workspace,
+    rename_workspace,
     close_workspace,
     /// Zero-based.
     workspace: u8,
@@ -142,8 +146,10 @@ const bindings: []const Binding = &[_]Binding{
     .doc(.char('n'), .next_tab, "next tab"),
     .doc(.char('p'), .prev_tab, "previous tab"),
 } ++ digitBindings(false) ++ &[_]Binding{
+    .doc(.shifted('t'), .rename_tab, "rename the tab"),
     .doc(.shifted('x'), .close_tab, "close the tab"),
     .doc(.shifted('n'), .new_workspace, "new workspace"),
+    .doc(.shifted('w'), .rename_workspace, "rename the workspace"),
     .doc(.shifted('d'), .close_workspace, "close the workspace"),
 } ++ digitBindings(true) ++ &[_]Binding{
     .doc(.char('w'), .navigate, "navigate workspaces"),
@@ -172,6 +178,8 @@ pub const Outcome = union(enum) {
     pane: input.Event,
     action: Action,
     navigate: Nav,
+    /// A key or paste for the open dialog.
+    dialog: input.Event,
     /// The prefix itself, an unbound key after it, or a mode change.
     none,
 };
@@ -179,11 +187,16 @@ pub const Outcome = union(enum) {
 pub const Prefix = struct {
     mode: Mode = .normal,
 
-    pub const Mode = enum { normal, armed, resize, navigate, help };
+    pub const Mode = union(enum) { normal, armed, resize, navigate, help, dialog: Dialog };
 
     /// Only keys and unknown sequences answer the prefix; focus, paste,
     /// and mouse events pass by without disarming it.
     pub fn feed(p: *Prefix, ev: input.Event) Outcome {
+        if (p.mode == .dialog) return switch (ev) {
+            .key, .paste => .{ .dialog = ev },
+            .unknown => .none,
+            else => .{ .pane = ev },
+        };
         switch (ev) {
             .key => |k| {
                 if (k.action == .release) return if (p.mode == .normal) .{ .pane = ev } else .none;
@@ -197,6 +210,7 @@ pub const Prefix = struct {
                     .resize => p.inResize(k),
                     .navigate => p.inNavigate(k),
                     .help => p.inMode(k, &help_exits),
+                    .dialog => unreachable,
                 };
             },
             .unknown => {
@@ -276,7 +290,7 @@ fn run(bytes: []const u8) !Collected {
     while (try d.next(testing.allocator)) |ev| switch (p.feed(ev)) {
         .pane => |e| try c.pane.append(testing.allocator, e),
         .action => |a| try c.actions.append(testing.allocator, a),
-        .navigate, .none => {},
+        .navigate, .dialog, .none => {},
     };
     return c;
 }
@@ -338,7 +352,9 @@ test "focus and releases do not disarm the prefix" {
     try expectRun("\x02\x1b[I\x1b[98;5:3uq", &.{.{ .focus = .in }}, &.{.detach});
 }
 
-fn runModes(bytes: []const u8) !struct { Prefix.Mode, []Outcome } {
+const ModeTag = std.meta.Tag(Prefix.Mode);
+
+fn runModes(bytes: []const u8) !struct { ModeTag, []Outcome } {
     var d: input.Decoder = .{};
     defer d.deinit(testing.allocator);
     try d.feed(testing.allocator, bytes);
@@ -353,7 +369,7 @@ fn runModes(bytes: []const u8) !struct { Prefix.Mode, []Outcome } {
     return .{ p.mode, try out.toOwnedSlice(testing.allocator) };
 }
 
-fn expectModes(bytes: []const u8, mode: Prefix.Mode, want: []const Outcome) !void {
+fn expectModes(bytes: []const u8, mode: ModeTag, want: []const Outcome) !void {
     const got_mode, const got = try runModes(bytes);
     defer testing.allocator.free(got);
     try testing.expectEqualDeep(want, got);
@@ -385,6 +401,16 @@ test "key help stays open over other keys and closes on esc, q, or ?" {
     try expectModes("\x02\x1b[47;2u", .help, &.{.{ .action = .help }});
 }
 
+test "shift+t and shift+w rename, and an open dialog takes keys and pastes" {
+    try expectRun("\x02T\x02W\x02\x1b[119;2u", &.{}, &.{ .rename_tab, .rename_workspace, .rename_workspace });
+    var p: Prefix = .{ .mode = .{ .dialog = .{ .rename = .{ .target = .{ .tab = @enumFromInt(1) }, .field = .{} } } } };
+    try testing.expectEqualDeep(Outcome{ .dialog = ctrl_b }, p.feed(ctrl_b));
+    try testing.expectEqualDeep(Outcome{ .dialog = .{ .key = .typed('q') } }, p.feed(.{ .key = .typed('q') }));
+    try testing.expectEqualDeep(Outcome.none, p.feed(.{ .unknown = "\x1b[5n" }));
+    try testing.expectEqualDeep(Outcome{ .pane = .{ .focus = .in } }, p.feed(.{ .focus = .in }));
+    try testing.expect(p.mode == .dialog);
+}
+
 test "the sidebar toggle and resize mode are prefix keys" {
     try expectModes("\x02b\x02r", .resize, &.{ .{ .action = .toggle_sidebar }, .{ .action = .resize_mode } });
 }
@@ -402,6 +428,7 @@ test "key help describes every prefix action" {
     try testing.expectEqualStrings("c", help[0].keys);
     try testing.expectEqualStrings("new tab", help[0].text);
     for (help) |h| try testing.expect(!std.mem.eql(u8, h.keys, "j"));
-    try testing.expectEqualStrings("shift+x", help[10].keys);
+    try testing.expectEqualStrings("shift+t", help[10].keys);
+    try testing.expectEqualStrings("shift+x", help[11].keys);
     try testing.expectEqualStrings("ctrl+b", help[help.len - 1].keys);
 }

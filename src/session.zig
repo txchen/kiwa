@@ -114,8 +114,7 @@ pub const Session = struct {
         errdefer gpa.destroy(ws);
         const root = try gpa.dupe(u8, root_dir);
         errdefer gpa.free(root);
-        const base = std.fs.path.basename(root_dir);
-        const name = try gpa.dupe(u8, if (base.len > 0) base else root_dir);
+        const name = try gpa.dupe(u8, rootName(root_dir));
         errdefer gpa.free(name);
         ws.* = .{ .id = s.nextId(WorkspaceId), .name = .{ .dynamic = name }, .root_dir = root, .active = undefined };
         errdefer ws.tabs.deinit(gpa);
@@ -123,6 +122,48 @@ pub const Session = struct {
         s.workspaces.appendAssumeCapacity(ws);
         s.active = ws.id;
         return pane;
+    }
+
+    pub fn findWorkspace(s: *const Session, id: WorkspaceId) ?*Workspace {
+        for (s.workspaces.items) |ws| if (ws.id == id) return ws;
+        return null;
+    }
+
+    pub fn findTab(s: *const Session, id: TabId) ?*Tab {
+        for (s.workspaces.items) |ws| for (ws.tabs.items) |t| {
+            if (t.id == id) return t;
+        };
+        return null;
+    }
+
+    /// Fixes the tab's name, or returns it to a dynamic name when `text` is
+    /// empty. That name is the shell's until the next check.
+    pub fn renameTab(s: *Session, t: *Tab, text: []const u8) !void {
+        try s.setName(&t.name, if (text.len == 0) .{ .dynamic = s.tab_name } else .{ .fixed = text });
+    }
+
+    /// Fixes the workspace's name, or returns it to its root directory's
+    /// basename when `text` is empty.
+    pub fn renameWorkspace(s: *Session, ws: *Workspace, text: []const u8) !void {
+        try s.setName(&ws.name, if (text.len == 0) .{ .dynamic = rootName(ws.root_dir) } else .{ .fixed = text });
+    }
+
+    /// Updates a dynamic tab name to the latest check's `text`. Returns
+    /// whether the name changed; a fixed name never does.
+    pub fn setDynamicName(s: *Session, t: *Tab, text: []const u8) !bool {
+        if (t.name != .dynamic or std.mem.eql(u8, t.name.dynamic, text)) return false;
+        try s.setName(&t.name, .{ .dynamic = text });
+        return true;
+    }
+
+    /// `new` may point into the old name.
+    fn setName(s: *Session, name: *Name, new: Name) !void {
+        const copy = try s.gpa.dupe(u8, new.text());
+        s.gpa.free(name.text());
+        name.* = switch (new) {
+            .fixed => .{ .fixed = copy },
+            .dynamic => .{ .dynamic = copy },
+        };
     }
 
     /// Adds a tab at the end of the current workspace and selects it.
@@ -331,6 +372,11 @@ pub const Session = struct {
         s.gpa.destroy(ws);
     }
 };
+
+fn rootName(root_dir: []const u8) []const u8 {
+    const base = std.fs.path.basename(root_dir);
+    return if (base.len > 0) base else root_dir;
+}
 
 const testing = std.testing;
 
@@ -544,4 +590,37 @@ test "output marks only other workspaces, a bell outranks output, and viewing cl
     try testing.expect(s.selectWorkspace(0));
     try testing.expectEqual(.none, s.activeWorkspace().activity);
     try testing.expect(!s.noteOutput(a, true));
+}
+
+test "a renamed tab keeps its fixed name; an empty name returns it to a dynamic one" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    _ = try s.newWorkspace("/w");
+    const t = s.activeTab();
+    try testing.expect(try s.setDynamicName(t, "vim"));
+    try testing.expect(!try s.setDynamicName(t, "vim"));
+    try testing.expectEqualDeep(Name{ .dynamic = "vim" }, t.name);
+    try s.renameTab(t, "editor");
+    try testing.expect(!try s.setDynamicName(t, "htop"));
+    try testing.expectEqualDeep(Name{ .fixed = "editor" }, t.name);
+    try s.renameTab(t, t.name.text());
+    try testing.expectEqualDeep(Name{ .fixed = "editor" }, t.name);
+    try s.renameTab(t, "");
+    try testing.expectEqualDeep(Name{ .dynamic = "sh" }, t.name);
+    try testing.expect(try s.setDynamicName(t, "htop"));
+    try testing.expectEqual(t, s.findTab(t.id).?);
+}
+
+test "a renamed workspace keeps its name; an empty name returns it to its directory's basename" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    _ = try s.newWorkspace("/home/u/kiwa");
+    _ = try s.newWorkspace("/");
+    const ws = s.findWorkspace(s.workspaces.items[0].id).?;
+    try s.renameWorkspace(ws, "\u{4e2d}\u{6587}");
+    try testing.expectEqualDeep(Name{ .fixed = "\u{4e2d}\u{6587}" }, ws.name);
+    try s.renameWorkspace(ws, "");
+    try testing.expectEqualDeep(Name{ .dynamic = "kiwa" }, ws.name);
+    try s.renameWorkspace(s.activeWorkspace(), "");
+    try testing.expectEqualStrings("/", s.activeWorkspace().name.text());
 }

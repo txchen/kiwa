@@ -33,13 +33,16 @@ pub const Item = struct {
 
 pub const tables = std.EnumArray(std.meta.Tag(Subject), []const Item).init(.{
     .workspace = &.{
+        .{ .label = "Rename", .action = .rename_workspace },
         .{ .label = "Close", .action = .close_workspace },
     },
     .tab = &.{
         .{ .label = "New tab", .action = .new_tab },
+        .{ .label = "Rename", .action = .rename_tab },
         .{ .label = "Close", .action = .close_tab },
     },
     .pane = &.{
+        .{ .label = "Rename tab", .action = .rename_tab },
         .{ .label = "Split right", .action = .{ .split = .right } },
         .{ .label = "Split down", .action = .{ .split = .down } },
         .{ .label = "Zoom", .action = .zoom, .zoomed_label = "Unzoom" },
@@ -124,19 +127,36 @@ fn pane(n: u32) Subject {
     return .{ .pane = @enumFromInt(n) };
 }
 
-test "every subject has a table, and the pane menu offers splits, zoom, and close" {
+test "every subject has a table: rename and close a workspace or tab; rename, split, zoom, and close from a pane" {
     for (tables.values) |t| try testing.expect(t.len > 0);
+    const labels = struct {
+        fn of(subject: Subject) ![]const u8 {
+            var out: std.ArrayList(u8) = .empty;
+            const m: Menu = .{ .subject = subject, .x = 0, .y = 0 };
+            for (m.items()) |i| try out.print(testing.allocator, "{s},", .{i.text(false)});
+            return out.toOwnedSlice(testing.allocator);
+        }
+    };
+    for ([_]struct { Subject, []const u8 }{
+        .{ .{ .workspace = 0 }, "Rename,Close," },
+        .{ .{ .tab = 0 }, "New tab,Rename,Close," },
+        .{ pane(1), "Rename tab,Split right,Split down,Zoom,Close pane," },
+    }) |case| {
+        const got = try labels.of(case[0]);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(case[1], got);
+    }
     const m: Menu = .{ .subject = pane(1), .x = 0, .y = 0 };
-    try testing.expectEqualDeep(prefix.Action{ .split = .down }, m.items()[1].action);
-    try testing.expectEqualStrings("Unzoom", m.items()[2].text(true));
-    try testing.expectEqualStrings("Zoom", m.items()[2].text(false));
+    try testing.expectEqualDeep(prefix.Action.rename_tab, m.items()[0].action);
+    try testing.expectEqualDeep(prefix.Action{ .split = .down }, m.items()[2].action);
+    try testing.expectEqualStrings("Unzoom", m.items()[3].text(true));
 }
 
 test "the box opens at the pointer and stays inside the frame" {
     const m: Menu = .{ .subject = pane(1), .x = 10, .y = 3 };
-    try testing.expectEqual(Rect{ .x = 10, .y = 3, .cols = 15, .rows = 6 }, m.box(80, 24));
+    try testing.expectEqual(Rect{ .x = 10, .y = 3, .cols = 15, .rows = 7 }, m.box(80, 24));
     const corner: Menu = .{ .subject = pane(1), .x = 79, .y = 23 };
-    try testing.expectEqual(Rect{ .x = 65, .y = 18, .cols = 15, .rows = 6 }, corner.box(80, 24));
+    try testing.expectEqual(Rect{ .x = 65, .y = 17, .cols = 15, .rows = 7 }, corner.box(80, 24));
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .cols = 6, .rows = 4 }, corner.box(6, 4));
 }
 
@@ -144,10 +164,11 @@ test "items hit on their rows inside the border" {
     const m: Menu = .{ .subject = .{ .tab = 0 }, .x = 10, .y = 3 };
     try testing.expectEqual(0, m.itemAt(80, 24, 11, 4).?);
     try testing.expectEqual(1, m.itemAt(80, 24, 19, 5).?);
+    try testing.expectEqual(2, m.itemAt(80, 24, 19, 6).?);
     try testing.expectEqual(null, m.itemAt(80, 24, 20, 5));
     try testing.expectEqual(null, m.itemAt(80, 24, 10, 4));
     try testing.expectEqual(null, m.itemAt(80, 24, 11, 3));
-    try testing.expectEqual(null, m.itemAt(80, 24, 11, 6));
+    try testing.expectEqual(null, m.itemAt(80, 24, 11, 7));
     try testing.expectEqual(null, m.itemAt(80, 24, 30, 4));
 }
 
@@ -157,9 +178,11 @@ test "keys move the cursor within the items, pick, and close" {
     try testing.expectEqual(0, m.cursor);
     _ = m.key(.typed('j'));
     _ = m.key(.named(.arrow_down, .{}));
-    try testing.expectEqual(1, m.cursor);
-    try testing.expectEqual(KeyOutcome{ .pick = 1 }, m.key(.named(.enter, .{})));
+    _ = m.key(.typed('j'));
+    try testing.expectEqual(2, m.cursor);
+    try testing.expectEqual(KeyOutcome{ .pick = 2 }, m.key(.named(.enter, .{})));
     _ = m.key(.named(.arrow_up, .{}));
+    _ = m.key(.typed('k'));
     try testing.expectEqual(KeyOutcome{ .pick = 0 }, m.key(.named(.enter, .{})));
     try testing.expectEqual(KeyOutcome.close, m.key(.named(.escape, .{})));
     try testing.expectEqual(KeyOutcome.close, m.key(.typed('q')));
@@ -170,12 +193,13 @@ test "a drawn menu shows its items with the cursor highlighted" {
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
     try f.resize(testing.allocator, 30, 8);
-    const m: Menu = .{ .subject = pane(1), .x = 2, .y = 1, .cursor = 2 };
+    const m: Menu = .{ .subject = pane(1), .x = 2, .y = 1, .cursor = 3 };
     m.draw(&f, true);
     try testing.expectEqual(@as(u21, 0x250c), f.row(1)[2].cp);
-    try testing.expectEqual(@as(u21, 'S'), f.row(2)[4].cp);
-    try testing.expectEqual(@as(u21, 'U'), f.row(4)[4].cp);
-    try testing.expect(f.row(4)[3].style.eql(chrome.highlight));
-    try testing.expect(!f.row(3)[3].style.eql(chrome.highlight));
-    try testing.expectEqual(@as(u21, 0x2518), f.row(6)[16].cp);
+    try testing.expectEqual(@as(u21, 'R'), f.row(2)[4].cp);
+    try testing.expectEqual(@as(u21, 'S'), f.row(3)[4].cp);
+    try testing.expectEqual(@as(u21, 'U'), f.row(5)[4].cp);
+    try testing.expect(f.row(5)[3].style.eql(chrome.highlight));
+    try testing.expect(!f.row(4)[3].style.eql(chrome.highlight));
+    try testing.expectEqual(@as(u21, 0x2518), f.row(7)[16].cp);
 }

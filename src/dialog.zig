@@ -1,0 +1,219 @@
+//! Modal dialogs, drawn as a box centered over the tab area: renaming a tab
+//! or a workspace. Pure; the server applies what a dialog returns.
+
+const std = @import("std");
+const vt = @import("ghostty-vt");
+const input = @import("input.zig");
+const chrome = @import("chrome.zig");
+const frame_mod = @import("frame.zig");
+const session = @import("session.zig");
+const TextField = @import("text_field.zig").TextField;
+
+const Frame = frame_mod.Frame;
+const Rect = frame_mod.Rect;
+
+pub const Dialog = union(enum) {
+    rename: Rename,
+
+    /// What an input event did to the dialog.
+    pub const Outcome = enum {
+        /// Nothing; the dialog looks the same.
+        none,
+        /// The dialog changed and needs a redraw.
+        changed,
+        cancel,
+        /// Rename to the field's text.
+        save,
+    };
+
+    pub fn feed(d: *Dialog, ev: input.Event) Outcome {
+        return switch (d.*) {
+            .rename => |*r| r.feed(ev),
+        };
+    }
+
+    pub fn box(d: *const Dialog, area: Rect) Rect {
+        return switch (d.*) {
+            .rename => centered(area, rename_cols, 4),
+        };
+    }
+
+    /// Draws the dialog over `area` and returns where the outer cursor goes.
+    pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect) !frame_mod.Cursor {
+        const b = d.box(area);
+        for (b.y..b.y + b.rows) |y| @memset(f.row(y)[b.x..][0..b.cols], .blank);
+        f.drawBox(b, chrome.box_border);
+        const hidden: frame_mod.Cursor = .{ .visible = false };
+        if (b.cols < 6 or b.rows < 4) return hidden;
+        const top = f.row(b.y)[b.x..][0..b.cols];
+        const inner = b.cols - 4;
+        switch (d.*) {
+            .rename => |*r| {
+                _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), chrome.box_border);
+                _ = chrome.put(f.row(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
+                const col = try drawField(f.row(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
+                return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
+            },
+        }
+    }
+};
+
+pub const Rename = struct {
+    target: Target,
+    field: TextField,
+
+    pub const Target = union(enum) { tab: session.TabId, workspace: session.WorkspaceId };
+
+    fn title(r: *const Rename) []const u8 {
+        return switch (r.target) {
+            .tab => " rename tab ",
+            .workspace => " rename workspace ",
+        };
+    }
+
+    fn feed(r: *Rename, ev: input.Event) Dialog.Outcome {
+        switch (ev) {
+            .paste => |p| r.field.insertText(p.data),
+            .key => |k| return r.key(k),
+            else => return .none,
+        }
+        return .changed;
+    }
+
+    fn key(r: *Rename, k: input.Key) Dialog.Outcome {
+        if (k.action == .release) return .none;
+        const mods = k.mods.binding();
+        const plain = !mods.ctrl and !mods.alt and !mods.super;
+        const f = &r.field;
+        switch (k.code) {
+            .named => |n| {
+                if (!plain) return .none;
+                switch (n) {
+                    .enter, .numpad_enter => return .save,
+                    .escape => return .cancel,
+                    .backspace => f.backspace(),
+                    .arrow_left, .numpad_left => f.left(),
+                    .arrow_right, .numpad_right => f.right(),
+                    .home, .numpad_home => f.home(),
+                    .end, .numpad_end => f.end(),
+                    else => return .none,
+                }
+            },
+            .char => |c| if (plain) {
+                f.insert(typedChar(k, c));
+            } else if (mods.ctrl and !mods.alt and !mods.super and !mods.shift) switch (c) {
+                'u' => f.clear(),
+                // What legacy terminals send for backspace.
+                'h' => f.backspace(),
+                else => return .none,
+            } else return .none,
+        }
+        return .changed;
+    }
+};
+
+/// The character a plain or shifted key types. Encodings that leave out
+/// the text of a shifted key get the ASCII uppercase.
+fn typedChar(k: input.Key, c: u21) u21 {
+    if (k.text != 0) return k.text;
+    if (k.mods.shift and c >= 'a' and c <= 'z') return c - 32;
+    return c;
+}
+
+const rename_cols = 44;
+const hint: vt.Style = .{ .flags = .{ .faint = true } };
+
+/// A `cols x rows` box centered over `area`, shrunk to fit it.
+fn centered(area: Rect, cols: u16, rows: u16) Rect {
+    const w = @min(cols, area.cols);
+    const h = @min(rows, area.rows);
+    return .{ .x = area.x + (area.cols - w) / 2, .y = area.y + (area.rows - h) / 2, .cols = w, .rows = h };
+}
+
+/// Draws the field's visible graphemes into `line` and returns the
+/// cursor's column in it.
+fn drawField(line: []frame_mod.Cell, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, field: *const TextField) !usize {
+    const v = field.view(line.len);
+    const cps = field.codepoints();
+    var col: usize = 0;
+    var i = v.first;
+    while (i < cps.len) {
+        const c = field.cluster(i);
+        if (col + c.width > line.len) break;
+        const extra = try g.intern(gpa, cps[c.start + 1 .. c.end]);
+        if (c.width == 2) {
+            line[col] = .{ .cp = cps[c.start], .width = .wide, .extra = extra };
+            line[col + 1] = .tail;
+        } else {
+            line[col] = .{ .cp = cps[c.start], .extra = extra };
+        }
+        col += c.width;
+        i = c.end;
+    }
+    return v.cursor_col;
+}
+
+const testing = std.testing;
+
+fn renameOf(text: []const u8) Dialog {
+    return .{ .rename = .{ .target = .{ .tab = @enumFromInt(1) }, .field = .init(text) } };
+}
+
+fn fieldText(d: *const Dialog) []const u8 {
+    const S = struct {
+        var buf: TextField.Utf8Buf = undefined;
+    };
+    return d.rename.field.utf8(&S.buf);
+}
+
+test "rename keys edit the field, save on enter, and cancel on esc" {
+    var d = renameOf("sh");
+    try testing.expectEqual(.changed, d.feed(.{ .key = .typed('X') }));
+    try testing.expectEqualStrings("shX", fieldText(&d));
+    _ = d.feed(.{ .key = .named(.arrow_left, .{}) });
+    _ = d.feed(.{ .key = .named(.backspace, .{}) });
+    try testing.expectEqualStrings("sX", fieldText(&d));
+    _ = d.feed(.{ .key = .named(.home, .{}) });
+    _ = d.feed(.{ .key = .typed(0x4e2d) });
+    _ = d.feed(.{ .key = .named(.end, .{}) });
+    _ = d.feed(.{ .key = .chord('h', .{ .ctrl = true }) });
+    try testing.expectEqualStrings("\u{4e2d}s", fieldText(&d));
+    // A kitty shift+a that carries no text still types an uppercase letter.
+    _ = d.feed(.{ .key = .{ .code = .{ .char = 'a' }, .mods = .{ .shift = true } } });
+    try testing.expectEqualStrings("\u{4e2d}sA", fieldText(&d));
+    try testing.expectEqual(.none, d.feed(.{ .key = .chord('x', .{ .alt = true }) }));
+    try testing.expectEqual(.none, d.feed(.{ .key = .{ .code = .{ .char = 'q' }, .action = .release } }));
+    try testing.expectEqual(.changed, d.feed(.{ .key = .chord('u', .{ .ctrl = true }) }));
+    try testing.expectEqualStrings("", fieldText(&d));
+    var data = "a\nb".*;
+    _ = d.feed(.{ .paste = .{ .data = &data } });
+    try testing.expectEqualStrings("ab", fieldText(&d));
+    try testing.expectEqual(.save, d.feed(.{ .key = .named(.enter, .{}) }));
+    try testing.expectEqual(.cancel, d.feed(.{ .key = .named(.escape, .{}) }));
+    try testing.expectEqual(.none, d.feed(.{ .focus = .in }));
+}
+
+test "the rename box is centered over the tab area with its title, field, hint, and cursor" {
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    var g: frame_mod.Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    try f.resize(testing.allocator, 80, 24);
+    const area: Rect = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
+    const d = renameOf("\u{4e2d}e\u{301}");
+    const b = d.box(area);
+    try testing.expectEqual(Rect{ .x = 31, .y = 10, .cols = 44, .rows = 4 }, b);
+    const cursor = try d.draw(&f, testing.allocator, &g, area);
+    try testing.expectEqual(frame_mod.Cursor{ .x = 36, .y = 11 }, cursor);
+    try testing.expectEqual(@as(u21, 0x250c), f.row(10)[31].cp);
+    try testing.expectEqual(@as(u21, 'r'), f.row(10)[34].cp);
+    try testing.expectEqual(frame_mod.Width.wide, f.row(11)[33].width);
+    try testing.expectEqual(@as(u21, 'e'), f.row(11)[35].cp);
+    try testing.expectEqualStrings("\u{301}", g.bytes(f.row(11)[35].extra));
+    try testing.expectEqual(@as(u21, 'e'), f.row(12)[33].cp);
+    try testing.expect(f.row(12)[33].style.flags.faint);
+    try testing.expectEqual(@as(u21, 0x2518), f.row(13)[74].cp);
+
+    const tiny: Rect = .{ .x = 0, .y = 0, .cols = 5, .rows = 3 };
+    try testing.expect(!(try d.draw(&f, testing.allocator, &g, tiny)).visible);
+}

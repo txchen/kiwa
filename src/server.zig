@@ -11,6 +11,9 @@ const chrome = @import("chrome.zig");
 const hit = @import("hit.zig");
 const mouse = @import("mouse.zig");
 const Menu = @import("menu.zig").Menu;
+const dialog_mod = @import("dialog.zig");
+const Dialog = dialog_mod.Dialog;
+const TextField = @import("text_field.zig").TextField;
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
 const OutBuffer = @import("out_buffer.zig").OutBuffer;
@@ -101,6 +104,8 @@ const Conn = struct {
     mouse: mouse.State = .idle,
     /// The menu `frame` holds over the panes and chrome.
     drawn_menu: ?Menu = null,
+    /// Whether `frame` holds a dialog over the panes.
+    drawn_dialog: bool = false,
     /// The outer window title last sent.
     title: std.ArrayList(u8) = .empty,
 
@@ -491,9 +496,9 @@ const Server = struct {
                 },
                 else => {},
             }
-            const mode = c.prefix.mode;
+            const mode = std.meta.activeTag(c.prefix.mode);
             const outcome = c.prefix.feed(ev);
-            if (c.prefix.mode != mode) try s.markStale();
+            if (std.meta.activeTag(c.prefix.mode) != mode) try s.markStale();
             switch (outcome) {
                 .pane => |pane_ev| if (s.focusedPane()) |p| {
                     // Typing returns a scrolled-back pane to the live screen.
@@ -507,6 +512,7 @@ const Server = struct {
                     if (s.exit != null) return;
                 },
                 .navigate => |n| try s.navigate(c, n),
+                .dialog => |dialog_ev| try s.dialogInput(c, dialog_ev),
                 .none => {},
             }
         }
@@ -551,6 +557,14 @@ const Server = struct {
             .prev_tab => ss.cycleTab(.prev),
             .tab => |i| ss.selectTab(i),
             .workspace => |i| ss.selectWorkspace(i),
+            .rename_tab => {
+                const t = ss.activeTab();
+                return s.openDialog(c, .{ .rename = .{ .target = .{ .tab = t.id }, .field = .init(t.name.text()) } });
+            },
+            .rename_workspace => {
+                const ws = ss.activeWorkspace();
+                return s.openDialog(c, .{ .rename = .{ .target = .{ .workspace = ws.id }, .field = .init(ws.name.text()) } });
+            },
             .toggle_sidebar => blk: {
                 s.collapsed = !s.collapsed;
                 break :blk true;
@@ -564,6 +578,46 @@ const Server = struct {
         };
         if (!changed) return;
         try s.relayout();
+        try s.markStale();
+    }
+
+    fn openDialog(s: *Server, c: *Conn, d: Dialog) !void {
+        c.prefix.mode = .{ .dialog = d };
+        try s.markStale();
+    }
+
+    fn dialogInput(s: *Server, c: *Conn, ev: input.Event) !void {
+        const d = &c.prefix.mode.dialog;
+        switch (d.feed(ev)) {
+            .none => return,
+            .changed => {},
+            .cancel => c.prefix.mode = .normal,
+            .save => {
+                try s.rename(&d.rename);
+                c.prefix.mode = .normal;
+            },
+        }
+        try s.markStale();
+    }
+
+    /// Applies a rename dialog's text to its tab or workspace, if it still exists.
+    fn rename(s: *Server, r: *const dialog_mod.Rename) !void {
+        var buf: TextField.Utf8Buf = undefined;
+        const text = r.field.utf8(&buf);
+        switch (r.target) {
+            .tab => |id| if (s.session.findTab(id)) |t| try s.session.renameTab(t, text),
+            .workspace => |id| if (s.session.findWorkspace(id)) |ws| try s.session.renameWorkspace(ws, text),
+        }
+    }
+
+    /// A click outside an open dialog cancels it; nothing else reaches
+    /// the panes or the chrome while it is open.
+    fn dialogMouse(s: *Server, c: *Conn, ev: input.Mouse) !void {
+        const button = ev.button == .left or ev.button == .middle or ev.button == .right;
+        if (ev.action != .press or !button) return;
+        const b = c.prefix.mode.dialog.box(s.tabArea(c.size));
+        if (ev.x >= b.x and ev.x - b.x < b.cols and ev.y >= b.y and ev.y - b.y < b.rows) return;
+        c.prefix.mode = .normal;
         try s.markStale();
     }
 
@@ -585,6 +639,7 @@ const Server = struct {
 
     fn onMouse(s: *Server, c: *Conn, ev: input.Mouse) !void {
         if (s.session.isEmpty()) return;
+        if (c.prefix.mode == .dialog) return s.dialogMouse(c, ev);
         const t = s.session.activeTab();
         const target = hit.at(.{
             .cols = c.size.cols,
@@ -831,13 +886,17 @@ const Server = struct {
         }
         const help = c.prefix.mode == .help;
         const menu: ?Menu = if (c.mouse == .menu_open) c.mouse.menu_open else null;
+        const dialog: ?*const Dialog = if (c.prefix.mode == .dialog) &c.prefix.mode.dialog else null;
         // Closing or changing a menu uncovers whatever it was drawn over.
         const uncover = c.drawn_menu != null and !std.meta.eql(c.drawn_menu, menu);
-        // Closing the help box uncovers panes and borders.
-        try s.compose(c, compose_all or uncover or (c.drawn_help and !help));
+        // Closing the help box or a dialog uncovers panes and borders.
+        const uncover_panes = (c.drawn_help and !help) or (c.drawn_dialog and dialog == null);
+        try s.compose(c, compose_all or uncover or uncover_panes);
         try s.drawChrome(c, compose_all or uncover);
         if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size));
         c.drawn_help = help;
+        if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size));
+        c.drawn_dialog = dialog != null;
         if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed);
         c.drawn_menu = menu;
         if (help or menu != null or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
@@ -925,6 +984,7 @@ const Server = struct {
                 .resize => .resize,
                 .navigate => .{ .navigate = @min(c.nav, ss.workspaces.items.len - 1) },
                 .help => .help,
+                .dialog => .normal,
             },
         };
     }

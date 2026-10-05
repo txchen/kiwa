@@ -103,7 +103,9 @@ pub const TextField = struct {
     /// before the end.
     pub fn cluster(f: *const TextField, start: usize) Cluster {
         const g = vt.unicode.graphemeWidth(u21, f.buf[start..f.len]);
-        return .{ .start = start, .end = start + g.len, .width = g.width };
+        // Inserts keep zero-width codepoints from starting a grapheme, so
+        // this only guards the column arithmetic.
+        return .{ .start = start, .end = start + g.len, .width = @max(g.width, 1) };
     }
 
     pub const View = struct {
