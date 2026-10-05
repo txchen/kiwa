@@ -419,6 +419,19 @@ pub fn drawHelp(f: *Frame, area: Rect) void {
     }
 }
 
+/// Draws `[back/history]` over the top-right of a pane's content while
+/// its viewport is scrolled `back` lines into `history`.
+pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize) void {
+    var buf: [48]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "[{d}/{d}]", .{ back, history }) catch return;
+    if (inner.rows == 0 or text.len > inner.cols) return;
+    const row = f.row(inner.y)[inner.x..][0..inner.cols];
+    const x = inner.cols - text.len;
+    // Half of a wide character would be left without its tail.
+    if (row[x].width == .tail) row[x - 1] = .blank;
+    _ = put(row, x, text, highlight);
+}
+
 /// Writes `text` into `row` from column `x`, clipped at the row's end.
 /// Returns the column after the last cell written.
 pub fn put(row: []Cell, x: usize, text: []const u8, style: Style) usize {
@@ -845,4 +858,23 @@ test "hits on tiny frames stay in bounds" {
             _ = hit(v, size[0], size[1], @intCast(x), @intCast(y));
         };
     }
+}
+
+test "the scroll marker sits at the top right of the pane content" {
+    var s: Screen = try .init(30, 4);
+    defer s.deinit();
+    s.f.row(1)[20] = .{ .cp = 0x4e2d, .width = .wide };
+    s.f.row(1)[21] = .tail;
+    drawScrollMarker(&s.f, .{ .x = 10, .y = 1, .cols = 18, .rows = 3 }, 3, 177);
+    try s.expect(
+        \\
+        \\                     [3/177]
+        \\
+        \\
+        \\
+    );
+    try testing.expect(s.at(20, 1).isDefaultBlank());
+    try testing.expect(isHighlight(s.at(21, 1)) and isHighlight(s.at(27, 1)) and !isHighlight(s.at(28, 1)));
+    drawScrollMarker(&s.f, .{ .x = 0, .y = 0, .cols = 4, .rows = 1 }, 3, 177);
+    try testing.expect(s.at(0, 0).isDefaultBlank());
 }

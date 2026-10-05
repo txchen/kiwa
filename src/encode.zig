@@ -1,6 +1,7 @@
 //! Encodes decoded input for a pane with ghostty's encoders, so the pane
 //! terminal's modes decide the bytes: DECCKM, keypad mode,
-//! modifyOtherKeys, kitty flags, bracketed paste, and focus reporting.
+//! modifyOtherKeys, kitty flags, bracketed paste, focus reporting, and
+//! mouse tracking.
 
 const std = @import("std");
 const vt = @import("ghostty-vt");
@@ -25,6 +26,45 @@ pub fn event(w: *std.Io.Writer, t: *const vt.Terminal, ev: input.Event) std.Io.W
         .unknown => |bytes| try w.writeAll(bytes),
         .mouse, .reply => {},
     }
+}
+
+/// Encodes a mouse report at pane-local cell (`x`, `y`), which lies
+/// outside the pane while a drag leaves it. Cells are 1x1 pixels, so
+/// ghostty's pixel positions are cell positions.
+pub fn mouse(w: *std.Io.Writer, t: *const vt.Terminal, ev: input.Mouse, x: i32, y: i32) std.Io.Writer.Error!void {
+    const Size = @FieldType(vt.input.MouseEncodeOptions, "size");
+    const size: Size = .{
+        .screen = .{ .width = t.cols, .height = t.rows },
+        .cell = .{ .width = 1, .height = 1 },
+        .padding = .{},
+    };
+    var opts: vt.input.MouseEncodeOptions = .fromTerminal(t, size);
+    opts.any_button_pressed = ev.action != .release and ev.button != .none;
+    const button: ?vt.input.MouseButton = switch (ev.button) {
+        .left => .left,
+        .middle => .middle,
+        .right => .right,
+        .none => null,
+        .wheel_up => .four,
+        .wheel_down => .five,
+        .wheel_left => .six,
+        .wheel_right => .seven,
+        .b8 => .eight,
+        .b9 => .nine,
+        .b10 => .ten,
+        .b11 => .eleven,
+    };
+    try vt.input.encodeMouse(w, .{
+        .action = switch (ev.action) {
+            .press => .press,
+            .release => .release,
+            .motion => .motion,
+        },
+        .button = button,
+        .mods = .{ .shift = ev.mods.shift, .alt = ev.mods.alt, .ctrl = ev.mods.ctrl },
+        // The cell's center, so that rounding cannot move it to a neighbor.
+        .pos = .{ .x = @as(f32, @floatFromInt(x)) + 0.5, .y = @as(f32, @floatFromInt(y)) + 0.5 },
+    }, opts);
 }
 
 /// ghostty's event for `k`. `utf8` backs the event's text.
@@ -234,4 +274,33 @@ test "every press decodes from either outer encoding and re-encodes as the pane 
             return e;
         };
     };
+}
+
+fn expectMouse(p: *Pane, expected: []const u8, ev: input.Mouse, x: i32, y: i32) !void {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try mouse(&w, &p.t, ev, x, y);
+    try testing.expectEqualStrings(expected, w.buffered());
+}
+
+fn report(button: input.Mouse.Button, action: input.Mouse.Action) input.Mouse {
+    return .{ .button = button, .action = action, .x = 0, .y = 0, .mods = .{} };
+}
+
+test "mouse reports follow the pane's tracking mode and format, in pane-local cells" {
+    var p: Pane = undefined;
+    try p.init("");
+    defer p.deinit();
+    try expectMouse(&p, "", report(.left, .press), 3, 2);
+    p.stream.nextSlice("\x1b[?1000h\x1b[?1006h");
+    try expectMouse(&p, "\x1b[<0;4;3M", report(.left, .press), 3, 2);
+    try expectMouse(&p, "\x1b[<0;4;3m", report(.left, .release), 3, 2);
+    try expectMouse(&p, "", report(.left, .motion), 4, 2);
+    try expectMouse(&p, "\x1b[<64;1;1M", report(.wheel_up, .press), 0, 0);
+    try expectMouse(&p, "\x1b[<18;20;5M", .{ .button = .right, .action = .press, .x = 0, .y = 0, .mods = .{ .ctrl = true } }, 19, 4);
+    p.stream.nextSlice("\x1b[?1002h");
+    try expectMouse(&p, "\x1b[<32;5;3M", report(.left, .motion), 4, 2);
+    try expectMouse(&p, "\x1b[<32;1;3M", report(.left, .motion), -3, 2);
+    p.stream.nextSlice("\x1b[?1006l");
+    try expectMouse(&p, "\x1b[M #\"", report(.left, .press), 2, 1);
 }

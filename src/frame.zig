@@ -174,12 +174,13 @@ pub const Frame = struct {
                 continue;
             }
             if (!every_row and !dirty[ry]) continue;
-            try composeRow(gpa, g, out, rows.items(.cells)[ry]);
+            try composeRow(gpa, g, out, rows.items(.cells)[ry], rows.items(.selection)[ry]);
         }
     }
 };
 
-fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell)) !void {
+/// `selection` is the row's selected columns, inclusive, drawn in reverse video.
+fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16) !void {
     const raws = cells.items(.raw);
     const styles = cells.items(.style);
     const graphemes = cells.items(.grapheme);
@@ -187,6 +188,9 @@ fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.Mul
     for (out[0..n], raws[0..n], styles[0..n], graphemes[0..n]) |*cell, raw, style, grapheme| {
         cell.* = try fromRender(gpa, g, raw, style, grapheme);
     }
+    if (selection) |sel| if (sel[0] < n) {
+        for (out[sel[0]..@min(@as(usize, sel[1]) + 1, n)]) |*cell| cell.style.flags.inverse = !cell.style.flags.inverse;
+    };
     @memset(out[n..], .blank);
     // A clipped wide character would leave half a character in the frame.
     if (n > 0 and out[n - 1].width == .wide) out[n - 1] = .blank;
@@ -267,6 +271,32 @@ test "composing copies dirty rows and keeps clean ones" {
 
     try f.composePane(testing.allocator, &g, rect, &rs, true);
     try testing.expectEqual(' ', f.row(0)[5].cp);
+}
+
+test "selected cells are drawn in reverse video" {
+    var t: vt.Terminal = try .init(testing.io, testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(testing.allocator);
+    var g: Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 6, 2);
+    s.nextSlice("abcdef\x1b[7mgh");
+    const screen = t.screens.active;
+    try screen.select(.init(screen.pages.pin(.{ .viewport = .{ .x = 4 } }).?, screen.pages.pin(.{ .viewport = .{ .x = 0, .y = 1 } }).?, false));
+    try rs.update(testing.allocator, &t);
+    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, false);
+    for (f.row(0), 0..) |c, x| try testing.expectEqual(x >= 4, c.style.flags.inverse);
+    try testing.expect(!f.row(1)[0].style.flags.inverse);
+    try testing.expect(f.row(1)[1].style.flags.inverse);
+    screen.clearSelection();
+    try rs.update(testing.allocator, &t);
+    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, false);
+    try testing.expect(!f.row(0)[4].style.flags.inverse);
 }
 
 test "a box draws single-line edges in its style, and a tiny box is blanked" {

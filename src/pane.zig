@@ -146,6 +146,82 @@ pub const Pane = struct {
         try self.flushPending();
     }
 
+    /// Whether the program enabled mouse reporting.
+    pub fn tracksMouse(self: *const Pane) bool {
+        return self.terminal.flags.mouse_event != .none;
+    }
+
+    /// Encodes a mouse report at pane-local cell (`x`, `y`) for the
+    /// program's mouse modes and writes it without blocking.
+    pub fn sendMouse(self: *Pane, ev: input.Mouse, x: i32, y: i32) !void {
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.pending);
+        const encoded = encode.mouse(&aw.writer, &self.terminal, ev, x, y);
+        self.pending = aw.toArrayList();
+        encoded catch return error.OutOfMemory;
+        try self.flushPending();
+    }
+
+    pub const Scrolled = struct { back: usize, history: usize };
+
+    /// How far the viewport is scrolled back into a scrollback of `history`
+    /// lines; null while it follows the live screen.
+    pub fn scrolled(self: *Pane) ?Scrolled {
+        const pages = &self.terminal.screens.active.pages;
+        if (pages.viewport == .active) return null;
+        const bar = pages.scrollbar();
+        return .{ .back = bar.total - bar.offset - bar.len, .history = bar.total - bar.len };
+    }
+
+    /// Scrolls the viewport `lines` into the scrollback, or back toward
+    /// the live screen when negative.
+    pub fn scrollBack(self: *Pane, lines: isize) void {
+        self.terminal.scrollViewport(.{ .delta = -lines });
+    }
+
+    /// Returns the viewport to the live screen. Returns whether it moved.
+    pub fn followLive(self: *Pane) bool {
+        if (self.terminal.screens.active.pages.viewport == .active) return false;
+        self.terminal.scrollViewport(.bottom);
+        return true;
+    }
+
+    /// Selects from viewport cell `from` to `to`, both inclusive. The
+    /// screen tracks the ends, so the selection stays on its text while
+    /// output arrives and the viewport scrolls.
+    pub fn select(self: *Pane, from: vt.Coordinate, to: vt.Coordinate) !void {
+        const screen = self.terminal.screens.active;
+        const start = screen.pages.pin(.{ .viewport = from }) orelse return;
+        const end = screen.pages.pin(.{ .viewport = to }) orelse return;
+        try screen.select(.init(start, end, false));
+    }
+
+    /// Moves the selection's moving end to viewport cell `to`.
+    pub fn extendSelection(self: *Pane, to: vt.Coordinate) !void {
+        const screen = self.terminal.screens.active;
+        const sel = screen.selection orelse return;
+        const end = screen.pages.pin(.{ .viewport = to }) orelse return;
+        try screen.select(.init(sel.start(), end, false));
+    }
+
+    /// Clears the selection on either screen. Returns whether there was one.
+    pub fn clearSelection(self: *Pane) bool {
+        var any = false;
+        for ([_]vt.ScreenSet.Key{ .primary, .alternate }) |key| {
+            const screen = self.terminal.screens.get(key) orelse continue;
+            any = any or screen.selection != null;
+            screen.clearSelection();
+        }
+        return any;
+    }
+
+    /// The selected text with soft wraps joined and trailing blanks
+    /// trimmed. Null when nothing is selected.
+    pub fn selectionText(self: *Pane, gpa: std.mem.Allocator) !?[:0]const u8 {
+        const screen = self.terminal.screens.active;
+        const sel = screen.selection orelse return null;
+        return try screen.selectionString(gpa, .{ .sel = sel, .trim = true });
+    }
+
     pub fn flushPending(self: *Pane) !void {
         while (self.pending.items.len > 0) {
             const n = sys.write(self.fd, self.pending.items) catch |e| switch (e) {
