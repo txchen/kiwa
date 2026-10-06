@@ -134,3 +134,65 @@ Blocked by: 07, 08, 09, 10, 12
   reproduced the hidden-producer rows: Kiwa 0.865% attached and 0.900%
   detached, tmux 3.053% and 2.673%. Remaining for this ticket: agree the CPU
   budgets with the user and update the design draft.
+- 2026-10-06: The user agreed the v1 budgets, and c42a9d7 checks them.
+  `mise exec -- zig build bench-check -Doptimize=ReleaseFast` runs the
+  bench with `--check` (options after `--` as for `bench`). After the
+  table it prints one PASS or FAIL line per gate and Kiwa variant, with the
+  measured medians and the limit, and it exits 1 if any gate fails.
+
+  | Gate | Scenarios | Rule |
+  |---|---|---|
+  | Idle | 1 and 10 idle panes, attached and detached | Kiwa total CPU 0 and context switches 0 over the sample |
+  | Spinner | 60 Hz one-cell spinner | Kiwa total CPU at most tmux total CPU |
+  | Hidden output | 10 hidden producers, attached and detached | Kiwa total CPU at most tmux total CPU |
+  | Scrolling | 30 lines/s, outer with and without margins | Kiwa total CPU at most 1.5x tmux total CPU |
+  | Memory | Every scenario with 10 or more panes | Kiwa server RSS at most 20 MiB |
+
+  Every gate compares medians over the runs. Total CPU is server plus
+  client. A relative CPU gate adds 5% of tmux's median, at least 0.01
+  percentage points, for measurement noise; the idle gate has no
+  tolerance. The memory gate covers the two 10-idle-pane scenarios and the
+  two hidden-producer scenarios, which have 11 panes; its RSS is the
+  end-of-sample snapshot, not a steady state. With `--only`, only the gates
+  of the scenarios that ran are checked.
+
+  Run at c42a9d7 (product code as of 91a9815), ReleaseFast, default
+  options (3 runs, 6 s warmup, 12 s sample), exit status 0. The load was
+  3.41 at the start and 0.30 to 7.90 (one-minute) during the runs, from a
+  headless browser and other work on the machine that this run could not
+  stop. The order alternates, so both sides saw the noise, but the
+  attached hidden-producer rows are higher than on 2026-10-05 for both
+  (Kiwa 0.64 to 1.32%, tmux 2.44 to 4.81%, at load 4.9 to 7.9).
+
+  ```
+  Gates on medians; a relative CPU gate allows 5% of tmux's value, at least 0.01 percentage points, for noise; the idle gate allows none.
+  PASS Idle | 1 idle pane | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  PASS Idle | 10 idle panes | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  PASS Idle | 1 idle pane, detached | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  PASS Idle | 10 idle panes, detached | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  PASS Spinner | 60 Hz one-cell spinner | Kiwa (ReleaseFast), outer with margins | Kiwa 0.462%, tmux 0.636%, limit 1 x tmux + 0.032 = 0.668%
+  PASS Hidden output | 10 hidden producers, focused pane idle | Kiwa (ReleaseFast), outer with margins | Kiwa 1.205%, tmux 4.771%, limit 1 x tmux + 0.239 = 5.010%
+  PASS Hidden output | 10 hidden producers, detached | Kiwa (ReleaseFast), outer with margins | Kiwa 0.830%, tmux 2.686%, limit 1 x tmux + 0.134 = 2.820%
+  PASS Scrolling | 30 lines/s of 80 bytes | Kiwa (ReleaseFast), outer with margins | Kiwa 0.565%, tmux 0.508%, limit 1.5 x tmux + 0.025 = 0.787%
+  PASS Scrolling | 30 lines/s of 80 bytes | Kiwa (ReleaseFast), outer without margins | Kiwa 0.549%, tmux 0.508%, limit 1.5 x tmux + 0.025 = 0.787%
+  PASS Memory | 10 idle panes | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 3.6 MiB, limit 20 MiB
+  PASS Memory | 10 idle panes, detached | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 3.5 MiB, limit 20 MiB
+  PASS Memory | 10 hidden producers, focused pane idle | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 10.2 MiB, limit 20 MiB
+  PASS Memory | 10 hidden producers, detached | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 10.2 MiB, limit 20 MiB
+  All gates passed
+  ```
+
+  The check can fail: with the memory limit temporarily set to 1 MiB in
+  `GATES` (not committed), `bench-check -- --runs 1 --only "10 idle panes"
+  --warmup 2 --sample 4` printed the lines below, and the step failed with
+  `process exited with error code 1`.
+
+  ```
+  PASS Idle | 10 idle panes | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  PASS Idle | 10 idle panes, detached | Kiwa (ReleaseFast), outer with margins | Kiwa 0.000% CPU and 0 context switches, limit 0 and 0
+  FAIL Memory | 10 idle panes | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 3.6 MiB, limit 1 MiB
+  FAIL Memory | 10 idle panes, detached | Kiwa (ReleaseFast), outer with margins | Kiwa server RSS 3.5 MiB, limit 1 MiB
+  2 gates failed
+  ```
+
+  Remaining for this ticket: update the design draft.

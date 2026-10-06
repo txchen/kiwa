@@ -55,6 +55,29 @@ running session. SIGTERM, SIGHUP, and ctrl+c still stop every server the
 bench started and remove its tmux sockets. Pass options after `--`, for
 example `-- --runs 5` or `-- --only detached`.
 
+```sh
+mise exec -- zig build bench-check -Doptimize=ReleaseFast
+```
+
+`bench-check` runs the same bench with `--check`. After the table it prints
+one PASS or FAIL line per gate with the measured values and the limit, and
+it fails if any gate fails. The gates are the v1 budgets, and they compare
+medians over the runs:
+
+| Gate | Scenarios | Rule |
+| --- | --- | --- |
+| Idle | 1 and 10 idle panes, attached and detached | Kiwa's total CPU and context switches are 0 over the sample |
+| Spinner | 60 Hz one-cell spinner | Kiwa's total CPU is at most tmux's |
+| Hidden output | 10 hidden producers, attached and detached | Kiwa's total CPU is at most tmux's |
+| Scrolling | 30 lines/s, outer with and without margins | Kiwa's total CPU is at most 1.5 times tmux's |
+| Memory | Every scenario with 10 or more panes | Kiwa's server RSS is at most 20 MiB |
+
+Total CPU is server plus client. A relative CPU gate adds a tolerance for
+measurement noise: 5% of tmux's value, at least 0.01 percentage points. The
+idle gate has no tolerance. RSS is read at the end of the sample, so the
+memory gate checks a snapshot, not a steady state. With `--only`, only the
+gates of the scenarios that ran are checked.
+
 ## Run
 
 ```sh
