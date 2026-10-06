@@ -11,7 +11,7 @@ const Activity = @import("session.zig").Activity;
 const Frame = frame_mod.Frame;
 const Cell = frame_mod.Cell;
 const Rect = frame_mod.Rect;
-const Style = vt.Style;
+const Style = frame_mod.Style;
 
 /// The expanded sidebar's width, including its divider column.
 pub const sidebar_cols = 26;
@@ -79,13 +79,13 @@ pub const Geometry = struct {
     }
 };
 
-const accent: Style.Color = .{ .palette = 6 };
+const accent: Style.Color = .palette(6);
 const plain: Style = .{};
 const dim: Style = .{ .flags = .{ .faint = true } };
-const divider: Style = .{ .fg_color = .{ .palette = 8 } };
-pub const highlight: Style = .{ .fg_color = .{ .palette = 0 }, .bg_color = accent };
-const mode_label: Style = .{ .fg_color = .{ .palette = 0 }, .bg_color = accent, .flags = .{ .bold = true } };
-const marker_fg: Style.Color = .{ .palette = 3 };
+const divider: Style = .{ .fg_color = .palette(8) };
+pub const highlight: Style = .{ .fg_color = .palette(0), .bg_color = accent };
+const mode_label: Style = .{ .fg_color = .palette(0), .bg_color = accent, .flags = .{ .bold = true } };
+const marker_fg: Style.Color = .palette(3);
 /// The border of the boxes drawn over panes: key help and menus.
 pub const box_border: Style = .{ .fg_color = accent };
 
@@ -562,8 +562,7 @@ const three = [_]Workspace{
 const tabs2 = [_]Tab{ .{ .name = "sh", .active = true }, .{ .name = "vim" } };
 
 fn isHighlight(c: Cell) bool {
-    return c.style.bg_color == .palette and c.style.bg_color.palette == 6 and
-        c.style.fg_color == .palette and c.style.fg_color.palette == 0;
+    return c.style.bg_color.eql(.palette(6)) and c.style.fg_color.eql(.palette(0));
 }
 
 test "geometry: 26 columns at 64 or more, collapsed below or when toggled, and a tab row" {
@@ -607,8 +606,8 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
     );
     try testing.expect(isHighlight(wide.at(0, 2)) and isHighlight(wide.at(24, 2)));
     try testing.expect(!isHighlight(wide.at(0, 1)) and !isHighlight(wide.at(0, 3)));
-    try testing.expectEqual(Style.Color{ .palette = 3 }, wide.at(23, 1).style.fg_color);
-    try testing.expectEqual(Style.Color{ .palette = 3 }, wide.at(23, 3).style.fg_color);
+    try testing.expectEqual(Style.Color.palette(3), wide.at(23, 1).style.fg_color);
+    try testing.expectEqual(Style.Color.palette(3), wide.at(23, 3).style.fg_color);
 
     var narrow = try render(40, 6, .{ .workspaces = &three, .tabs = &tabs2 });
     defer narrow.deinit();

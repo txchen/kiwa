@@ -9,6 +9,8 @@ const Frame = frame.Frame;
 const Cell = frame.Cell;
 const Cursor = frame.Cursor;
 const Graphemes = frame.Graphemes;
+const Style = frame.Style;
+const rowsEqual = frame.rowsEqual;
 const Rect = frame.Rect;
 const Writer = std.Io.Writer;
 
@@ -297,7 +299,7 @@ const Out = struct {
     /// Whether the output is wrapped in synchronized output.
     sync: bool,
     started: bool = false,
-    pen: vt.Style = .{},
+    pen: Style = .{},
     /// Null when unknown: after a scroll, or after a write to the last
     /// column, which leaves the outer cursor in pending wrap.
     pos: ?Pos,
@@ -334,7 +336,7 @@ const Out = struct {
         o.pos = .{ .x = x, .y = y };
     }
 
-    fn setPen(o: *Out, style: vt.Style) Writer.Error!void {
+    fn setPen(o: *Out, style: Style) Writer.Error!void {
         if (o.pen.eql(style)) return;
         try o.begin();
         try sgr.write(o.w, style);
@@ -363,7 +365,7 @@ const Out = struct {
                 if (o.eraseIsCheaper(old, new, start)) {
                     try o.moveTo(@intCast(start), y);
                     // Erase-in-line fills with the pen's background.
-                    if (o.pen.bg_color != .none) try o.setPen(.{});
+                    if (o.pen.bg_color.kind != .none) try o.setPen(.{});
                     try o.w.writeAll(erase_line);
                     return;
                 }
@@ -388,7 +390,7 @@ const Out = struct {
             if (!oldAt(old, i).eql(new[i])) changed += 1;
         }
         const write_cost = changed + if (o.pen.eql(.{})) 0 else reset_pen.len;
-        const erase_cost = erase_line.len + if (o.pen.bg_color == .none) 0 else reset_pen.len;
+        const erase_cost = erase_line.len + if (o.pen.bg_color.kind == .none) 0 else reset_pen.len;
         return erase_cost < write_cost;
     }
 
@@ -429,11 +431,6 @@ fn nextChanged(old: ?[]const Cell, new: []const Cell, from: usize) ?usize {
         x = end;
     }
     return null;
-}
-
-fn rowsEqual(a: []const Cell, b: []const Cell) bool {
-    for (a, b) |x, y| if (!x.eql(y)) return false;
-    return true;
 }
 
 /// An unknown screen has just been cleared, so it is all blanks.
@@ -599,7 +596,7 @@ test "an identical frame emits nothing" {
     defer f.deinit();
     try f.init(10, 3);
     f.both(0, 0, "hello");
-    f.old.rowMut(1)[2] = .{ .cp = 'x', .style = .{ .fg_color = .{ .palette = 3 } } };
+    f.old.rowMut(1)[2] = .{ .cp = 'x', .style = .{ .fg_color = .palette(3) } };
     f.new.rowMut(1)[2] = f.old.row(1)[2];
     f.old.cursor = .{ .x = 5, .y = 0, .shape = .steady_bar, .visible = false };
     f.new.cursor = f.old.cursor;
@@ -637,7 +634,7 @@ test "a style-only change sets the pen, writes the cell, and resets the pen" {
     defer f.deinit();
     try f.init(10, 3);
     f.both(0, 0, "abc");
-    f.new.rowMut(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .{ .palette = 1 } };
+    f.new.rowMut(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .palette(1) };
     f.old.cursor = .{ .x = 2, .y = 0 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x08\x1b[0;1;31mb\x1b[0m", try f.diffBytes());
@@ -733,7 +730,7 @@ test "a default blank tail is erased, a colored one is written" {
     try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\r"));
     try f.expectRoundTrip();
 
-    for (f.new.rowMut(0)[2..]) |*c| c.style = .{ .bg_color = .{ .palette = 4 } };
+    for (f.new.rowMut(0)[2..]) |*c| c.style = .{ .bg_color = .palette(4) };
     try testing.expect(std.mem.indexOf(u8, try f.diffBytes(), "\x1b[K") == null);
     try f.expectRoundTrip();
 }
@@ -773,17 +770,17 @@ const texts = [_][]const u21{
     &.{ 0x5b57, 0x301 },
 };
 
-fn randomColor(r: Rng) vt.Style.Color {
+fn randomColor(r: Rng) Style.Color {
     return switch (r.uintLessThan(u8, 3)) {
         0 => .none,
-        1 => .{ .palette = r.int(u8) },
-        else => .{ .rgb = .{ .r = r.int(u8), .g = r.int(u8), .b = r.int(u8) } },
+        1 => .palette(r.int(u8)),
+        else => .rgb(r.int(u8), r.int(u8), r.int(u8)),
     };
 }
 
-fn randomStyle(r: Rng) vt.Style {
+fn randomStyle(r: Rng) Style {
     if (r.uintLessThan(u8, 3) != 0) return .{};
-    var s: vt.Style = .{ .fg_color = randomColor(r), .bg_color = randomColor(r) };
+    var s: Style = .{ .fg_color = randomColor(r), .bg_color = randomColor(r) };
     s.flags.bold = r.boolean();
     s.flags.italic = r.boolean();
     s.flags.inverse = r.uintLessThan(u8, 4) == 0;

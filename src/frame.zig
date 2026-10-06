@@ -6,26 +6,111 @@ const vt = @import("ghostty-vt");
 pub const Width = enum(u2) { narrow, wide, tail };
 
 /// One outer-terminal cell. A grapheme's extra codepoints live in the
-/// client's `Graphemes` table and the cell holds only their id. Cells stay
-/// fixed-size values: composing allocates nothing per cell, equality is a
-/// few integer compares, and graphemes of any length stay intact.
-pub const Cell = struct {
+/// client's `Graphemes` table and the cell holds only their id. Cells are
+/// 16-byte values without padding: composing allocates nothing per cell,
+/// equality is one integer compare, rows compare and copy as plain bytes,
+/// and graphemes of any length stay intact.
+pub const Cell = packed struct(u128) {
     cp: u21 = ' ',
     width: Width = .narrow,
     extra: Graphemes.Id = .none,
-    style: vt.Style = .{},
+    style: Style = .{},
 
     pub const blank: Cell = .{};
     /// The right half of a wide character. Its head carries the text and style.
     pub const tail: Cell = .{ .cp = 0, .width = .tail };
 
+    comptime {
+        std.debug.assert(@sizeOf(Cell) == 16 and @sizeOf([3]Cell) == 48);
+    }
+
     pub fn eql(a: Cell, b: Cell) bool {
-        return a.cp == b.cp and a.width == b.width and a.extra == b.extra and a.style.eql(b.style);
+        return @as(u128, @bitCast(a)) == @as(u128, @bitCast(b));
     }
 
     /// What erase-in-line leaves behind when the pen has no background.
     pub fn isDefaultBlank(c: Cell) bool {
-        return c.cp == ' ' and c.width == .narrow and c.extra == .none and c.style.eql(.{});
+        return c.eql(.blank);
+    }
+};
+
+/// Whether two rows hold the same cells.
+pub fn rowsEqual(a: []const Cell, b: []const Cell) bool {
+    return std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b));
+}
+
+/// A cell's SGR attributes, packed so that a `Cell` is one machine word
+/// pair. Composing converts ghostty-vt's style once; the differ compares
+/// and writes this one.
+pub const Style = packed struct(u89) {
+    fg_color: Color = .none,
+    bg_color: Color = .none,
+    underline_color: Color = .none,
+    flags: Flags = .{},
+
+    pub const Flags = packed struct(u11) {
+        bold: bool = false,
+        italic: bool = false,
+        faint: bool = false,
+        blink: bool = false,
+        inverse: bool = false,
+        invisible: bool = false,
+        strikethrough: bool = false,
+        overline: bool = false,
+        underline: vt.sgr.Attribute.Underline = .none,
+    };
+
+    pub const Color = packed struct(u26) {
+        kind: enum(u2) { none, palette, rgb } = .none,
+        /// The palette index when `kind` is `palette`.
+        r: u8 = 0,
+        g: u8 = 0,
+        b: u8 = 0,
+
+        pub const none: Color = .{};
+
+        pub fn palette(index: u8) Color {
+            return .{ .kind = .palette, .r = index };
+        }
+
+        pub fn rgb(r: u8, g: u8, b: u8) Color {
+            return .{ .kind = .rgb, .r = r, .g = g, .b = b };
+        }
+
+        pub fn fromVt(c: vt.Style.Color) Color {
+            return switch (c) {
+                .none => .none,
+                .palette => |i| .palette(i),
+                .rgb => |v| .rgb(v.r, v.g, v.b),
+            };
+        }
+
+        pub fn eql(a: Color, b: Color) bool {
+            return @as(u26, @bitCast(a)) == @as(u26, @bitCast(b));
+        }
+    };
+
+    pub fn fromVt(s: vt.Style) Style {
+        return .{
+            .fg_color = .fromVt(s.fg_color),
+            .bg_color = .fromVt(s.bg_color),
+            .underline_color = .fromVt(s.underline_color),
+            .flags = .{
+                .bold = s.flags.bold,
+                .italic = s.flags.italic,
+                .faint = s.flags.faint,
+                .blink = s.flags.blink,
+                .inverse = s.flags.inverse,
+                .invisible = s.flags.invisible,
+                .strikethrough = s.flags.strikethrough,
+                .overline = s.flags.overline,
+                .underline = s.flags.underline,
+            },
+        };
+    }
+
+    pub fn eql(a: Style, b: Style) bool {
+        return @as(u89, @bitCast(a)) == @as(u89, @bitCast(b));
     }
 };
 
@@ -35,10 +120,11 @@ pub const Graphemes = struct {
     map: std.StringArrayHashMapUnmanaged(void) = .empty,
     scratch: std.ArrayList(u8) = .empty,
 
-    pub const Id = enum(u32) { none = 0, _ };
+    pub const Id = enum(u16) { none = 0, _ };
 
     /// Ids are never freed one by one. Past this many entries the client
-    /// resets the table, which invalidates both of its frames.
+    /// resets the table, which invalidates both of its frames. One frame
+    /// adds at most one id per cell, so ids stay well inside `Id`.
     pub const limit = 4096;
 
     pub fn deinit(g: *Graphemes, gpa: std.mem.Allocator) void {
@@ -71,6 +157,7 @@ pub const Graphemes = struct {
                 return e;
             };
         }
+        std.debug.assert(gop.index < std.math.maxInt(u16));
         return @enumFromInt(gop.index + 1);
     }
 
@@ -167,7 +254,7 @@ pub const Frame = struct {
 
     /// Draws a single-line box on `r`'s edge cells. A box too small to
     /// have corners is blanked instead.
-    pub fn drawBox(f: *Frame, r: Rect, style: vt.Style) void {
+    pub fn drawBox(f: *Frame, r: Rect, style: Style) void {
         if (r.cols < 2 or r.rows < 2) {
             for (r.y..r.y + r.rows) |y| @memset(f.rowMut(y)[r.x..][0..r.cols], .blank);
             return;
@@ -277,12 +364,8 @@ fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.Mul
 
 fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Style, grapheme: []const u21) !Cell {
     switch (raw.content_tag) {
-        .bg_color_palette => return .{ .style = .{ .bg_color = .{ .palette = raw.content.color_palette.data } } },
-        .bg_color_rgb => return .{ .style = .{ .bg_color = .{ .rgb = .{
-            .r = raw.content.color_rgb.r,
-            .g = raw.content.color_rgb.g,
-            .b = raw.content.color_rgb.b,
-        } } } },
+        .bg_color_palette => return .{ .style = .{ .bg_color = .palette(raw.content.color_palette.data) } },
+        .bg_color_rgb => return .{ .style = .{ .bg_color = .rgb(raw.content.color_rgb.r, raw.content.color_rgb.g, raw.content.color_rgb.b) } },
         .codepoint, .codepoint_grapheme => {},
     }
     if (raw.wide == .spacer_tail) return .tail;
@@ -292,7 +375,7 @@ fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Sty
         .cp = if (cp == 0 or raw.wide == .spacer_head) ' ' else cp,
         .width = if (raw.wide == .wide) .wide else .narrow,
         .extra = if (raw.content_tag == .codepoint_grapheme) try g.intern(gpa, grapheme) else .none,
-        .style = if (raw.style_id == 0) .{} else style,
+        .style = if (raw.style_id == 0) .{} else .fromVt(style),
     };
 }
 
@@ -523,7 +606,7 @@ test "a box draws single-line edges in its style, and a tiny box is blanked" {
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
     try f.resize(testing.allocator, 6, 4);
-    const cyan: vt.Style = .{ .fg_color = .{ .palette = 6 } };
+    const cyan: Style = .{ .fg_color = .palette(6) };
     f.drawBox(.{ .x = 1, .cols = 4, .rows = 3 }, cyan);
     const want = [_][]const u21{
         &.{ ' ', 0x250c, 0x2500, 0x2500, 0x2510, ' ' },

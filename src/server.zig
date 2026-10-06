@@ -63,8 +63,8 @@ const probe_seq = "\x1b[?u\x1b[?69$p\x1b[c";
 /// Pushes the kitty "disambiguate escape codes" flag.
 const kitty_push_seq = "\x1b[>1u";
 
-const border_style: vt.Style = .{ .fg_color = .{ .palette = 8 } };
-const focused_border_style: vt.Style = .{ .fg_color = .{ .palette = 6 } };
+const border_style: frame_mod.Style = .{ .fg_color = .palette(8) };
+const focused_border_style: frame_mod.Style = .{ .fg_color = .palette(6) };
 
 const msg = struct {
     const detached = "detached";

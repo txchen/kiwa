@@ -181,7 +181,7 @@ fn typedChar(k: input.Key, c: u21) u21 {
 
 const rename_cols = 44;
 const confirm_hint = "y close  n cancel";
-const hint: vt.Style = .{ .flags = .{ .faint = true } };
+const hint: frame_mod.Style = .{ .flags = .{ .faint = true } };
 
 /// A `cols x rows` box centered over `area`, shrunk to fit it.
 fn centered(area: Rect, cols: u16, rows: u16) Rect {
