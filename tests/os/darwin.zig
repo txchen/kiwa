@@ -109,3 +109,38 @@ pub fn exited(io: std.Io, pid: sys.pid_t) bool {
     const rc = std.c.kill(pid, @enumFromInt(0));
     return rc != 0 and std.c.errno(rc) == .SRCH;
 }
+
+/// A copy of `/bin/bash` named `sh`, for the panes' shell. macOS
+/// `/bin/sh` execs `/bin/bash`, so the pane's foreground process would be
+/// named `bash`, while on Linux `/bin/sh` runs as `sh`. The copy keeps
+/// the dynamic tab names the cases expect, and bash run as `sh` takes the
+/// same POSIX mode that `/bin/sh` gives it.
+pub fn paneShell(gpa: std.mem.Allocator) ![:0]u8 {
+    const dir = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-shell", .{sys.getpid()}, 0);
+    defer gpa.free(dir);
+    _ = std.c.mkdir(dir, 0o700);
+    const path = try std.fmt.allocPrintSentinel(gpa, "{s}/sh", .{dir}, 0);
+    errdefer gpa.free(path);
+    const from = try sys.open("/bin/bash", .{ .ACCMODE = .RDONLY }, 0);
+    defer sys.close(from);
+    const to = try sys.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o755);
+    defer sys.close(to);
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try sys.read(from, &buf);
+        if (n == 0) break;
+        try sys.writeAll(to, buf[0..n]);
+    }
+    return path;
+}
+
+pub fn removePaneShell(path: [:0]const u8) void {
+    sys.unlink(path);
+    var buf: [sys.PATH_MAX]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&buf, "{s}", .{std.fs.path.dirname(path) orelse return}) catch return;
+    _ = std.c.rmdir(dir);
+}
+
+/// The command name of `python3`: a framework build runs as
+/// `Python.app/Contents/MacOS/Python`.
+pub const python_name = "Python";

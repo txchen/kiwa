@@ -2088,7 +2088,7 @@ fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
     try o.click(10, 1);
     try waitHighlighted(o, 1);
     const name = caseName(ctx);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: python3, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: {s}, 1 pane (active)\n", .{ name, name, os.python_name });
     try o.click(10, 2);
     try waitHighlighted(o, 2);
     try o.send("z");
@@ -2801,6 +2801,11 @@ pub fn main(init: std.process.Init) !u8 {
     var on_alarm: libc.Sigaction = .{ .handler = .{ .handler = onCaseTimeout }, .mask = undefined, .flags = 0 };
     _ = libc.sigemptyset(&on_alarm.mask);
     _ = libc.sigaction(.ALRM, &on_alarm, null);
+    const shell = try os.paneShell(gpa);
+    defer {
+        os.removePaneShell(shell);
+        gpa.free(shell);
+    }
     var passed: usize = 0;
     var failed: usize = 0;
     for (cases, 0..) |case, i| {
@@ -2809,7 +2814,7 @@ pub fn main(init: std.process.Init) !u8 {
         // A hung case would otherwise hold CI until its job times out.
         running_case = case.name;
         _ = alarm(case_timeout_s);
-        const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, i, case.run) catch |e| blk: {
+        const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, shell, i, case.run) catch |e| blk: {
             std.debug.print("    error: {t}\n", .{e});
             break :blk false;
         };
@@ -2820,7 +2825,7 @@ pub fn main(init: std.process.Init) !u8 {
     return if (failed == 0) 0 else 1;
 }
 
-fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
+fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, shell: []const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
     const made = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ sys.getpid(), index }, 0);
     defer gpa.free(made);
     try std.Io.Dir.cwd().createDirPath(io, made);
@@ -2835,7 +2840,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     defer env.deinit();
     try env.put("PATH", parent_env.get("PATH") orelse "/usr/bin:/bin");
     try env.put("HOME", dir);
-    try env.put("SHELL", "/bin/sh");
+    try env.put("SHELL", shell);
     try env.put("PS1", prompt);
     try env.put("TERM", "xterm-256color");
     // Fake values that the server must strip from the pane's environment.

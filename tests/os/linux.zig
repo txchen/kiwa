@@ -68,3 +68,16 @@ pub fn exited(io: std.Io, pid: sys.pid_t) bool {
     const stat = std.Io.Dir.cwd().readFile(io, p, &buf) catch return true;
     return std.mem.indexOf(u8, stat, ") Z ") != null;
 }
+
+/// The panes' shell. `/bin/sh` runs as `sh`, the name the cases expect
+/// in dynamic tab names.
+pub fn paneShell(gpa: std.mem.Allocator) ![:0]u8 {
+    return gpa.dupeZ(u8, "/bin/sh");
+}
+
+pub fn removePaneShell(path: [:0]const u8) void {
+    _ = path;
+}
+
+/// The command name of `python3`.
+pub const python_name = "python3";
