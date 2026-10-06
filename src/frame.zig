@@ -123,9 +123,11 @@ pub const Graphemes = struct {
     pub const Id = enum(u16) { none = 0, _ };
 
     /// Ids are never freed one by one. Past this many entries the client
-    /// resets the table, which invalidates both of its frames. One frame
-    /// adds at most one id per cell, so ids stay well inside `Id`.
+    /// resets the table, which invalidates both of its frames.
     pub const limit = 4096;
+    /// The ids one table can hand out before that reset. A grapheme past
+    /// this many shows its first codepoint alone until the reset.
+    pub const max_ids = std.math.maxInt(u16) - 1;
 
     pub fn deinit(g: *Graphemes, gpa: std.mem.Allocator) void {
         g.reset(gpa);
@@ -152,12 +154,15 @@ pub const Graphemes = struct {
         if (g.scratch.items.len == 0) return .none;
         const gop = try g.map.getOrPut(gpa, g.scratch.items);
         if (!gop.found_existing) {
+            if (gop.index == max_ids) {
+                g.map.swapRemoveAt(gop.index);
+                return .none;
+            }
             gop.key_ptr.* = gpa.dupe(u8, g.scratch.items) catch |e| {
                 g.map.swapRemoveAt(gop.index);
                 return e;
             };
         }
-        std.debug.assert(gop.index < std.math.maxInt(u16));
         return @enumFromInt(gop.index + 1);
     }
 
@@ -486,6 +491,21 @@ pub fn paneCursor(rect: Rect, rs: *const vt.RenderState, shape_is_default: bool)
 }
 
 const testing = std.testing;
+
+test "a full grapheme table hands out no id instead of wrapping" {
+    var g: Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    var last: Graphemes.Id = .none;
+    for (0..Graphemes.max_ids) |i| {
+        last = try g.intern(testing.allocator, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) });
+    }
+    try testing.expectEqual(Graphemes.max_ids, @intFromEnum(last));
+    try testing.expectEqual(Graphemes.max_ids, g.count());
+    try testing.expectEqual(.none, try g.intern(testing.allocator, &.{0x301}));
+    try testing.expectEqual(Graphemes.max_ids, g.count());
+    // A known grapheme still has its id.
+    try testing.expectEqual(last, try g.intern(testing.allocator, &.{ 0x300 + @as(u21, (Graphemes.max_ids - 1) % 0x100), @intCast(0x1000 + (Graphemes.max_ids - 1) / 0x100) }));
+}
 
 test "composing copies dirty rows and keeps clean ones" {
     var t: vt.Terminal = try .init(testing.io, testing.allocator, .{ .cols = 6, .rows = 3 });
