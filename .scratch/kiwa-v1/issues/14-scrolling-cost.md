@@ -28,9 +28,10 @@ parity, with the spinner and idle results not regressing.
 
 ## Comments
 
-- 2026-10-05: Implemented in 47ca3f7..520778e: four measured commits, one
+- 2026-10-05: Implemented in 47ca3f7..91a9815: four measured commits, one
   hypothesis each, and 520778e, which keeps the new u16 grapheme id from
-  wrapping when a table fills before its reset. Measured with
+  wrapping when a table fills before its reset, and 91a9815, a comment
+  and call-order cleanup after review. Measured with
   `perf/sched.py`: server CPU from `/proc/<pid>/schedstat` over 12 s at
   100x40, unstripped ReleaseFast, 3 alternating rounds per pair, range.
   Each lever was kept because its range did not overlap the previous
