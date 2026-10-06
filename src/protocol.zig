@@ -4,7 +4,8 @@
 //! The handshake is frozen across all protocol versions, so that any client
 //! and any server can at least report a mismatch: the frame header, the
 //! `hello` tag with `version: u16` as its first field, and the `detach` tag
-//! with its reason payload. Everything else may change with `version`.
+//! with its reason payload, including `version_mismatch`. Everything else
+//! may change with `version`.
 
 const std = @import("std");
 
@@ -21,6 +22,10 @@ pub const header_len = 5;
 /// Values are never reused, so that an old peer cannot mistake a new
 /// message for another one. 4 was `kill`.
 pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, list = 5, stats = 6, text = 7, _ };
+
+/// How the reason of a server's detach for a hello of another version
+/// starts. Frozen with the handshake.
+pub const version_mismatch = "detached: version mismatch";
 
 pub const Size = struct { cols: u16, rows: u16 };
 

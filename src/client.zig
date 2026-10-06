@@ -19,7 +19,23 @@ const enter_seq = "\x1b[22;2t\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1
 /// before leaving that screen.
 const leave_seq = "\x1b[?2026l\x1b[0m\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[23;2t";
 
-const Outcome = struct { message: []const u8, code: u8 };
+const Outcome = struct {
+    message: []const u8,
+    /// A line after the message that says what to do about it.
+    hint: ?[]const u8 = null,
+    code: u8,
+
+    /// Why the server let go of the terminal. A server of another protocol
+    /// version refuses the hello; an older one says so without the versions.
+    fn detached(reason: []const u8) Outcome {
+        if (std.mem.startsWith(u8, reason, protocol.version_mismatch)) {
+            return .{ .message = reason, .hint = restart_hint, .code = 1 };
+        }
+        return .{ .message = reason, .code = 0 };
+    }
+};
+
+const restart_hint = "run kiwa kill-server to restart the server on this version; the layout is restored";
 
 /// The outer terminal, and who may write to it. The client reads its
 /// modes on stdin, passes stdin to the server, and writes to stdout. The
@@ -78,6 +94,10 @@ pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths
     _ = linux.tcsetattr(0, .DRAIN, &term.saved);
     term.write(outcome.message);
     term.write("\n");
+    if (outcome.hint) |hint| {
+        term.write(hint);
+        term.write("\n");
+    }
     return outcome.code;
 }
 
@@ -133,7 +153,7 @@ fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, term: *Termi
                 if (n == 0) return .{ .message = "lost server", .code = 1 };
                 try decoder.feed(gpa, buf[0..n]);
                 while (try decoder.next()) |m| switch (m) {
-                    .detach => |reason| return .{ .message = reason, .code = 0 },
+                    .detach => |reason| return .detached(reason),
                     else => return error.UnexpectedMessage,
                 };
             } else {
@@ -287,4 +307,21 @@ fn connectServer(paths: paths_mod.Paths) !?sys.fd_t {
 
 fn printErr(s: []const u8) !void {
     try sys.writeAll(2, s);
+}
+
+const testing = std.testing;
+
+test "a version mismatch, with or without the versions, fails with the restart hint" {
+    for ([_][]const u8{ "detached: version mismatch (server 3, client 4)", "detached: version mismatch" }) |reason| {
+        const o: Outcome = .detached(reason);
+        try testing.expectEqualStrings(reason, o.message);
+        try testing.expectEqualStrings(restart_hint, o.hint.?);
+        try testing.expectEqual(1, o.code);
+    }
+}
+
+test "any other detach succeeds without a hint" {
+    const o: Outcome = .detached("detached: attached elsewhere");
+    try testing.expectEqual(null, o.hint);
+    try testing.expectEqual(0, o.code);
 }

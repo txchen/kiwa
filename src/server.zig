@@ -69,7 +69,6 @@ const focused_border_style: frame_mod.Style = .{ .fg_color = .palette(6) };
 const msg = struct {
     const detached = "detached";
     const elsewhere = "detached: attached elsewhere";
-    const version_mismatch = "detached: version mismatch";
     const not_a_terminal = "detached: not a terminal";
     const hangup = "detached: hangup";
     const exited = "exited";
@@ -467,7 +466,11 @@ const Server = struct {
     /// Takes over the terminal passed with the hello and shows the session on it.
     fn attach(s: *Server, c: *Conn, h: protocol.Hello) !void {
         if (c.state != .open) return s.dropConn(c);
-        if (h.version != protocol.version) return s.detach(c, msg.version_mismatch);
+        if (h.version != protocol.version) {
+            var buf: [64]u8 = undefined;
+            const reason = std.fmt.bufPrint(&buf, "{s} (server {d}, client {d})", .{ protocol.version_mismatch, protocol.version, h.version }) catch unreachable;
+            return s.detach(c, reason);
+        }
         const passed = c.passed orelse return s.detach(c, msg.not_a_terminal);
         c.passed = null;
         // Its own open file description, so that O_NONBLOCK never reaches the shell's.

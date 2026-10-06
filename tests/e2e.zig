@@ -1035,7 +1035,9 @@ fn versionMismatch(ctx: *Ctx) !void {
         try d.feed(ctx.gpa, buf[0..n]);
         if (try d.next()) |m| break m;
     };
-    try expect(reply == .detach and std.mem.eql(u8, reply.detach, "detached: version mismatch"), "the server answers detach{version mismatch}");
+    var want: [64]u8 = undefined;
+    const reason = try std.fmt.bufPrint(&want, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, protocol.version +% 1 });
+    try expect(reply == .detach and std.mem.eql(u8, reply.detach, reason), "the server answers detach with both versions");
     try a.send("echo still attached\r");
     try a.waitLine("still attached");
 }

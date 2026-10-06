@@ -44,6 +44,7 @@ test {
     _ = @import("paths.zig");
     _ = @import("sys.zig");
     _ = @import("protocol.zig");
+    _ = @import("client.zig");
     _ = @import("sgr.zig");
     _ = @import("input.zig");
     _ = @import("prefix.zig");
