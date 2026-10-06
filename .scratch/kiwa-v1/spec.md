@@ -322,9 +322,23 @@ kiwa client    <-- Unix socket: control messages      --> kiwa server
   with the terminal fd, `resize{cols, rows}`, and `detach{reason}`, which
   asks the server to let go of the terminal. Server to client:
   `detach{reason}`, sent after the server closed its handle. One-shot
-  requests: `kill`, `list`, and `stats`; `list` and `stats` are answered
-  with `text{bytes}` and a close. A version mismatch detaches the client
-  with a message.
+  requests: `list` and `stats`, answered with `text{bytes}` and a close.
+  The handshake is frozen across all protocol versions, so that any client
+  and any server can at least report a mismatch: the frame header (`u32`
+  little-endian length, `u8` tag), the `hello` tag with `version: u16` as
+  its first field, and the `detach` tag with its reason payload. A hello of
+  another version gets `detached: version mismatch (server N, client M)`.
+  The client prints that reason, then
+  `run kiwa kill-server to restart the server on this version; the layout is restored`,
+  and exits 1. It prints the hint for an older server's bare
+  `detached: version mismatch` too. A unit test pins a hash of every
+  message type's encoding to `protocol.version`, so an encoding change
+  without a version bump fails.
+- **Stopping the server.** `kiwa kill-server` sends no message, so it
+  stops a server of any protocol version. It connects, reads the server's
+  pid and uid with `SO_PEERCRED`, checks that the uid is the caller's,
+  sends `SIGTERM` through a pidfd, and polls the pidfd until the server
+  exits, for at most 5 s. The server saves the session on `SIGTERM`.
 
 ## Test strategy
 

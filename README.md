@@ -29,7 +29,9 @@ mise exec -- zig build e2e    # end-to-end tests against the built kiwa binary
 The end-to-end harness runs each client under a PTY it owns and models the
 outer terminal with ghostty-vt. Every test sets a private `KIWA_SOCKET` and
 `KIWA_STATE_DIR` under a temporary directory, so it never touches a running
-Kiwa session. `kiwa __stats` prints the server's debug counters, such as
+Kiwa session. The e2e step also builds `kiwa-skewed`, whose protocol
+version is one higher, to test a client and a server of different versions.
+`kiwa __stats` prints the server's debug counters, such as
 `renders` and `name_checks`, for tests and benchmarks.
 
 ## Benchmark
@@ -152,6 +154,18 @@ the file, so the next `kiwa` starts fresh in the current directory. A file
 Kiwa cannot read is renamed to `session.json.bad-<unix seconds>`, the reason
 goes to `server.log`, and the server starts fresh; Kiwa keeps the newest
 three such files.
+
+After you rebuild Kiwa, the running server still runs the old code. When
+the new `kiwa` speaks another protocol version, it says so and exits 1:
+
+```text
+detached: version mismatch (server 3, client 4)
+run kiwa kill-server to restart the server on this version; the layout is restored
+```
+
+`kiwa kill-server` works across versions: it sends the server `SIGTERM`,
+which saves the session, and waits up to 5 s for it to exit. The next
+`kiwa` starts a server on the new code and restores the layout.
 
 Kiwa works with the mouse:
 
