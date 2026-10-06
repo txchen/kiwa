@@ -208,26 +208,42 @@ pub const Watcher = struct {
                 std.log.err("directory watch read: {t}", .{e});
                 break;
             } orelse break;
-            for (changes) |change| switch (change) {
-                .overflow => for (w.repos.values()) |*r| {
-                    r.stale = true;
-                },
-                .head => |h| if (w.indexOf(h)) |i| {
-                    w.repos.values()[i].stale = true;
-                },
-                // A changed directory reads `HEAD` only if it was replaced.
-                .changed => |h| if (w.indexOf(h)) |i| {
-                    const r = &w.repos.values()[i];
-                    var buf: [sys.PATH_MAX]u8 = undefined;
-                    const now = Identity.of(r.headPath(&buf) orelse continue);
-                    if (!std.meta.eql(now, r.head)) r.stale = true;
-                },
-                .gone => |h| if (w.indexOf(h)) |i| {
-                    if (w.repos.values()[i].branch != null) changed = true;
-                    w.drop(gpa, i);
-                },
+            for (changes) |change| if (w.apply(gpa, change)) {
+                changed = true;
             };
         }
+        return try w.readStale(gpa) or changed;
+    }
+
+    /// Marks the repositories whose `HEAD` may have changed, and drops
+    /// the ones that are gone. Returns whether a shown branch went away.
+    fn apply(w: *Watcher, gpa: Allocator, change: sys.DirChange) bool {
+        switch (change) {
+            .overflow => for (w.repos.values()) |*r| {
+                r.stale = true;
+            },
+            .head => |h| if (w.indexOf(h)) |i| {
+                w.repos.values()[i].stale = true;
+            },
+            // A changed directory reads `HEAD` only if it was replaced.
+            .changed => |h| if (w.indexOf(h)) |i| {
+                const r = &w.repos.values()[i];
+                var buf: [sys.PATH_MAX]u8 = undefined;
+                const now = Identity.of(r.headPath(&buf) orelse return false);
+                if (!std.meta.eql(now, r.head)) r.stale = true;
+            },
+            .gone => |h| if (w.indexOf(h)) |i| {
+                const shown = w.repos.values()[i].branch != null;
+                w.drop(gpa, i);
+                return shown;
+            },
+        }
+        return false;
+    }
+
+    /// Reads each `HEAD` marked stale. Returns whether any branch changed.
+    fn readStale(w: *Watcher, gpa: Allocator) Allocator.Error!bool {
+        var changed = false;
         for (w.repos.values()) |*r| if (r.stale) {
             if (try w.readHead(gpa, r)) changed = true;
         };
@@ -390,6 +406,35 @@ test "workspaces in one repository share a watch, and HEAD is read again only af
     try testing.expectEqualStrings("next", w.branch(a).?);
     try testing.expectEqual(null, w.branch(other));
     w.prune(testing.allocator, &[_]Ws{.{ .git = null }});
+    try testing.expectEqual(0, w.repos.count());
+    try testing.expectEqual(null, w.branch(a));
+}
+
+test "a changed Git directory reads HEAD only once HEAD is replaced, and a gone one drops its watch" {
+    var t: Tmp = try .init();
+    defer t.deinit();
+    try t.mkdir("repo/.git");
+    try t.write("repo/.git/HEAD", "ref: refs/heads/main\n");
+    var w: Watcher = try .init();
+    defer w.deinit(testing.allocator);
+    const root = try t.join("repo");
+    defer testing.allocator.free(root);
+    const a = (try w.watch(testing.allocator, root)).?;
+    const handle = w.repos.get(a).?.handle;
+
+    try t.write("repo/.git/index", "x");
+    try testing.expect(!w.apply(testing.allocator, .{ .changed = handle }));
+    try testing.expect(!try w.readStale(testing.allocator));
+    try testing.expectEqual(1, w.head_reads);
+
+    try t.write("repo/.git/HEAD.lock", "ref: refs/heads/next\n");
+    try t.tmp.dir.rename("repo/.git/HEAD.lock", t.tmp.dir, "repo/.git/HEAD", testing.io);
+    try testing.expect(!w.apply(testing.allocator, .{ .changed = handle }));
+    try testing.expect(try w.readStale(testing.allocator));
+    try testing.expectEqual(2, w.head_reads);
+    try testing.expectEqualStrings("next", w.branch(a).?);
+
+    try testing.expect(w.apply(testing.allocator, .{ .gone = handle }));
     try testing.expectEqual(0, w.repos.count());
     try testing.expectEqual(null, w.branch(a));
 }

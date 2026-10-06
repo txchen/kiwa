@@ -478,27 +478,28 @@ test "a pipe is not a terminal" {
 test "the poller reports readiness, a blocked signal, and a one-shot timer" {
     var poller: Poller = try .init(&.{.USR1});
     defer poller.deinit();
-    const p = try pipe();
-    defer close(p[0]);
-    defer close(p[1]);
-    try poller.add(p[0], .read);
-    try poller.add(p[1], .read_write);
+    const pair = try socketPair();
+    defer close(pair[0]);
+    defer close(pair[1]);
+    try poller.add(pair[0], .read_write);
 
     var ready = try poller.wait();
     try testing.expectEqual(1, ready.len);
-    try testing.expectEqual(p[1], ready[0].io.fd);
-    try testing.expect(ready[0].io.writable);
-    try poller.modify(p[1], .read_write, .read);
+    try testing.expectEqual(pair[0], ready[0].io.fd);
+    try testing.expect(ready[0].io.writable and !ready[0].io.readable);
+    try poller.modify(pair[0], .read_write, .read);
 
-    try writeAll(p[1], "x");
+    try writeAll(pair[1], "x");
     ready = try poller.wait();
     try testing.expectEqual(1, ready.len);
-    try testing.expectEqual(p[0], ready[0].io.fd);
-    try testing.expect(ready[0].io.readable);
+    try testing.expectEqual(pair[0], ready[0].io.fd);
+    try testing.expect(ready[0].io.readable and !ready[0].io.writable);
     var buf: [4]u8 = undefined;
-    _ = try read(p[0], &buf);
+    _ = try read(pair[0], &buf);
 
-    _ = c.raise(.USR1);
+    // Not `raise`: on macOS it signals the thread, and the macOS poller
+    // sees only signals sent to the process.
+    _ = c.kill(getpid(), .USR1);
     ready = try poller.wait();
     try testing.expectEqual(1, ready.len);
     try testing.expect(ready[0].signals.has(.USR1));
@@ -511,8 +512,7 @@ test "the poller reports readiness, a blocked signal, and a one-shot timer" {
     try testing.expectEqual(1, ready.len);
     try testing.expect(ready[0] == .timer);
 
-    poller.remove(p[0], .read);
-    poller.remove(p[1], .read);
+    poller.remove(pair[0], .read);
 }
 
 test "terminate stops a process and reports one that is gone" {

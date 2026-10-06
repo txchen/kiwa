@@ -65,7 +65,8 @@ pub fn stat(path: [*:0]const u8, follow: sys.Follow) Error!sys.Stat {
 /// descriptor instead of opening the terminal again.
 pub fn terminalPath(fd: fd_t, buf: []u8) ?[:0]const u8 {
     if (ttyname_r(fd, buf.ptr, buf.len) != 0) return null;
-    return std.mem.sliceTo(buf[0 .. buf.len - 1 :0], 0);
+    const len = std.mem.indexOfScalar(u8, buf, 0) orelse return null;
+    return buf[0..len :0];
 }
 
 pub fn peerCred(sock: fd_t) Error!sys.Peer {
