@@ -10,7 +10,9 @@
 const std = @import("std");
 
 /// Bump on any change to the encoding, and set `encoding_hash` to match.
-pub const version: u16 = 3;
+/// The skew is 0 except in the e2e step's second build, which plays a Kiwa
+/// of another version.
+pub const version: u16 = 3 + @import("build_options").protocol_skew;
 /// Wyhash of the test sample encoded, as `version` encodes it. The test
 /// "the encoding matches the protocol version" fails when they differ.
 const encoding_hash: u64 = 0x146e0354abd18a15;

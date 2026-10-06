@@ -8,18 +8,15 @@ const ghostty_commit = commit: {
     break :commit url[start..end];
 };
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{
-        .default_target = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
-    });
-    const optimize = b.standardOptimizeOption(.{});
-    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
-    const vt = ghostty.module("ghostty-vt");
-
+fn kiwaOptions(b: *std.Build, protocol_skew: u16) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption([]const u8, "version", zon.version);
     options.addOption([]const u8, "ghostty_commit", ghostty_commit);
+    options.addOption(u16, "protocol_skew", protocol_skew);
+    return options;
+}
 
+fn kiwaModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, vt: *std.Build.Module, options: *std.Build.Step.Options) *std.Build.Module {
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -29,9 +26,27 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("ghostty-vt", vt);
     mod.addOptions("build_options", options);
+    return mod;
+}
 
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{
+        .default_target = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+    });
+    const optimize = b.standardOptimizeOption(.{});
+    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
+    const vt = ghostty.module("ghostty-vt");
+
+    const options = kiwaOptions(b, 0);
+    const mod = kiwaModule(b, target, optimize, vt, options);
     const exe = b.addExecutable(.{ .name = "kiwa", .root_module = mod });
     b.installArtifact(exe);
+    // Plays a Kiwa of the next protocol version in the e2e step.
+    const skewed_options = kiwaOptions(b, 1);
+    const skewed_exe = b.addExecutable(.{
+        .name = "kiwa-skewed",
+        .root_module = kiwaModule(b, target, optimize, vt, skewed_options),
+    });
 
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
@@ -57,14 +72,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     }));
-    e2e_mod.addImport("kiwa_protocol", b.createModule(.{
+    const e2e_protocol = b.createModule(.{
         .root_source_file = b.path("src/protocol.zig"),
         .target = target,
         .optimize = optimize,
-    }));
+    });
+    e2e_protocol.addOptions("build_options", options);
+    e2e_mod.addImport("kiwa_protocol", e2e_protocol);
+    e2e_mod.addOptions("skewed_build_options", skewed_options);
     const e2e_exe = b.addExecutable(.{ .name = "kiwa-e2e", .root_module = e2e_mod });
     const e2e_run = b.addRunArtifact(e2e_exe);
     e2e_run.addArtifactArg(exe);
+    e2e_run.addArtifactArg(skewed_exe);
     if (b.args) |args| e2e_run.addArgs(args);
     e2e_run.has_side_effects = true;
     b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);

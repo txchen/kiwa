@@ -6,6 +6,8 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const sys = @import("kiwa_sys");
 const protocol = @import("kiwa_protocol");
+/// The second build of `kiwa`, which speaks another protocol version.
+const skewed_version = protocol.version + @import("skewed_build_options").protocol_skew;
 
 const linux = std.os.linux;
 
@@ -15,6 +17,8 @@ const Ctx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     kiwa: [:0]const u8,
+    /// A `kiwa` built with `skewed_version`.
+    skewed: [:0]const u8,
     dir: []const u8,
     dir_z: [:0]const u8,
     socket: []const u8,
@@ -1018,28 +1022,50 @@ fn kittyPaneGetsKittyKeysFromLegacy(ctx: *Ctx) !void {
     return kittyPaneGetsKittyKeys(ctx, .legacy);
 }
 
-fn versionMismatch(ctx: *Ctx) !void {
+const restart_hint = "run kiwa kill-server to restart the server on this version; the layout is restored";
+
+fn skewedClientIsToldToRestart(ctx: *Ctx) !void {
     const a = try attachedWithPrompt(ctx);
-    const sock = try sys.connectUnix(ctx.socket);
-    defer sys.close(sock);
-    var frame: std.ArrayList(u8) = .empty;
-    defer frame.deinit(ctx.gpa);
-    try protocol.append(ctx.gpa, &frame, .{ .hello = .{ .version = protocol.version +% 1, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/" } });
-    try sys.writeAll(sock, frame.items);
-    var d: protocol.Decoder = .{};
-    defer d.deinit(ctx.gpa);
-    var buf: [4096]u8 = undefined;
-    const reply = while (true) {
-        const n = try sys.read(sock, &buf);
-        if (n == 0) return error.ClosedWithoutDetach;
-        try d.feed(ctx.gpa, buf[0..n]);
-        if (try d.next()) |m| break m;
-    };
-    var want: [64]u8 = undefined;
-    const reason = try std.fmt.bufPrint(&want, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, protocol.version +% 1 });
-    try expect(reply == .detach and std.mem.eql(u8, reply.detach, reason), "the server answers detach with both versions");
+    // Wide enough that the hint does not wrap.
+    const o = try Outer.spawn(ctx, &.{ ctx.skewed.ptr, null }, .{ .cols = 120 });
+    try ctx.outers.append(ctx.gpa, o);
+    try expect(try o.waitExit() == 1, "the skewed client exits 1");
+    var buf: [64]u8 = undefined;
+    const reason = try std.fmt.bufPrint(&buf, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, skewed_version });
+    try expect(try o.hasLine(reason), "the skewed client prints the reason with both versions");
+    try expect(try o.hasLine(restart_hint), "the skewed client prints the restart hint on its own line");
+    var t: linux.termios = undefined;
+    _ = try sys.check(linux.tcgetattr(o.master, &t));
+    try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
+    try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
+    try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
+    try expect(!o.term.modes.get(.mouse_event_button) and !o.term.modes.get(.mouse_format_sgr), "mouse tracking is off");
     try a.send("echo still attached\r");
     try a.waitLine("still attached");
+}
+
+fn skewedKillServerRestartsOntoThisVersion(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    const saved = try waitSaved(ctx, "\"split\"");
+    ctx.gpa.free(saved.text);
+    // So that only the save on SIGTERM can bring it back.
+    const path = try statePath(ctx, "session.json");
+    defer ctx.gpa.free(path);
+    try std.Io.Dir.cwd().deleteFile(ctx.io, path);
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    const ran = try ctx.exec(&.{ ctx.skewed.ptr, "kill-server", null }, .both);
+    defer ctx.gpa.free(ran.output);
+    try expect(ran.code == 0 and ran.output.len == 0, "the skewed kill-server exits 0 and prints nothing");
+    const written = try Saved.read(ctx) orelse return error.SessionNotSaved;
+    defer ctx.gpa.free(written.text);
+    try expect(std.mem.indexOf(u8, written.text, "\"split\"") != null, "session.json holds the split when kill-server returns");
+    try expect(try o.waitExit() == 0, "the attached client exits 0");
+    try expect(try o.hasLine("server exited"), "the attached client prints \"server exited\"");
+    try ctx.waitServerGone(pid);
+    const b = try ctx.attach();
+    try waitBoxes(b, &.{ left_half, right_half });
 }
 
 fn staleSocketIsReplaced(ctx: *Ctx) !void {
@@ -2696,7 +2722,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "less, htop, and fzf navigate and quit (legacy outer)", .run = tuisWorkLegacy },
     .{ .name = "a kitty pane tells shift+enter from enter and focus reaches it (kitty outer)", .run = kittyPaneGetsKittyKeysFromKitty },
     .{ .name = "a kitty pane tells shift+enter from enter and focus reaches it (legacy outer)", .run = kittyPaneGetsKittyKeysFromLegacy },
-    .{ .name = "version mismatch detaches only the new client", .run = versionMismatch },
+    .{ .name = "a client of another protocol version is told to restart and leaves the terminal restored", .run = skewedClientIsToldToRestart },
+    .{ .name = "kill-server of another protocol version stops the server, which saves, and kiwa restores the layout", .run = skewedKillServerRestartsOntoThisVersion },
     .{ .name = "a dead server's socket is replaced", .run = staleSocketIsReplaced },
     .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
     .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
@@ -2750,17 +2777,21 @@ pub fn main(init: std.process.Init) !u8 {
     var args = init.minimal.args.iterate();
     _ = args.next();
     const kiwa_arg = args.next() orelse return error.MissingKiwaPath;
+    const skewed_arg = args.next() orelse return error.MissingKiwaPath;
     var cwd_buf: [linux.PATH_MAX]u8 = undefined;
     _ = try sys.check(linux.getcwd(&cwd_buf, cwd_buf.len));
-    const kiwa = try std.fs.path.joinZ(gpa, &.{ std.mem.sliceTo(&cwd_buf, 0), kiwa_arg });
+    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const kiwa = try std.fs.path.joinZ(gpa, &.{ cwd, kiwa_arg });
     defer gpa.free(kiwa);
+    const skewed = try std.fs.path.joinZ(gpa, &.{ cwd, skewed_arg });
+    defer gpa.free(skewed);
     const filter = args.next();
 
     var passed: usize = 0;
     var failed: usize = 0;
     for (cases, 0..) |case, i| {
         if (filter) |f| if (std.mem.indexOf(u8, case.name, f) == null) continue;
-        const ok = runCase(gpa, io, init.environ_map, kiwa, i, case.run) catch |e| blk: {
+        const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, i, case.run) catch |e| blk: {
             std.debug.print("    error: {t}\n", .{e});
             break :blk false;
         };
@@ -2771,7 +2802,7 @@ pub fn main(init: std.process.Init) !u8 {
     return if (failed == 0) 0 else 1;
 }
 
-fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
+fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
     const dir = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ linux.getpid(), index }, 0);
     defer gpa.free(dir);
     try std.Io.Dir.cwd().createDirPath(io, dir);
@@ -2807,6 +2838,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
         .gpa = gpa,
         .io = io,
         .kiwa = kiwa,
+        .skewed = skewed,
         .dir = dir,
         .dir_z = dir,
         .socket = socket,
