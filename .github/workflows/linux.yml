@@ -1,0 +1,59 @@
+name: Linux builds
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.platform.target }} / ${{ matrix.optimize }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseFast]
+        platform:
+          - runner: ubuntu-24.04
+            target: x86_64-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - name: Install end-to-end test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends git python3 less vim htop fzf ncurses-bin ncurses-term
+      - name: Check formatting
+        run: mise exec -- zig fmt --check build.zig build.zig.zon src tests
+      - name: Build and run unit and end-to-end tests
+        run: >-
+          mise exec -- zig build test e2e
+          -Dtarget=${{ matrix.platform.target }}
+          -Dcpu=baseline -Doptimize=${{ matrix.optimize }}
+      - name: Build release binary
+        if: matrix.optimize == 'ReleaseFast'
+        run: >-
+          mise exec -- zig build
+          -Dtarget=${{ matrix.platform.target }}
+          -Dcpu=baseline -Doptimize=ReleaseFast
+      - name: Package release binary
+        if: matrix.optimize == 'ReleaseFast'
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: |
+          zig-out/bin/kiwa --version
+          mkdir -p dist
+          tar -czf "dist/kiwa-$TARGET.tar.gz" -C zig-out/bin kiwa
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.optimize == 'ReleaseFast'
+        with:
+          name: kiwa-${{ matrix.platform.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

@@ -164,14 +164,6 @@ const Ctx = struct {
         return error.NoSuchCounter;
     }
 
-    fn serverLogHas(ctx: *Ctx, needle: []const u8) !bool {
-        const log = try std.fmt.allocPrint(ctx.gpa, "{s}/state/server.log", .{ctx.dir});
-        defer ctx.gpa.free(log);
-        const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, log, ctx.gpa, .limited(16 * 1024 * 1024));
-        defer ctx.gpa.free(text);
-        return std.mem.indexOf(u8, text, needle) != null;
-    }
-
     fn socketExists(ctx: *Ctx) bool {
         _ = std.Io.Dir.cwd().statFile(ctx.io, ctx.socket, .{}) catch return false;
         return true;
@@ -648,8 +640,9 @@ fn probeRepliesStayOutOfPanes(ctx: *Ctx) !void {
     try b.send("x\r");
     try b.waitLine("x");
     try expect(!try b.contains("[?"), "no probe reply reached the pane");
-    try expect(try ctx.serverLogHas("keyboard: legacy, left and right margins: false"), "the server learned that the first terminal lacks margins");
-    try expect(try ctx.serverLogHas("keyboard: kitty, left and right margins: true"), "the server learned that the second terminal has margins");
+    try expect(try ctx.counter("outer_probes") == 2, "both terminal probes completed");
+    try expect(try ctx.counter("kitty_probes") == 1, "only the second terminal supports kitty keys");
+    try expect(try ctx.counter("margin_probes") == 1, "only the second terminal supports margins");
     try b.press(char('c', ctrl));
     try b.waitLine("$");
 }
@@ -1115,7 +1108,7 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     // Not reading stalls the client. How long the producer takes to fill
     // the buffer depends on the machine's load, so wait for the overflow.
     const deadline = now() + 60 * std.time.ns_per_s;
-    while (!try ctx.serverLogHas("overflow")) {
+    while (try ctx.counter("outer_overflows") == 0) {
         if (now() > deadline) return error.NoOverflow;
         sleepMs(100);
     }
@@ -1405,7 +1398,15 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try o.waitLine("$");
     try cdTwo(o);
     try prefixed(o, "N");
+    // Finish each shell's startup output before hiding the workspace.
+    // Otherwise a late prompt legitimately marks it as having activity.
+    try o.send("echo workspace$((20+1))\r");
+    try o.waitLine("workspace21");
+    try o.waitLine("$");
     try prefixed(o, "c");
+    try o.send("echo tab$((20+2))\r");
+    try o.waitLine("tab22");
+    try o.waitLine("$");
     var want: std.ArrayList(u8) = .empty;
     defer want.deinit(ctx.gpa);
     try want.print(ctx.gpa, "1: {s}\n  1: sh, 3 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});

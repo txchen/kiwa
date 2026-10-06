@@ -189,6 +189,13 @@ const Stats = struct {
     name_checks: u64 = 0,
     /// Clipboard writes from panes forwarded to the outer terminal.
     clipboard_writes: u64 = 0,
+    /// Completed outer-terminal capability probes, including legacy terminals.
+    outer_probes: u64 = 0,
+    /// Completed probes that reported kitty keyboard or margin support.
+    kitty_probes: u64 = 0,
+    margin_probes: u64 = 0,
+    /// Frame buffers that overflowed and required a full redraw.
+    outer_overflows: u64 = 0,
 };
 
 const Server = struct {
@@ -1103,6 +1110,9 @@ const Server = struct {
             },
             .device_attributes => {
                 c.probing = false;
+                s.stats.outer_probes += 1;
+                if (c.keyboard == .kitty) s.stats.kitty_probes += 1;
+                if (c.lr_margins) s.stats.margin_probes += 1;
                 std.log.info("outer terminal keyboard: {t}, left and right margins: {}", .{ c.keyboard, c.lr_margins });
             },
         }
@@ -1228,6 +1238,7 @@ const Server = struct {
         }
         c.out.push(s.gpa, s.scratch.items) catch |e| switch (e) {
             error.Overflow => {
+                s.stats.outer_overflows += 1;
                 std.log.info("outer terminal buffer overflowed; redrawing after it drains", .{});
                 // The rows stay dirty until the redraw reaches `last_frame`.
                 c.redraw_pending = true;

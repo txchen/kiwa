@@ -11,7 +11,7 @@ Zig is pinned in `mise.toml`. Run every command through mise:
 
 ```sh
 mise exec -- zig build                          # Debug build, zig-out/bin/kiwa
-mise exec -- zig build -Doptimize=ReleaseSmall  # static, stripped release binary
+mise exec -- zig build -Doptimize=ReleaseFast   # optimized, stripped release binary
 ```
 
 The default target is static `x86_64-linux-musl`. A cold build takes about
@@ -19,12 +19,87 @@ The default target is static `x86_64-linux-musl`. A cold build takes about
 `--watch` or `-fincremental`; Zig 0.16 incremental compilation crashes on
 this project.
 
+## CI and binary releases
+
+GitHub Actions runs formatting checks, unit tests, and PTY end-to-end tests
+in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners.
+Each successful ReleaseFast job uploads a downloadable archive. The same
+workflow builds and tests release artifacts, so release tests use the same
+CPU target and optimization mode as the shipped binary. Zig is installed
+from `mise.toml`; Ghostty remains pinned by `build.zig.zon`.
+
+To publish a release:
+
+1. Set `.version` in `build.zig.zon` (for example, `0.1.0`), commit the
+   change and workflows, and push them to `master`.
+2. Tag that commit with the matching version and push the tag over HTTPS:
+
+   ```sh
+   gh auth setup-git
+   git push https://github.com/txchen/kiwa.git master
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push https://github.com/txchen/kiwa.git v0.1.0
+   ```
+
+3. The Release workflow rejects a tag that differs from the package
+   version, runs all CI checks, and publishes a GitHub Release containing
+   `kiwa-x86_64-linux-musl.tar.gz`, `kiwa-aarch64-linux-musl.tar.gz`, and
+   `SHA256SUMS`. Tags containing a hyphen are marked as prereleases.
+   Publishing requires both architectures and both test modes to pass.
+
+Download the archive for your architecture and `SHA256SUMS` from the same
+release. Verify it with `sha256sum --ignore-missing -c SHA256SUMS`, then
+extract the archive and install `kiwa` on your PATH. Linux binaries link
+musl statically and do not depend on the target machine's glibc version.
+
+Reproduce the release builds locally:
+
+```sh
+mise exec -- zig build -Dtarget=x86_64-linux-musl -Dcpu=baseline -Doptimize=ReleaseFast
+mise exec -- zig build -Dtarget=aarch64-linux-musl -Dcpu=baseline -Doptimize=ReleaseFast
+```
+
+[ReleaseFast](https://ziglang.org/documentation/0.16.0/#ReleaseFast) optimizes
+both Kiwa and Ghostty for speed and disables runtime safety checks. Debug CI retains those checks. ReleaseSmall optimizes for
+size instead and is not used for published binaries. Release CPU targets
+are explicitly `baseline`, avoiding accidental dependence on the CI
+runner's CPU instructions. A local build for one known machine can use
+`-Dcpu=native`; do not distribute that binary as a generic architecture
+release. No compiler mode guarantees the fastest result on every CPU.
+Measure changes with `bench-check` on consistent, dedicated hardware
+before tagging; shared GitHub runners are too noisy for reliable CPU
+performance gates. The benchmark is Linux-only and requires Python 3 and
+tmux.
+
+### macOS ARM64 support
+
+Kiwa currently supports Linux only. Adding `aarch64-macos` to a build matrix
+is insufficient: the client, server, process inspection, file watching,
+and test harness currently use Linux APIs directly. A macOS port needs
+platform implementations for epoll/signalfd/timerfd (using kqueue and
+appropriate signal/timer handling), inotify, pidfds, peer credentials,
+PTY/termios handling, and `/proc` process/executable paths. Preserve the
+existing event-driven behavior while making those changes.
+
+After the port passes the unit and PTY end-to-end tests, add a native
+[`macos-15` ARM64 job](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+targeting `aarch64-macos`, with an explicit minimum
+macOS version and CPU baseline, to the shared build workflow. Extend the
+release job's required archive list as well. Test the chosen minimum OS
+separately; a successful build on macOS 15 does not establish support for
+older versions. macOS binaries use the system libraries rather than a
+fully static musl executable. Signing and notarization can then be added
+with an Apple Developer identity if required for distribution.
+
 ## Test
 
 ```sh
 mise exec -- zig build test   # unit tests for the pure modules
 mise exec -- zig build e2e    # end-to-end tests against the built kiwa binary
 ```
+
+The end-to-end tests require git, Python 3, less, Vim, htop, fzf, and ncurses
+utilities/terminfo (CI installs these explicitly).
 
 The end-to-end harness runs each client under a PTY it owns and models the
 outer terminal with ghostty-vt. Every test sets a private `KIWA_SOCKET` and
