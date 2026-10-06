@@ -1,6 +1,6 @@
 # 01 Run Kiwa on macOS
 
-Status: needs verification on a Mac
+Status: needs verification on a Mac (CI on macos-15 passes)
 
 ## Why
 
@@ -51,3 +51,10 @@ Linux syscalls, so it cannot work. The compiler does not catch this, because
   e2e cases, in Debug and ReleaseFast). `zig build check
   -Dtarget=aarch64-macos.13.0` compiles and links every macOS artifact, and
   `tools/check-os-layer.sh` is clean. No macOS binary has run yet.
+- macOS CI (`macos-15`, run 37534300217) passes the unit tests and all 67
+  functional e2e cases in Debug and ReleaseFast. The first runs found an
+  alt chord dropped by ghostty's macOS option-key default, macOS's
+  `FWASWRITTEN` in `F_GETFL`, a hang when closing a PTY slave with unread
+  output, `/bin/sh` running as `bash`, and a fork-to-chdir race in a new
+  pane's directory (on Linux too). All are fixed. The perf cases moved to
+  `zig build e2e-perf`, which has not run on a Mac.

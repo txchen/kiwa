@@ -94,12 +94,9 @@ behave, because Zig compiles `std.os.linux` calls for macOS too.
 `tools/check-os-layer.sh` fails when Zig code outside the per-OS files
 names Linux syscalls or a macOS-only API.
 
-Not yet verified on a Mac: every macOS code path. That covers the kqueue
-event loop, signals, and timer; the Git `HEAD` watch; `kill-server`'s wait
-for the server's exit; reopening the passed terminal by its `ttyname_r`
-name; peer credentials; libproc process inspection; and the end-to-end
-harness's macOS process listing. CI runs the tests natively on a
-`macos-15` runner. A pass there does not show that macOS 13 or 14 works.
+CI runs the unit tests and the functional end-to-end tests natively on a
+`macos-15` runner, in Debug and ReleaseFast. A pass there does not show
+that macOS 13 or 14 works, and `zig build e2e-perf` has not run on a Mac.
 
 ## Test
 
