@@ -41,7 +41,6 @@ pub fn build(b: *std.Build) void {
     const mod = kiwaModule(b, target, optimize, vt, options);
     const exe = b.addExecutable(.{ .name = "kiwa", .root_module = mod });
     b.installArtifact(exe);
-    // Plays a Kiwa of the next protocol version in the e2e step.
     const skewed_options = kiwaOptions(b, 1);
     const skewed_exe = b.addExecutable(.{
         .name = "kiwa-skewed",

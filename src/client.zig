@@ -21,12 +21,11 @@ const leave_seq = "\x1b[?2026l\x1b[0m\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[
 
 const Outcome = struct {
     message: []const u8,
-    /// A line after the message that says what to do about it.
     hint: ?[]const u8 = null,
     code: u8,
 
-    /// Why the server let go of the terminal. A server of another protocol
-    /// version refuses the hello; an older one says so without the versions.
+    /// Matches the prefix: an older server sends the mismatch reason
+    /// without the versions.
     fn detached(reason: []const u8) Outcome {
         if (std.mem.startsWith(u8, reason, protocol.version_mismatch)) {
             return .{ .message = reason, .hint = restart_hint, .code = 1 };
@@ -235,9 +234,8 @@ fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, path
     if (try sys.read(pipe[0], &byte) != 1) return error.ServerFailedToStart;
 }
 
-/// Stops the server with `SIGTERM`, which saves the session, and waits for
-/// it to exit. No message crosses the socket, so this stops a server of any
-/// protocol version.
+/// Signals instead of sending a message, so that this stops a server of any
+/// protocol version. The server saves the session on `SIGTERM`.
 pub fn killServer(paths: paths_mod.Paths) !u8 {
     const sock = try connectServer(paths) orelse return 1;
     const peer = peer: {

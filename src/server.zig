@@ -1410,9 +1410,9 @@ const Server = struct {
     /// Tells the attached client why the server is going away, waiting at
     /// most a second for it to read the message.
     fn shutdown(s: *Server, e: Exit) void {
-        // Before the socket goes, so that a server started once it is gone
-        // reads this save, and before the hangup, while every child's
-        // directory can still be read.
+        // Before the socket goes, so that the next server reads this save,
+        // and before the hangup, while every child's directory can still be
+        // read.
         s.save();
         if (s.restore) |*r| r.arena.deinit();
         if (s.state) |dir| dir.close(s.io);

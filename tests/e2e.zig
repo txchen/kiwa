@@ -6,7 +6,6 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const sys = @import("kiwa_sys");
 const protocol = @import("kiwa_protocol");
-/// The second build of `kiwa`, which speaks another protocol version.
 const skewed_version = protocol.version + @import("skewed_build_options").protocol_skew;
 
 const linux = std.os.linux;
@@ -764,7 +763,6 @@ fn killServerGivesUpOnAServerThatStays(ctx: *Ctx) !void {
     defer sys.close(ready[0]);
     const pid = sys.fork();
     if (pid == 0) {
-        // Not Kiwa: it speaks no protocol and survives SIGTERM.
         const term = sys.sigset(&.{.TERM});
         _ = linux.sigprocmask(linux.SIG.BLOCK, &term, null);
         const fd = sys.unixSocket(false) catch sys._exit(1);

@@ -9,12 +9,9 @@
 
 const std = @import("std");
 
-/// Bump on any change to the encoding, and set `encoding_hash` to match.
-/// The skew is 0 except in the e2e step's second build, which plays a Kiwa
-/// of another version.
+/// `protocol_skew` is nonzero only in the e2e step's skewed build.
 pub const version: u16 = 3 + @import("build_options").protocol_skew;
-/// Wyhash of the test sample encoded, as `version` encodes it. The test
-/// "the encoding matches the protocol version" fails when they differ.
+/// Wyhash of `sample`'s encoding.
 const encoding_hash: u64 = 0x146e0354abd18a15;
 
 /// A frame larger than this is a protocol error, not a big message.
@@ -182,8 +179,8 @@ fn expectMessage(expected: Message, actual: Message) !void {
     }
 }
 
-/// Every message type, with fixed values. Its encoding is what
-/// `encoding_hash` pins.
+/// The hello carries a literal version, not `version`, so that the hash
+/// pins the encoding alone.
 const sample = [_]Message{
     .{ .hello = .{ .version = 0x0102, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/home/u/src" } },
     .{ .resize = .{ .cols = 90, .rows = 30 } },
