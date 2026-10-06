@@ -1,6 +1,6 @@
 # 16 Clear version skew between a new client and an old server
 
-Status: claimed
+Status: resolved
 Blocked by: 15
 
 ## Why
@@ -48,3 +48,16 @@ restarting onto new code must be one obvious, reliable step.
 - Unit test: changing any message encoding without bumping the version fails
   the guard (demonstrate once, do not commit the change).
 - All existing tests pass; `zig fmt --check` is clean.
+
+## Comments
+
+- 2026-10-06 (review): Resolved by 63d320c..4ab236b. Protocol version is
+  now 3. Review rerun: `zig build test` 170/170, `zig fmt --check` clean,
+  `zig build e2e` 71/72 then 72/72. The one failure was "a stalled client
+  recovers after its buffer overflows" while an unrelated `yt-dlp` used a
+  full core (load 1.9); it then passed 5 of 5 alone. This is the load flake
+  from ticket 12 (2 of 5 failures under 8 busy loops), not ticket 16.
+- Open gaps: a v2 `kill-server` against a v3 server exits 0 without
+  stopping it; `kiwa ls` and `__stats` are not part of the frozen handshake;
+  a pid reused between `SO_PEERCRED` and `pidfd_open` could receive the
+  signal (use `SO_PEERPIDFD`, Linux 6.5+, to close it).
