@@ -1,6 +1,6 @@
 # 14 Scrolling output CPU
 
-Status: claimed
+Status: resolved
 Blocked by: 13
 
 ## Why
@@ -141,3 +141,10 @@ parity, with the spinner and idle results not regressing.
   (15%) could go for the narrow candidate by trusting the frame's dirty
   set as "differs from the old frame with the scroll applied", a
   contract the server would have to keep for every writer.
+
+- 2026-10-06 (review): Resolved by 47ca3f7..da7f08c. Review rerun:
+  `zig build test` 162/162, `zig build e2e` 68/68 twice, `zig fmt --check`
+  clean. My bench rerun (load 0.4 to 0.16): spinner Kiwa 0.33 to 0.42% vs
+  tmux 0.58%; 30 lines/s Kiwa 0.50% with and without margins vs tmux
+  0.42%, which is within one 10 ms tick per 12 s sample; bytes unchanged
+  (2.0, 146.5, 229.3 per frame).
