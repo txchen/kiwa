@@ -1,6 +1,6 @@
 # 13 Per-frame CPU: diff and copy only changed rows
 
-Status: claimed
+Status: resolved
 Blocked by: 12
 
 ## Why
@@ -136,3 +136,9 @@ rows, and copy only those rows into `last_frame`.
   over 24-byte cells; reading ghostty's page-row dirty flags before
   `update` to move kept rows in the frame instead of recomposing them; a
   faster memcpy for the static build.
+- 2026-10-06 (review): Resolved by d0b350e..d31894e. Review rerun:
+  `zig build test` 157/157, `zig build e2e` 68/68 twice, `zig fmt --check`
+  clean. My bench rerun (load 0.5 to 0.25) matched: spinner Kiwa 0.42%
+  (0.33 to 0.50) vs tmux 0.58%; 30 lines/s 1.00% with and without margins
+  vs tmux 0.42%; bytes per frame unchanged (2.0, 146.5, 229.3). The
+  remaining 30 lines/s gap moves to ticket 14.
