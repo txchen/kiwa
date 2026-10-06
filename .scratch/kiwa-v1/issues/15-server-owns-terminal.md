@@ -1,6 +1,6 @@
 # 15 The server writes to and reads from the outer terminal directly
 
-Status: claimed
+Status: resolved
 Blocked by: 14
 
 ## Why
@@ -127,3 +127,7 @@ whose client uses 0.
   after `su` should be such a case (inferred, not tested). The client
   still sets raw mode on stdin and writes the outer modes to stdout, as
   before; if those are different terminals, the frames now go to stdin's.
+- 2026-10-06 (review): Resolved by e5e2e6a..4318cbf, rebased onto the gate
+  commits. Review rerun: `zig build test` 165/165, `zig build e2e` 70/70
+  twice, `zig fmt --check` clean. `bench-check` passed every gate with the
+  client at 0.000% CPU in every attached scenario.

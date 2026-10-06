@@ -1,6 +1,6 @@
 # 11 v1 benchmark and review
 
-Status: claimed
+Status: resolved
 Blocked by: 07, 08, 09, 10, 12
 
 ## Scope
@@ -202,3 +202,11 @@ Blocked by: 07, 08, 09, 10, 12
   `bench-check --only idle` run passed with "worst run 0.000% CPU and 0
   context switches". Remaining for this ticket: the design-draft update
   after ticket 15 lands.
+- 2026-10-06 (close): After ticket 15, `zig build bench-check
+  -Doptimize=ReleaseFast` (3 runs, load 1.2 to 2.6, codex and SeaweedFS
+  running) passed all gates: idle worst run 0 CPU and 0 context switches;
+  spinner Kiwa 0.349% vs tmux 0.711%; hidden output 1.111% vs 3.379%
+  attached and 0.903% vs 2.850% detached; scrolling 0.465% (margins) and
+  0.461% (no margins) vs tmux 0.618%; server RSS 3.6 to 10.2 MiB. The design
+  draft and status in the planning workspace are updated (not committed
+  there).
