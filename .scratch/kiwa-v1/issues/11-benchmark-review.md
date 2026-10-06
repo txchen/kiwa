@@ -130,3 +130,7 @@ Blocked by: 07, 08, 09, 10, 12
 
   Not done here: the numeric CPU budgets need the user, and the design
   draft is not updated yet.
+- 2026-10-06 (review): Spot check `--runs 1 --only hidden` (load 0.26)
+  reproduced the hidden-producer rows: Kiwa 0.865% attached and 0.900%
+  detached, tmux 3.053% and 2.673%. Remaining for this ticket: agree the CPU
+  budgets with the user and update the design draft.
