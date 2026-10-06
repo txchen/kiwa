@@ -226,24 +226,40 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
 
 /// The bytes that `moved`'s scroll, if any, and repainting `r`'s rows of
 /// `moved` into `new` cost, from an unknown cursor position. Counting
-/// stops once it passes `limit`. Sets in `equal` the band's rows that
-/// cost nothing, which are the rows with no changed cell.
+/// stops once it passes `limit`, returning some larger number. Sets in
+/// `equal` the band's rows that cost nothing, which are the rows with no
+/// changed cell.
 fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Graphemes, r: Rect, limit: u64, equal: *RowSet) u64 {
     var buf: [256]u8 = undefined;
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
     if (moved.scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
+    // Most candidates lose by a wide margin, which a cheap floor settles
+    // without writing a single row.
     equal.setRangeValue(.{ .start = r.y, .end = r.y + r.rows }, false);
+    var floor = d.fullCount();
     for (r.y..r.y + r.rows) |y| {
         const want = new.row(y);
-        if (moved.rowEquals(y, want)) {
-            equal.set(y);
-            continue;
-        }
-        o.row(moved.row(y), want, @intCast(y)) catch unreachable;
+        if (moved.rowEquals(y, want)) equal.set(y) else floor += rowFloor(moved.row(y), want);
+        if (floor > limit) return floor;
+    }
+    for (r.y..r.y + r.rows) |y| {
+        if (equal.isSet(y)) continue;
+        o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
         if (d.fullCount() > limit) break;
     }
     return d.fullCount();
+}
+
+/// A lower bound on the bytes `Out.row` writes to turn `old` into `new`:
+/// every changed character that is not a default blank is written, and
+/// its encoding is at least one byte. Only blank tails may be erased.
+fn rowFloor(old: []const Cell, new: []const Cell) u64 {
+    var n: u64 = 0;
+    for (old, new) |a, b| {
+        if (!a.eql(b) and b.width != .tail and !b.isDefaultBlank()) n += 1;
+    }
+    return n;
 }
 
 /// Writes `scrolls`, then what turns `moved`, the old frame with `scrolls`
@@ -872,6 +888,35 @@ test "random frame pairs round-trip through a ghostty-vt outer terminal" {
             std.debug.print("iteration {d}, {d}x{d}\n", .{ i, cols, rows });
             return e;
         };
+    }
+}
+
+test "a row's floor never exceeds the bytes its repaint writes" {
+    var prng: Rng.DefaultPrng = .init(0x666c6f6f);
+    const r = prng.random();
+    var g: Graphemes = .{};
+    defer g.deinit(alloc);
+    var old: Frame = .{};
+    defer old.deinit(alloc);
+    var new: Frame = .{};
+    defer new.deinit(alloc);
+    for (0..3000) |_| {
+        const cols = 1 + r.uintLessThan(u16, 20);
+        try old.resize(alloc, cols, 1);
+        try new.resize(alloc, cols, 1);
+        try fillRandom(r, &g, &old);
+        if (r.boolean()) new.copyFrom(&old) else try fillRandom(r, &g, &new);
+        try editRandom(r, &g, &new, r.uintLessThan(usize, 4));
+        var buf: [256]u8 = undefined;
+        var d: Writer.Discarding = .init(&buf);
+        // The pen and position that make a repaint cheapest.
+        var o: Out = .{ .w = &d.writer, .g = &g, .cols = cols, .pos = .{ .x = 0, .y = 0 }, .sync = false };
+        try o.row(old.row(0), new.row(0), 0);
+        const floor = rowFloor(old.row(0), new.row(0));
+        if (floor > d.fullCount()) {
+            std.debug.print("floor {d} > {d} bytes for\n{any}\n{any}\n", .{ floor, d.fullCount(), old.row(0), new.row(0) });
+            return error.TestUnexpectedResult;
+        }
     }
 }
 
