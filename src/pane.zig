@@ -45,6 +45,11 @@ pub const Pane = struct {
     /// that was never viewed, such as its new shell's first prompt, does
     /// not mark its workspace.
     shown: bool = false,
+    /// The directory the child was started in, and whether the child has
+    /// written to the PTY yet. Until it has, it may still be between
+    /// `fork` and its `chdir`, where it is in the server's directory.
+    start_dir: []u8,
+    wrote: bool = false,
     /// The OSC 52 sequence for the program's last clipboard write, waiting
     /// to go to the outer terminal; empty when there is none.
     clipboard: std.ArrayList(u8) = .empty,
@@ -72,8 +77,11 @@ pub const Pane = struct {
                 .max_scrollback_lines = scrollback_lines,
             }),
             .stream = undefined,
+            .start_dir = &.{},
         };
         errdefer p.terminal.deinit(gpa);
+        p.start_dir = try gpa.dupe(u8, opts.cwd);
+        errdefer gpa.free(p.start_dir);
 
         var handler: Handler = .init(&p.terminal);
         handler.effects.write_pty = &writePty;
@@ -111,6 +119,7 @@ pub const Pane = struct {
         self.drawn_rows.deinit(self.gpa);
         self.stream.deinit();
         self.terminal.deinit(self.gpa);
+        self.gpa.free(self.start_dir);
         self.gpa.destroy(self);
     }
 
@@ -126,6 +135,7 @@ pub const Pane = struct {
             self.stream.nextSlice(buf[0..n]);
             total += n;
         } else false;
+        if (total > 0) self.wrote = true;
         defer {
             self.rang = false;
             self.moved = false;
@@ -137,6 +147,7 @@ pub const Pane = struct {
     /// child's current directory, read once now. Null when neither is known.
     pub fn cwd(self: *const Pane, buf: *[sys.PATH_MAX]u8) ?[]const u8 {
         if (self.terminal.getPwd()) |url| if (pwdPath(url, buf)) |path| return path;
+        if (!self.wrote) return self.start_dir;
         return sys.processCwd(self.pid, buf);
     }
 
