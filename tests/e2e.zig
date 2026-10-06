@@ -1847,6 +1847,8 @@ fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
     try o.waitKitty();
     try prefixed(o, "N");
     try waitHighlighted(o, 2);
+    // The new shell's late prompt would otherwise mark the hidden workspace.
+    try o.waitLine("$");
     try prefixed(o, "!");
     try waitHighlighted(o, 1);
     const name = caseName(ctx);
@@ -1959,6 +1961,8 @@ fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
     const name = caseName(ctx);
     try o.click(2, 23);
     try waitHighlighted(o, 2);
+    // The new shell's late prompt would otherwise mark the hidden workspace.
+    try o.waitLine("$");
     try listWith(ctx, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sh, 1 pane (active)\n", .{ name, name });
     try o.click(10, 1);
     try waitHighlighted(o, 1);
