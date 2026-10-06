@@ -21,6 +21,7 @@ const replacement = "\u{fffd}";
 /// Writes what turns an outer terminal showing `old` into `new`. Identical
 /// frames write nothing. Assumes the outer cursor is at `old.cursor` with
 /// the default pen, which is where every diff and full redraw leaves it.
+/// Only `new`'s dirty rows are compared; the others are taken as equal.
 pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
     return emit(old, new, g, w, &.{}, .{ .x = old.cursor.x, .y = old.cursor.y });
 }
@@ -45,12 +46,12 @@ pub const Scroll = struct {
         const keep = r.rows - n;
         for (0..keep) |i| {
             const to, const from = if (s.n > 0) .{ i, i + n } else .{ r.rows - 1 - i, r.rows - 1 - i - n };
-            @memcpy(f.row(r.y + to)[r.x..][0..r.cols], f.row(r.y + from)[r.x..][0..r.cols]);
+            @memcpy(f.rowMut(r.y + to)[r.x..][0..r.cols], f.row(r.y + from)[r.x..][0..r.cols]);
         }
         const blank_from = if (s.n > 0) keep else 0;
-        for (r.y + blank_from..r.y + blank_from + n) |y| @memset(f.row(y)[r.x..][0..r.cols], .blank);
+        for (r.y + blank_from..r.y + blank_from + n) |y| @memset(f.rowMut(y)[r.x..][0..r.cols], .blank);
         for (r.y..r.y + r.rows) |y| {
-            const cells = f.row(y);
+            const cells = f.rowMut(y);
             if (cut_left) @memset(cells[r.x - 1 ..][0..2], unknown);
             if (cut_right) @memset(cells[r.x + r.cols - 1 ..][0..2], unknown);
         }
@@ -97,6 +98,12 @@ pub const Scratch = struct {
         sc.trial.deinit(gpa);
         sc.chosen.deinit(gpa);
     }
+
+    fn ensureSize(sc: *Scratch, gpa: std.mem.Allocator, cols: u16, rows: u16) !void {
+        for ([_]*Frame{ &sc.base, &sc.trial }) |f| {
+            if (f.cols != cols or f.rows != rows) try f.resize(gpa, cols, rows);
+        }
+    }
 };
 
 pub const DiffError = Writer.Error || std.mem.Allocator.Error;
@@ -105,12 +112,16 @@ pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 /// where that writes fewer bytes. Each scroll can move the whole width of
 /// its rows or, when the outer terminal supports left and right margins
 /// (`lr_margins`), only its rect. The cell diff that follows repaints
-/// whatever else moved.
-pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
+/// whatever else moved, so the rows of every scroll are marked dirty in
+/// `new`.
+pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, new: *Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
     if (scrolls.len == 0) return diff(old, new, g, w);
-    try sc.base.resize(gpa, old.cols, old.rows);
-    try sc.trial.resize(gpa, old.cols, old.rows);
-    sc.base.copyFrom(old);
+    for (scrolls) |s| new.markRows(s.rect.y, s.rect.rows);
+    try sc.ensureSize(gpa, old.cols, old.rows);
+    // Only the rows the diff visits are read from `base`.
+    var it = new.dirtyRows();
+    while (it.next()) |y| @memcpy(sc.base.rowMut(y), old.row(y));
+    sc.base.cursor = old.cursor;
     sc.chosen.clearRetainingCapacity();
     try sc.chosen.ensureTotalCapacity(gpa, scrolls.len);
     for (scrolls) |s| {
@@ -118,8 +129,6 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
         const rows: Scroll = .{ .rect = .{ .y = r.y, .cols = old.cols, .rows = r.rows }, .n = s.n };
         const candidates: [2]Scroll = .{ rows, s };
         const count: usize = if (lr_margins and r.cols >= 2 and !std.meta.eql(r, rows.rect)) 2 else 1;
-        // A scroll changes only its rows, so only they are compared.
-        const band = sc.base.cells[@as(usize, r.y) * old.cols ..][0 .. @as(usize, r.rows) * old.cols];
         // The narrowest candidate goes first: it usually costs least, and
         // each later count stops once it costs more.
         var best: ?Scroll = null;
@@ -128,7 +137,8 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
         while (i > 0) {
             i -= 1;
             const c = candidates[i];
-            @memcpy(sc.trial.cells[@as(usize, r.y) * old.cols ..][0..band.len], band);
+            // A scroll changes only its rows, so only they are compared.
+            for (r.y..r.y + r.rows) |y| @memcpy(sc.trial.rowMut(y), sc.base.row(y));
             c.apply(&sc.trial);
             const bytes = bandBytes(&sc.trial, new, g, r, c, best_bytes);
             if (bytes < best_bytes) {
@@ -173,15 +183,17 @@ fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer,
         // Setting and resetting the margins homes the cursor.
         o.pos = null;
     }
-    for (0..new.rows) |y| try o.row(moved.row(y), new.row(y), @intCast(y));
+    var it = new.dirtyRows();
+    while (it.next()) |y| try o.row(moved.row(y), new.row(y), @intCast(y));
     try o.cursor(moved.cursor, new.cursor);
     try o.finish();
 }
 
-/// The number of rows that differ, counting no further than 2.
+/// The number of dirty rows that differ, counting no further than 2.
 fn changedRows(old: *const Frame, new: *const Frame) usize {
     var n: usize = 0;
-    for (0..new.rows) |y| {
+    var it = new.dirtyRows();
+    while (it.next()) |y| {
         for (old.row(y), new.row(y)) |a, b| if (!a.eql(b)) {
             n += 1;
             if (n == 2) return n;
@@ -410,8 +422,8 @@ const Fixture = struct {
 
     fn both(f: *Fixture, x: usize, y: usize, text: []const u8) void {
         for (text, 0..) |ch, i| {
-            f.old.row(y)[x + i] = .{ .cp = ch };
-            f.new.row(y)[x + i] = .{ .cp = ch };
+            f.old.rowMut(y)[x + i] = .{ .cp = ch };
+            f.new.rowMut(y)[x + i] = .{ .cp = ch };
         }
     }
 
@@ -496,11 +508,25 @@ test "an identical frame emits nothing" {
     defer f.deinit();
     try f.init(10, 3);
     f.both(0, 0, "hello");
-    f.old.row(1)[2] = .{ .cp = 'x', .style = .{ .fg_color = .{ .palette = 3 } } };
-    f.new.row(1)[2] = f.old.row(1)[2];
+    f.old.rowMut(1)[2] = .{ .cp = 'x', .style = .{ .fg_color = .{ .palette = 3 } } };
+    f.new.rowMut(1)[2] = f.old.row(1)[2];
     f.old.cursor = .{ .x = 5, .y = 0, .shape = .steady_bar, .visible = false };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("", try f.diffBytes());
+}
+
+test "rows that are not dirty are not visited" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(10, 3);
+    f.both(0, 0, "hello");
+    f.new.clearDirty();
+    // A write past `rowMut` is the stale row the dirty set exists to rule
+    // out. The differ does not see it, so it read no row at all.
+    f.new.cells[1] = .{ .cp = 'X' };
+    try testing.expectEqualStrings("", try f.diffBytes());
+    _ = f.new.rowMut(0);
+    try testing.expectEqualStrings("\x1b[2GX\r", try f.diffBytes());
 }
 
 test "a one-cell change emits one cursor move and that cell" {
@@ -508,7 +534,7 @@ test "a one-cell change emits one cursor move and that cell" {
     defer f.deinit();
     try f.init(10, 3);
     f.both(0, 1, "abcd");
-    f.new.row(1)[2] = .{ .cp = 'x' };
+    f.new.rowMut(1)[2] = .{ .cp = 'x' };
     f.old.cursor = .{ .x = 3, .y = 1 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x08x", try f.diffBytes());
@@ -520,7 +546,7 @@ test "a style-only change sets the pen, writes the cell, and resets the pen" {
     defer f.deinit();
     try f.init(10, 3);
     f.both(0, 0, "abc");
-    f.new.row(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .{ .palette = 1 } };
+    f.new.rowMut(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .{ .palette = 1 } };
     f.old.cursor = .{ .x = 2, .y = 0 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x08\x1b[0;1;31mb\x1b[0m", try f.diffBytes());
@@ -532,11 +558,11 @@ test "a wide character replaced by two narrow ones and back rewrites both column
     defer f.deinit();
     try f.init(6, 1);
     f.both(0, 0, "a");
-    f.old.row(0)[1] = .{ .cp = 0x4e2d, .width = .wide };
-    f.old.row(0)[2] = .tail;
+    f.old.rowMut(0)[1] = .{ .cp = 0x4e2d, .width = .wide };
+    f.old.rowMut(0)[2] = .tail;
     f.both(3, 0, "z");
-    f.new.row(0)[1] = .{ .cp = 'x' };
-    f.new.row(0)[2] = .{ .cp = 'y' };
+    f.new.rowMut(0)[1] = .{ .cp = 'x' };
+    f.new.rowMut(0)[2] = .{ .cp = 'y' };
     f.old.cursor = .{ .x = 4 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x08\x08\x08xy\x1b[5G", try f.diffBytes());
@@ -551,16 +577,16 @@ test "changing either half of a wide character rewrites the whole character" {
     var f: Fixture = .create();
     defer f.deinit();
     try f.init(6, 1);
-    f.old.row(0)[2] = .{ .cp = 0x4e2d, .width = .wide };
-    f.old.row(0)[3] = .tail;
-    f.new.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
-    f.new.row(0)[3] = .tail;
+    f.old.rowMut(0)[2] = .{ .cp = 0x4e2d, .width = .wide };
+    f.old.rowMut(0)[3] = .tail;
+    f.new.rowMut(0)[2] = .{ .cp = 0x6587, .width = .wide };
+    f.new.rowMut(0)[3] = .tail;
     try testing.expectEqualStrings("\x1b[3G\u{6587}\r", try f.diffBytes());
     try f.expectRoundTrip();
 
     // An invalid old frame on purpose: only the tail differs.
-    f.old.row(0)[2] = .{ .cp = 0x6587, .width = .wide };
-    f.old.row(0)[3] = .{ .cp = 'q' };
+    f.old.rowMut(0)[2] = .{ .cp = 0x6587, .width = .wide };
+    f.old.rowMut(0)[3] = .{ .cp = 'q' };
     try testing.expectEqualStrings("\x1b[3G\u{6587}\r", try f.diffBytes());
 }
 
@@ -568,15 +594,15 @@ test "a write to the last column is followed by an absolute move" {
     var f: Fixture = .create();
     defer f.deinit();
     try f.init(5, 2);
-    f.new.row(0)[4] = .{ .cp = 'x' };
-    f.new.row(1)[0] = .{ .cp = 'y' };
+    f.new.rowMut(0)[4] = .{ .cp = 'x' };
+    f.new.rowMut(1)[0] = .{ .cp = 'y' };
     f.old.cursor = .{ .x = 1, .y = 1 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x1b[?2026h\x1b[1;5Hx\x1b[2Hy\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
     // The cursor belongs on the cell just written, not at the pending-wrap position.
-    f.new.row(1)[0] = .blank;
+    f.new.rowMut(1)[0] = .blank;
     f.old.cursor = .{ .x = 4, .y = 0 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("x\x1b[1;5H", try f.diffBytes());
@@ -611,12 +637,12 @@ test "a default blank tail is erased, a colored one is written" {
     var f: Fixture = .create();
     defer f.deinit();
     try f.init(20, 1);
-    for ("hello world, again", 0..) |ch, i| f.old.row(0)[i] = .{ .cp = ch };
+    for ("hello world, again", 0..) |ch, i| f.old.rowMut(0)[i] = .{ .cp = ch };
     f.both(0, 0, "hi");
     try testing.expect(std.mem.endsWith(u8, try f.diffBytes(), "\x1b[3G\x1b[K\r"));
     try f.expectRoundTrip();
 
-    for (f.new.row(0)[2..]) |*c| c.style = .{ .bg_color = .{ .palette = 4 } };
+    for (f.new.rowMut(0)[2..]) |*c| c.style = .{ .bg_color = .{ .palette = 4 } };
     try testing.expect(std.mem.indexOf(u8, try f.diffBytes(), "\x1b[K") == null);
     try f.expectRoundTrip();
 }
@@ -626,9 +652,9 @@ test "short unchanged gaps are rewritten instead of jumped" {
     defer f.deinit();
     try f.init(30, 1);
     f.both(0, 0, "abcdefghijklmnopqrstuvwxyz");
-    f.new.row(0)[1].cp = 'B';
-    f.new.row(0)[3].cp = 'D';
-    f.new.row(0)[20].cp = 'U';
+    f.new.rowMut(0)[1].cp = 'B';
+    f.new.rowMut(0)[3].cp = 'D';
+    f.new.rowMut(0)[20].cp = 'U';
     f.old.cursor = .{ .x = 21 };
     f.new.cursor = f.old.cursor;
     try testing.expectEqualStrings("\x1b[2GBcD\x1b[21GU", try f.diffBytes());
@@ -639,7 +665,7 @@ test "a full redraw clears the screen first and sets every cursor property" {
     var f: Fixture = .create();
     defer f.deinit();
     try f.init(10, 2);
-    f.new.row(1)[0] = .{ .cp = 'z' };
+    f.new.rowMut(1)[0] = .{ .cp = 'z' };
     f.new.cursor = .{ .x = 1, .y = 1, .shape = .default, .visible = true };
     f.out.clearRetainingCapacity();
     try full(&f.new, &f.g, &f.out.writer);
@@ -688,14 +714,14 @@ fn randomCell(r: Rng, g: *Graphemes) !Cell {
 }
 
 fn fillRandom(r: Rng, g: *Graphemes, f: *Frame) !void {
-    for (0..f.rows) |y| try writeRandom(r, g, f.row(y), 0, f.cols);
+    for (0..f.rows) |y| try writeRandom(r, g, f.rowMut(y), 0, f.cols);
     f.cursor = randomCursor(r, f);
 }
 
 /// Changes a few random runs, so that the result is a plausible next frame.
 fn editRandom(r: Rng, g: *Graphemes, f: *Frame, edits: usize) !void {
     for (0..edits) |_| {
-        const row = f.row(r.uintLessThan(usize, f.rows));
+        const row = f.rowMut(r.uintLessThan(usize, f.rows));
         try writeRandom(r, g, row, r.uintLessThan(usize, f.cols), 1 + r.uintLessThan(usize, 3));
     }
     f.cursor = randomCursor(r, f);
@@ -766,14 +792,14 @@ test "a pane that scrolled moves with a scroll and repaints only the row that ca
     defer f.deinit();
     try f.init(16, 5);
     for (0..5) |y| {
-        for (0..6) |x| f.old.row(y)[x] = .{ .cp = @intCast('A' + y) };
-        for (0..8) |x| f.old.row(y)[7 + x] = .{ .cp = @intCast('a' + y) };
+        for (0..6) |x| f.old.rowMut(y)[x] = .{ .cp = @intCast('A' + y) };
+        for (0..8) |x| f.old.rowMut(y)[7 + x] = .{ .cp = @intCast('a' + y) };
     }
     f.new.copyFrom(&f.old);
     const pane: Rect = .{ .x = 7, .y = 1, .cols = 8, .rows = 4 };
     const up: Scroll = .{ .rect = pane, .n = 1 };
     up.apply(&f.new);
-    for (0..8) |x| f.new.row(4)[7 + x] = .{ .cp = 'z' };
+    for (0..8) |x| f.new.rowMut(4)[7 + x] = .{ .cp = 'z' };
     f.old.cursor = .{ .x = 7, .y = 4 };
     f.new.cursor = f.old.cursor;
 
@@ -788,15 +814,96 @@ test "a pane that scrolled moves with a scroll and repaints only the row that ca
 
     // Without margins the whole width of the rows scrolls when that pays,
     // and the diff repaints the columns beside the pane.
-    for (0..5) |y| for ([_]*Frame{ &f.old, &f.new }) |fr| @memset(fr.row(y)[0..6], .{ .cp = 'S' });
+    for (0..5) |y| for ([_]*Frame{ &f.old, &f.new }) |fr| @memset(fr.rowMut(y)[0..6], .{ .cp = 'S' });
     try testing.expectEqualStrings("\x1b[?2026h\x1b[2r\x1b[S\x1b[r\x1b[5HSSSSSS zzzzzzzz\x1b[8G\x1b[?2026l", try f.diffBytes());
     try f.expectRoundTrip();
 
     // A scroll that saves nothing is not sent.
     f.new.copyFrom(&f.old);
-    f.new.row(2)[9] = .{ .cp = 'q' };
+    f.new.rowMut(2)[9] = .{ .cp = 'q' };
     try testing.expectEqualStrings("\x1b[3;10Hq\x1b[5;8H", try f.diffBytes());
     try f.expectRoundTrip();
+}
+
+/// Writes `new` a few times the way the server's writers do: random cells,
+/// a box, or a scroll of a rect, each through `rowMut`. Returns the scroll.
+fn writeRandomly(r: Rng, g: *Graphemes, f: *Frame) !?Scroll {
+    var scroll: ?Scroll = null;
+    for (0..1 + r.uintLessThan(usize, 4)) |_| switch (r.uintLessThan(u8, 4)) {
+        0 => {
+            const rect = randomRect(r, f, 1, 1);
+            f.drawBox(rect, randomStyle(r));
+            for (rect.y..rect.y + rect.rows) |y| repair(f.rowMut(y));
+        },
+        1 => if (f.rows >= 2 and f.cols >= 2 and scroll == null) {
+            const rect = randomRect(r, f, 2, 2);
+            const n: i32 = 1 + r.uintLessThan(u16, rect.rows - 1);
+            const s: Scroll = .{ .rect = rect, .n = if (r.boolean()) n else -n };
+            s.apply(f);
+            for (rect.y..rect.y + rect.rows) |y| repair(f.rowMut(y));
+            scroll = s;
+        },
+        else => {
+            const row = f.rowMut(r.uintLessThan(usize, f.rows));
+            try writeRandom(r, g, row, r.uintLessThan(usize, f.cols), 1 + r.uintLessThan(usize, 3));
+        },
+    };
+    f.cursor = randomCursor(r, f);
+    return scroll;
+}
+
+fn randomRect(r: Rng, f: *const Frame, min_cols: u16, min_rows: u16) Rect {
+    const h = min_rows + r.uintLessThan(u16, f.rows - min_rows + 1);
+    const w = min_cols + r.uintLessThan(u16, f.cols - min_cols + 1);
+    return .{ .x = r.uintLessThan(u16, f.cols - w + 1), .y = r.uintLessThan(u16, f.rows - h + 1), .cols = w, .rows = h };
+}
+
+test "random writes diffed by their dirty rows send what a full-frame diff sends" {
+    var prng: Rng.DefaultPrng = .init(0x64697274);
+    const r = prng.random();
+    var f: Fixture = .create();
+    defer f.deinit();
+    var outer: Outer = undefined;
+    try outer.init(2, 1);
+    defer outer.deinit();
+    var scrolls: [1]Scroll = undefined;
+    for (0..2000) |i| {
+        const cols = 2 + r.uintLessThan(u16, 14);
+        const rows = 1 + r.uintLessThan(u16, 6);
+        try f.init(cols, rows);
+        try fillRandom(r, &f.g, &f.old);
+        f.new.copyFrom(&f.old);
+        f.new.clearDirty();
+        const scroll = try writeRandomly(r, &f.g, &f.new);
+        // The server marks only rows the pane reports dirty, which can be
+        // fewer than a scroll moved. Any dirty set that covers the rows
+        // that differ is valid, so sometimes shrink it to just those.
+        if (r.boolean()) {
+            f.new.clearDirty();
+            for (0..rows) |y| {
+                for (f.old.row(y), f.new.row(y)) |a, b| if (!a.eql(b)) {
+                    f.new.markRows(y, 1);
+                    break;
+                };
+            }
+        }
+        f.how = .plain;
+        if (scroll) |s| {
+            scrolls[0] = s;
+            f.how = .{ .choose = .{ .scrolls = &scrolls, .lr_margins = r.boolean() } };
+        }
+        const by_dirty_rows = try alloc.dupe(u8, try f.diffBytes());
+        defer alloc.free(by_dirty_rows);
+        f.expectRoundTripOn(&outer) catch |e| {
+            std.debug.print("iteration {d}, {d}x{d}, {?any}\n", .{ i, cols, rows, scroll });
+            return e;
+        };
+        f.new.markAll();
+        testing.expectEqualStrings(try f.diffBytes(), by_dirty_rows) catch |e| {
+            std.debug.print("iteration {d}, {d}x{d}, {?any}\n", .{ i, cols, rows, scroll });
+            return e;
+        };
+    }
 }
 
 /// Makes a row valid again after a scroll cut wide characters at a margin.
@@ -832,7 +939,7 @@ test "random scrolled frames round-trip through a ghostty-vt outer terminal" {
             const n: i32 = 1 + r.uintLessThan(u16, h - 1);
             sc.* = .{ .rect = .{ .x = x, .y = y, .cols = w, .rows = h }, .n = if (r.boolean()) n else -n };
             sc.apply(&f.new);
-            for (0..rows) |row| repair(f.new.row(row));
+            for (0..rows) |row| repair(f.new.rowMut(row));
         }
         try editRandom(r, &f.g, &f.new, r.uintLessThan(usize, 4));
         const kind = r.uintLessThan(u8, 3);

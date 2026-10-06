@@ -101,7 +101,7 @@ pub fn draw(f: *Frame, v: View) void {
         else => drawCollapsed(f, v),
     }
     if (!g.tab_row) return;
-    const row = f.row(0)[g.sidebar..];
+    const row = f.rowMut(0)[g.sidebar..];
     @memset(row, .blank);
     switch (v.mode) {
         .normal, .help => drawTabs(row, v.tabs),
@@ -235,14 +235,14 @@ fn markerCp(a: Activity) ?u21 {
 fn drawSidebar(f: *Frame, v: View) void {
     const width = sidebar_cols - 1;
     for (0..f.rows) |y| {
-        const row = f.row(y);
+        const row = f.rowMut(y);
         @memset(row[0..width], .blank);
         row[width] = .{ .cp = 0x2502, .style = divider };
     }
     const list: List = .of(f.rows, true);
-    if (list.top == 1) _ = put(f.row(0)[0..width], 0, " workspaces", dim);
+    if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " workspaces", dim);
     if (list.end < f.rows) {
-        const footer = f.row(list.end)[0..width];
+        const footer = f.rowMut(list.end)[0..width];
         _ = put(footer, 0, " + new", plain);
         footer[width - 1] = .{ .cp = 0x00ab };
     }
@@ -253,7 +253,7 @@ fn drawSidebar(f: *Frame, v: View) void {
         const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
         const style = lineStyle(ws, cursor);
-        const line = f.row(e.y)[0..width];
+        const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         var num: [24]u8 = undefined;
@@ -266,7 +266,7 @@ fn drawSidebar(f: *Frame, v: View) void {
             line[width - 2] = .{ .cp = cp, .style = ms };
         }
         if (e.rows == 2) {
-            const bl = f.row(e.y + 1)[0..width];
+            const bl = f.rowMut(e.y + 1)[0..width];
             var bs = style;
             bs.flags.faint = !ws.active;
             for (bl) |*c| c.style = bs;
@@ -278,19 +278,19 @@ fn drawSidebar(f: *Frame, v: View) void {
 fn drawCollapsed(f: *Frame, v: View) void {
     const width = collapsed_cols - 1;
     for (0..f.rows) |y| {
-        const row = f.row(y);
+        const row = f.rowMut(y);
         @memset(row[0..width], .blank);
         row[width] = .{ .cp = 0x2502, .style = divider };
     }
     const list: List = .of(f.rows, false);
-    if (list.end < f.rows) f.row(list.end)[width - 1] = .{ .cp = 0x00bb };
+    if (list.end < f.rows) f.rowMut(list.end)[width - 1] = .{ .cp = 0x00bb };
     var entries: Entries = .init(v, list, false);
     while (entries.next()) |e| {
         const i = e.index;
         const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
         const style = lineStyle(ws, cursor);
-        const line = f.row(e.y)[0..width];
+        const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
         var num: [24]u8 = undefined;
         const text = std.fmt.bufPrint(&num, "{d}", .{i + 1}) catch unreachable;
@@ -404,16 +404,16 @@ pub fn drawHelp(f: *Frame, area: Rect) void {
     const cols: u16 = @intCast(@min(want_cols, area.cols));
     const rows: u16 = @intCast(@min(want_rows, area.rows));
     const box: Rect = .{ .x = area.x + (area.cols - cols) / 2, .y = area.y + (area.rows - rows) / 2, .cols = cols, .rows = rows };
-    for (box.y..box.y + box.rows) |y| @memset(f.row(y)[box.x..][0..box.cols], .blank);
+    for (box.y..box.y + box.rows) |y| @memset(f.rowMut(y)[box.x..][0..box.cols], .blank);
     f.drawBox(box, box_border);
     if (box.cols < 4 or box.rows < 3) return;
-    const top = f.row(box.y)[box.x..][0..box.cols];
+    const top = f.rowMut(box.y)[box.x..][0..box.cols];
     _ = put(top[0 .. top.len - 1], 2, " keys ", box_border);
-    const bottom = f.row(box.y + box.rows - 1)[box.x..][0..box.cols];
+    const bottom = f.rowMut(box.y + box.rows - 1)[box.x..][0..box.cols];
     const close = " esc close ";
     if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, box_border);
     for (prefix.help[0..@min(prefix.help.len, box.rows - 2)], box.y + 1..) |h, y| {
-        const line = f.row(y)[box.x + 1 ..][0 .. box.cols - 2];
+        const line = f.rowMut(y)[box.x + 1 ..][0 .. box.cols - 2];
         _ = put(line, 1, h.keys, .{ .flags = .{ .bold = true } });
         _ = put(line, 1 + keys_cols + 2, h.text, plain);
     }
@@ -425,7 +425,7 @@ pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize) voi
     var buf: [48]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "[{d}/{d}]", .{ back, history }) catch return;
     if (inner.rows == 0 or text.len > inner.cols) return;
-    const row = f.row(inner.y)[inner.x..][0..inner.cols];
+    const row = f.rowMut(inner.y)[inner.x..][0..inner.cols];
     const x = inner.cols - text.len;
     // Half of a wide character would be left without its tail.
     if (row[x].width == .tail) row[x - 1] = .blank;
@@ -885,8 +885,8 @@ test "hits on tiny frames stay in bounds" {
 test "the scroll marker sits at the top right of the pane content" {
     var s: Screen = try .init(30, 4);
     defer s.deinit();
-    s.f.row(1)[20] = .{ .cp = 0x4e2d, .width = .wide };
-    s.f.row(1)[21] = .tail;
+    s.f.rowMut(1)[20] = .{ .cp = 0x4e2d, .width = .wide };
+    s.f.rowMut(1)[21] = .tail;
     drawScrollMarker(&s.f, .{ .x = 10, .y = 1, .cols = 18, .rows = 3 }, 3, 177);
     try s.expect(
         \\

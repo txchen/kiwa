@@ -102,18 +102,25 @@ pub const Cursor = struct {
 };
 
 /// A `cols x rows` grid, row-major. Every wide head is followed by its tail.
+///
+/// `dirty` holds every row written since `clearDirty`. Cells are written
+/// only through `rowMut`, which marks its row, so a row that is not dirty
+/// is known to be unchanged. The differ visits dirty rows only.
 pub const Frame = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     cells: []Cell = &.{},
+    dirty: std.DynamicBitSetUnmanaged = .{},
     cursor: Cursor = .{},
 
     pub fn deinit(f: *Frame, gpa: std.mem.Allocator) void {
         gpa.free(f.cells);
+        f.dirty.deinit(gpa);
         f.* = .{};
     }
 
-    /// Blanks the frame. Allocates only when the size changes.
+    /// Blanks the frame and marks every row. Allocates only when the size
+    /// changes.
     pub fn resize(f: *Frame, gpa: std.mem.Allocator, cols: u16, rows: u16) !void {
         const n = @as(usize, cols) * rows;
         if (f.cells.len != n) {
@@ -121,27 +128,52 @@ pub const Frame = struct {
             gpa.free(f.cells);
             f.cells = cells;
         }
+        try f.dirty.resize(gpa, rows, false);
         f.cols = cols;
         f.rows = rows;
         @memset(f.cells, .blank);
+        f.markAll();
         f.cursor = .{};
     }
 
-    pub fn row(f: *const Frame, y: usize) []Cell {
+    pub fn row(f: *const Frame, y: usize) []const Cell {
         return f.cells[y * f.cols ..][0..f.cols];
+    }
+
+    /// The only way to write cells. Marks row `y` dirty.
+    pub fn rowMut(f: *Frame, y: usize) []Cell {
+        f.dirty.set(y);
+        return f.cells[y * f.cols ..][0..f.cols];
+    }
+
+    pub fn markRows(f: *Frame, y: usize, n: usize) void {
+        f.dirty.setRangeValue(.{ .start = y, .end = y + n }, true);
+    }
+
+    pub fn markAll(f: *Frame) void {
+        // Not `setAll`: it sets the padding bits too, which the iterator yields.
+        f.markRows(0, f.rows);
+    }
+
+    pub fn clearDirty(f: *Frame) void {
+        f.dirty.unsetAll();
+    }
+
+    pub fn dirtyRows(f: *const Frame) std.DynamicBitSetUnmanaged.Iterator(.{}) {
+        return f.dirty.iterator(.{});
     }
 
     /// Draws a single-line box on `r`'s edge cells. A box too small to
     /// have corners is blanked instead.
     pub fn drawBox(f: *Frame, r: Rect, style: vt.Style) void {
         if (r.cols < 2 or r.rows < 2) {
-            for (r.y..r.y + r.rows) |y| @memset(f.row(y)[r.x..][0..r.cols], .blank);
+            for (r.y..r.y + r.rows) |y| @memset(f.rowMut(y)[r.x..][0..r.cols], .blank);
             return;
         }
         const right = r.x + r.cols - 1;
         const bottom = r.y + r.rows - 1;
         for (r.y..bottom + 1) |y| {
-            const cells = f.row(y);
+            const cells = f.rowMut(y);
             const edge = y == r.y or y == bottom;
             if (edge) for (cells[r.x + 1 .. right]) |*c| {
                 c.* = .{ .cp = 0x2500, .style = style };
@@ -152,9 +184,20 @@ pub const Frame = struct {
         }
     }
 
+    /// Copies every cell and the cursor, and marks every row.
     pub fn copyFrom(f: *Frame, src: *const Frame) void {
         std.debug.assert(f.cols == src.cols and f.rows == src.rows);
         @memcpy(f.cells, src.cells);
+        f.markAll();
+        f.cursor = src.cursor;
+    }
+
+    /// Copies `src`'s dirty rows and the cursor. Brings `f` level with
+    /// `src` when the two were equal before `src`'s dirty rows were written.
+    pub fn copyDirtyFrom(f: *Frame, src: *const Frame) void {
+        std.debug.assert(f.cols == src.cols and f.rows == src.rows);
+        var it = src.dirtyRows();
+        while (it.next()) |y| @memcpy(f.rowMut(y), src.row(y));
         f.cursor = src.cursor;
     }
 
@@ -168,12 +211,12 @@ pub const Frame = struct {
         const rows = rs.row_data.slice();
         const dirty = rows.items(.dirty);
         for (0..rect.rows) |ry| {
-            const out = f.row(rect.y + ry)[rect.x..][0..rect.cols];
             if (ry >= rs.rows) {
-                if (every_row) @memset(out, .blank);
+                if (every_row) @memset(f.rowMut(rect.y + ry)[rect.x..][0..rect.cols], .blank);
                 continue;
             }
             if (!every_row and !dirty[ry]) continue;
+            const out = f.rowMut(rect.y + ry)[rect.x..][0..rect.cols];
             try composeRow(gpa, g, out, rows.items(.cells)[ry], rows.items(.selection)[ry]);
         }
     }
@@ -311,7 +354,7 @@ test "composing copies dirty rows and keeps clean ones" {
     try testing.expect(r1[4].isDefaultBlank());
 
     // A clean row keeps what the frame had, even if the frame was changed under it.
-    f.row(0)[5].cp = 'Z';
+    f.rowMut(0)[5].cp = 'Z';
     s.nextSlice("\x1b[3;1Hq");
     try rs.update(testing.allocator, &t);
     try f.composePane(testing.allocator, &g, rect, &rs, false);
@@ -320,6 +363,58 @@ test "composing copies dirty rows and keeps clean ones" {
 
     try f.composePane(testing.allocator, &g, rect, &rs, true);
     try testing.expectEqual(' ', f.row(0)[5].cp);
+}
+
+fn expectDirty(f: *const Frame, want: []const usize) !void {
+    for (0..f.rows) |y| {
+        const expected = std.mem.indexOfScalar(usize, want, y) != null;
+        if (f.dirty.isSet(y) != expected) {
+            std.debug.print("row {d}: dirty {}, want {}\n", .{ y, f.dirty.isSet(y), expected });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "writers mark the rows they write and no others" {
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 4, 5);
+    try expectDirty(&f, &.{ 0, 1, 2, 3, 4 });
+    f.clearDirty();
+    try expectDirty(&f, &.{});
+
+    f.drawBox(.{ .x = 0, .y = 1, .cols = 4, .rows = 2 }, .{});
+    try expectDirty(&f, &.{ 1, 2 });
+    f.rowMut(4)[0].cp = 'x';
+    try expectDirty(&f, &.{ 1, 2, 4 });
+
+    var copy: Frame = .{};
+    defer copy.deinit(testing.allocator);
+    try copy.resize(testing.allocator, 4, 5);
+    copy.clearDirty();
+    copy.copyDirtyFrom(&f);
+    try expectDirty(&copy, &.{ 1, 2, 4 });
+    try testing.expectEqual('x', copy.row(4)[0].cp);
+    try testing.expectEqual(0x250c, copy.row(1)[0].cp);
+
+    // A pane marks only the rows the render state reports dirty.
+    var t: vt.Terminal = try .init(testing.io, testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(testing.allocator);
+    var g: Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    s.nextSlice("\x1b[3;1H");
+    try rs.update(testing.allocator, &t);
+    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, false);
+    f.clearDirty();
+    s.nextSlice("q");
+    try rs.update(testing.allocator, &t);
+    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, false);
+    try expectDirty(&f, &.{3});
+    try testing.expectEqual('q', f.row(3)[0].cp);
 }
 
 test "selected cells are drawn in reverse video" {

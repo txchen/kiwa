@@ -1141,6 +1141,7 @@ const Server = struct {
         if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed);
         c.drawn_menu = menu;
         if (help or menu != null or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
+        if (c.redraw_pending) c.frame.markAll();
 
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
@@ -1151,16 +1152,22 @@ const Server = struct {
         // Taken back before the error check so that `scratch` keeps its buffer.
         s.scratch = aw.toArrayList();
         written catch return error.OutOfMemory;
-        if (s.scratch.items.len == 0) return;
+        // No bytes means every dirty row already matched `last_frame`.
+        if (s.scratch.items.len == 0) {
+            c.frame.clearDirty();
+            return;
+        }
         c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
             error.Overflow => {
                 std.log.info("client output buffer overflowed; redrawing after it drains", .{});
+                // The rows stay dirty until the redraw reaches `last_frame`.
                 c.redraw_pending = true;
                 return s.flush(c);
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        c.last_frame.copyFrom(&c.frame);
+        c.last_frame.copyDirtyFrom(&c.frame);
+        c.frame.clearDirty();
         c.redraw_pending = false;
         try s.flush(c);
     }

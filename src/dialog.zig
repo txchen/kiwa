@@ -54,23 +54,23 @@ pub const Dialog = union(enum) {
     /// Draws the dialog over `area` and returns where the outer cursor goes.
     pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect) !frame_mod.Cursor {
         const b = d.box(area);
-        for (b.y..b.y + b.rows) |y| @memset(f.row(y)[b.x..][0..b.cols], .blank);
+        for (b.y..b.y + b.rows) |y| @memset(f.rowMut(y)[b.x..][0..b.cols], .blank);
         f.drawBox(b, chrome.box_border);
         const hidden: frame_mod.Cursor = .{ .visible = false };
         if (b.cols < 6 or b.rows < 4) return hidden;
-        const top = f.row(b.y)[b.x..][0..b.cols];
+        const top = f.rowMut(b.y)[b.x..][0..b.cols];
         const inner = b.cols - 4;
         switch (d.*) {
             .rename => |*r| {
                 _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), chrome.box_border);
-                _ = chrome.put(f.row(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
-                const col = try drawField(f.row(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
+                _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
+                const col = try drawField(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
                 return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
             },
             .confirm => |*c| {
                 var buf: Confirm.Buf = undefined;
-                _ = chrome.put(f.row(b.y + 1)[b.x + 2 ..][0..inner], 0, c.message(&buf), .{});
-                _ = chrome.put(f.row(b.y + 2)[b.x + 2 ..][0..inner], 0, confirm_hint, hint);
+                _ = chrome.put(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], 0, c.message(&buf), .{});
+                _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, confirm_hint, hint);
                 return hidden;
             },
         }

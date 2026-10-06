@@ -88,11 +88,11 @@ pub const Menu = struct {
 
     pub fn draw(m: Menu, f: *Frame, zoomed: bool) void {
         const b = m.box(f.cols, f.rows);
-        for (b.y..b.y + b.rows) |y| @memset(f.row(y)[b.x..][0..b.cols], .blank);
+        for (b.y..b.y + b.rows) |y| @memset(f.rowMut(y)[b.x..][0..b.cols], .blank);
         f.drawBox(b, chrome.box_border);
         if (b.cols < 3 or b.rows < 3) return;
         for (m.items()[0..@min(m.items().len, b.rows - 2)], b.y + 1.., 0..) |item, y, i| {
-            const line = f.row(y)[b.x + 1 ..][0 .. b.cols - 2];
+            const line = f.rowMut(y)[b.x + 1 ..][0 .. b.cols - 2];
             const style = if (i == m.cursor) chrome.highlight else frame_mod.Cell.blank.style;
             for (line) |*c| c.style = style;
             _ = chrome.put(line, 1, item.text(zoomed), style);
