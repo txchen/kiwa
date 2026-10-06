@@ -1,5 +1,7 @@
 # The server composes frames; the client stays thin
 
+Status: the client's relay role is superseded by ADR 0004.
+
 The server composes each client's frame and diffs it against the frame that
 client last received. It sends only the outer-terminal bytes that differ.
 The client puts the outer terminal in raw mode, forwards input and resizes,
