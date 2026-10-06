@@ -22,8 +22,12 @@ killed at the end, so the user's tmux and Kiwa servers are never touched.
 SIGTERM and SIGHUP unwind like ctrl+c, so an interrupted run still stops
 its servers and removes their sockets.
 
-Usage: tools/bench.py KIWA_BINARY [--build MODE] [--runs N] [--warmup S] [--sample S]
-Usually run through `zig build bench -Doptimize=ReleaseFast`.
+With --check, the v1 budgets in GATES are checked against the medians after
+the table, and the exit status is 1 if Kiwa misses any of them.
+
+Usage: tools/bench.py KIWA_BINARY [--build MODE] [--runs N] [--warmup S] [--sample S] [--check]
+Usually run through `zig build bench -Doptimize=ReleaseFast`, or
+`zig build bench-check -Doptimize=ReleaseFast` for --check.
 """
 
 import argparse
@@ -109,6 +113,52 @@ SCENARIOS = [
     Scenario("10 idle panes, detached", tabs=10, attached=False),
     Scenario("10 hidden producers, focused pane idle", tabs=11, hidden=True),
     Scenario("10 hidden producers, detached", tabs=11, hidden=True, attached=False),
+]
+
+# A relative CPU gate allows this share of tmux's median, but at least
+# MIN_TOLERANCE percentage points, for measurement noise.
+TOLERANCE = 0.05
+MIN_TOLERANCE = 0.01
+
+
+def median(runs, get):
+    return statistics.median(get(r) for r in runs)
+
+
+def idle_budget(kiwa, tmux):
+    cpu = median(kiwa, lambda r: r["total"])
+    switches = median(kiwa, lambda r: sum(r["switches"].values()))
+    return (cpu == 0 and switches == 0,
+            f"Kiwa {cpu:.3f}% CPU and {switches:g} context switches, limit 0 and 0")
+
+
+def cpu_budget(factor):
+    """Kiwa's total CPU at most `factor` times tmux's, plus the tolerance."""
+    def check(kiwa, tmux):
+        k = median(kiwa, lambda r: r["total"])
+        t = median(tmux, lambda r: r["total"])
+        tolerance = max(TOLERANCE * t, MIN_TOLERANCE)
+        limit = factor * t + tolerance
+        return (k <= limit, f"Kiwa {k:.3f}%, tmux {t:.3f}%, "
+                f"limit {factor:g} x tmux + {tolerance:.3f} = {limit:.3f}%")
+    return check
+
+
+def rss_budget(mib):
+    def check(kiwa, tmux):
+        rss = median(kiwa, lambda r: r["rss"]["server"]) / 1024
+        return rss <= mib, f"Kiwa server RSS {rss:.1f} MiB, limit {mib:g} MiB"
+    return check
+
+
+# The v1 budgets: name, the scenarios each covers, and its check against
+# every Kiwa variant of a scenario.
+GATES = [
+    ("Idle", lambda s: not s.focused and not s.hidden, idle_budget),
+    ("Spinner", lambda s: s.focused == "spinner.py", cpu_budget(1.0)),
+    ("Hidden output", lambda s: s.hidden, cpu_budget(1.0)),
+    ("Scrolling", lambda s: s.focused == "producer.py", cpu_budget(1.5)),
+    ("Memory", lambda s: s.tabs >= 10, rss_budget(20)),
 ]
 
 DECRQM_MARGINS = b"\x1b[?69$p"
@@ -563,6 +613,8 @@ def main():
     ap.add_argument("--warmup", type=float, default=6.0)
     ap.add_argument("--sample", type=float, default=12.0)
     ap.add_argument("--only", help="run only the scenarios whose name contains this text")
+    ap.add_argument("--check", action="store_true",
+                    help="check the v1 budgets and exit 1 if Kiwa misses one")
     args = ap.parse_args()
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, _: sys.exit(128 + signum))
@@ -639,7 +691,24 @@ def main():
                   f"| {per_frame} "
                   f"| {column(lambda r: r['rss']['server'], mib)} "
                   f"| {column(lambda r: r['rss'].get('client'), mib)} |")
-    return 0
+    if not args.check:
+        return 0
+    print()
+    print(f"Gates on medians; a relative CPU gate allows {TOLERANCE:.0%} of tmux's value, "
+          f"at least {MIN_TOLERANCE:g} percentage points, for noise; the idle gate allows none.")
+    failed = 0
+    for gate, covers, check in GATES:
+        for scenario in filter(covers, scenarios):
+            tmux = results[(scenario.name, "tmux")]
+            for name, (label, _) in variants.items():
+                kiwa = results.get((scenario.name, name))
+                if not name.startswith("kiwa") or not kiwa:
+                    continue
+                ok, detail = check(kiwa, tmux)
+                failed += not ok
+                print(f"{'PASS' if ok else 'FAIL'} {gate} | {scenario.name} | {label} | {detail}")
+    print(f"{failed} gate{'' if failed == 1 else 's'} failed" if failed else "All gates passed")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

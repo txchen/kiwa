@@ -69,11 +69,18 @@ pub fn build(b: *std.Build) void {
     e2e_run.has_side_effects = true;
     b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);
 
-    const bench = b.addSystemCommand(&.{"python3"});
-    bench.addFileArg(b.path("tools/bench.py"));
-    bench.addArtifactArg(exe);
-    bench.addArgs(&.{ "--build", @tagName(optimize) });
-    if (b.args) |args| bench.addArgs(args);
-    bench.has_side_effects = true;
-    b.step("bench", "Compare CPU, memory, and outer bytes with tmux; use -Doptimize=ReleaseFast").dependOn(&bench.step);
+    const benches = [_]struct { name: []const u8, description: []const u8, check: bool }{
+        .{ .name = "bench", .description = "Compare CPU, memory, and outer bytes with tmux; use -Doptimize=ReleaseFast", .check = false },
+        .{ .name = "bench-check", .description = "Run the bench and fail if Kiwa misses a v1 budget; use -Doptimize=ReleaseFast", .check = true },
+    };
+    for (benches) |spec| {
+        const bench = b.addSystemCommand(&.{"python3"});
+        bench.addFileArg(b.path("tools/bench.py"));
+        bench.addArtifactArg(exe);
+        bench.addArgs(&.{ "--build", @tagName(optimize) });
+        if (spec.check) bench.addArg("--check");
+        if (b.args) |args| bench.addArgs(args);
+        bench.has_side_effects = true;
+        b.step(spec.name, spec.description).dependOn(&bench.step);
+    }
 }
