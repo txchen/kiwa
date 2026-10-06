@@ -38,22 +38,34 @@ pub const Scroll = struct {
     /// terminal applies the bytes `write` sends. Rows that scroll in are
     /// blank. A wide character cut by a side margin becomes unknown.
     fn apply(s: Scroll, f: *Frame) void {
+        s.applyFrom(f, f);
+    }
+
+    /// Like `apply`, writing the scrolled rows of `src` into `dst`. The
+    /// rows of `dst` outside the rect are copied from `src` too, so that
+    /// `dst`'s band is `src`'s band scrolled. `src` may be `dst` itself.
+    fn applyFrom(s: Scroll, dst: *Frame, src: *const Frame) void {
         const r = s.rect;
         const n: usize = @abs(s.n);
-        std.debug.assert(r.rows >= 2 and n > 0 and n < r.rows and r.x + r.cols <= f.cols);
-        const cut_left = r.x > 0 and straddles(f, r, r.x);
-        const cut_right = r.x + r.cols < f.cols and straddles(f, r, r.x + r.cols);
-        const keep = r.rows - n;
-        for (0..keep) |i| {
-            const to, const from = if (s.n > 0) .{ i, i + n } else .{ r.rows - 1 - i, r.rows - 1 - i - n };
-            @memcpy(f.rowMut(r.y + to)[r.x..][0..r.cols], f.row(r.y + from)[r.x..][0..r.cols]);
-        }
-        const blank_from = if (s.n > 0) keep else 0;
-        for (r.y + blank_from..r.y + blank_from + n) |y| @memset(f.rowMut(y)[r.x..][0..r.cols], .blank);
-        for (r.y..r.y + r.rows) |y| {
-            const cells = f.rowMut(y);
-            if (cut_left) @memset(cells[r.x - 1 ..][0..2], unknown);
-            if (cut_right) @memset(cells[r.x + r.cols - 1 ..][0..2], unknown);
+        std.debug.assert(r.rows >= 2 and n > 0 and n < r.rows and r.x + r.cols <= src.cols);
+        std.debug.assert(dst.cols == src.cols and dst.rows == src.rows);
+        const cut_left = r.x > 0 and straddles(src, r, r.x);
+        const cut_right = r.x + r.cols < src.cols and straddles(src, r, r.x + r.cols);
+        const in_place = @as(*const Frame, dst) == src;
+        // Moving up fills the rows top down and moving down bottom up, so
+        // that in place each row is read before it is overwritten.
+        for (0..r.rows) |k| {
+            const i = if (s.n > 0) k else r.rows - 1 - k;
+            const from: ?usize = if (s.n > 0) (if (i + n < r.rows) i + n else null) else (if (i >= n) i - n else null);
+            const out = dst.rowMut(r.y + i);
+            if (!in_place) {
+                const in = src.row(r.y + i);
+                @memcpy(out[0..r.x], in[0..r.x]);
+                @memcpy(out[r.x + r.cols ..], in[r.x + r.cols ..]);
+            }
+            if (from) |fy| @memcpy(out[r.x..][0..r.cols], src.row(r.y + fy)[r.x..][0..r.cols]) else @memset(out[r.x..][0..r.cols], .blank);
+            if (cut_left) @memset(out[r.x - 1 ..][0..2], unknown);
+            if (cut_right) @memset(out[r.x + r.cols - 1 ..][0..2], unknown);
         }
     }
 
@@ -144,8 +156,7 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
             i -= 1;
             const c = candidates[i];
             // A scroll changes only its rows, so only they are compared.
-            for (r.y..r.y + r.rows) |y| @memcpy(sc.trial.rowMut(y), old.row(y));
-            c.apply(&sc.trial);
+            c.applyFrom(&sc.trial, old);
             const bytes = bandBytes(&sc.trial, new, g, r, c, best_bytes, &sc.equal);
             if (bytes < best_bytes) {
                 best = c;
@@ -937,6 +948,36 @@ test "random writes diffed by their dirty rows send what a full-frame diff sends
         testing.expectEqualStrings(try f.diffBytes(), by_dirty_rows) catch |e| {
             std.debug.print("iteration {d}, {d}x{d}, {?any}\n", .{ i, cols, rows, scroll });
             return e;
+        };
+    }
+}
+
+test "scrolling into another frame matches scrolling a copy in place" {
+    var prng: Rng.DefaultPrng = .init(0x6170706c);
+    const r = prng.random();
+    var g: Graphemes = .{};
+    defer g.deinit(alloc);
+    var src: Frame = .{};
+    defer src.deinit(alloc);
+    var dst: Frame = .{};
+    defer dst.deinit(alloc);
+    var copy: Frame = .{};
+    defer copy.deinit(alloc);
+    for (0..500) |_| {
+        const cols = 2 + r.uintLessThan(u16, 14);
+        const rows = 2 + r.uintLessThan(u16, 6);
+        for ([_]*Frame{ &src, &dst, &copy }) |f| try f.resize(alloc, cols, rows);
+        try fillRandom(r, &g, &src);
+        try fillRandom(r, &g, &dst);
+        const rect = randomRect(r, &src, 2, 2);
+        const n: i32 = 1 + r.uintLessThan(u16, rect.rows - 1);
+        const s: Scroll = .{ .rect = rect, .n = if (r.boolean()) n else -n };
+        copy.copyFrom(&src);
+        s.apply(&copy);
+        s.applyFrom(&dst, &src);
+        for (rect.y..rect.y + rect.rows) |y| for (copy.row(y), dst.row(y), 0..) |a, b, x| if (!a.eql(b)) {
+            std.debug.print("{any} cell ({d},{d})\n", .{ s, x, y });
+            return error.TestExpectedEqual;
         };
     }
 }
