@@ -38,35 +38,26 @@ pub const Scroll = struct {
     /// terminal applies the bytes `write` sends. Rows that scroll in are
     /// blank. A wide character cut by a side margin becomes unknown.
     fn apply(s: Scroll, f: *Frame) void {
-        s.applyFrom(f, f);
-    }
-
-    /// Like `apply`, writing the scrolled rows of `src` into `dst`. The
-    /// rows of `dst` outside the rect are copied from `src` too, so that
-    /// `dst`'s band is `src`'s band scrolled. `src` may be `dst` itself.
-    fn applyFrom(s: Scroll, dst: *Frame, src: *const Frame) void {
         const r = s.rect;
-        const n: usize = @abs(s.n);
-        std.debug.assert(r.rows >= 2 and n > 0 and n < r.rows and r.x + r.cols <= src.cols);
-        std.debug.assert(dst.cols == src.cols and dst.rows == src.rows);
-        const cut_left = r.x > 0 and straddles(src, r, r.x);
-        const cut_right = r.x + r.cols < src.cols and straddles(src, r, r.x + r.cols);
-        const in_place = @as(*const Frame, dst) == src;
+        std.debug.assert(r.rows >= 2 and s.n != 0 and @abs(s.n) < r.rows and r.x + r.cols <= f.cols);
+        const cut_left = r.x > 0 and straddles(f, r, r.x);
+        const cut_right = r.x + r.cols < f.cols and straddles(f, r, r.x + r.cols);
         // Moving up fills the rows top down and moving down bottom up, so
-        // that in place each row is read before it is overwritten.
+        // that each row is read before it is overwritten.
         for (0..r.rows) |k| {
             const i = if (s.n > 0) k else r.rows - 1 - k;
-            const from: ?usize = if (s.n > 0) (if (i + n < r.rows) i + n else null) else (if (i >= n) i - n else null);
-            const out = dst.rowMut(r.y + i);
-            if (!in_place) {
-                const in = src.row(r.y + i);
-                @memcpy(out[0..r.x], in[0..r.x]);
-                @memcpy(out[r.x + r.cols ..], in[r.x + r.cols ..]);
-            }
-            if (from) |fy| @memcpy(out[r.x..][0..r.cols], src.row(r.y + fy)[r.x..][0..r.cols]) else @memset(out[r.x..][0..r.cols], .blank);
+            const out = f.rowMut(r.y + i);
+            if (s.source(i)) |fy| @memcpy(out[r.x..][0..r.cols], f.row(r.y + fy)[r.x..][0..r.cols]) else @memset(out[r.x..][0..r.cols], .blank);
             if (cut_left) @memset(out[r.x - 1 ..][0..2], unknown);
             if (cut_right) @memset(out[r.x + r.cols - 1 ..][0..2], unknown);
         }
+    }
+
+    /// The band row whose cells land in band row `i`, if any.
+    fn source(s: Scroll, i: usize) ?usize {
+        const n: usize = @abs(s.n);
+        if (s.n > 0) return if (i + n < s.rect.rows) i + n else null;
+        return if (i >= n) i - n else null;
     }
 
     /// Margins that end at the frame's edge leave out that parameter.
@@ -98,25 +89,82 @@ fn straddles(f: *const Frame, r: Rect, x: usize) bool {
 /// so the diff always rewrites it.
 const unknown: Cell = .{ .cp = std.math.maxInt(u21) };
 
+/// The rows of `old` as `scroll` would leave them, read without applying
+/// it. Most rows a scroll moves equal the new frame's, and `rowEquals`
+/// settles those by comparing the parts in place.
+const Moved = struct {
+    old: *const Frame,
+    scroll: ?Scroll,
+    cut_left: bool = false,
+    cut_right: bool = false,
+    /// Where `row` assembles a row from the parts of two rows.
+    buf: []Cell,
+
+    fn init(old: *const Frame, scroll: ?Scroll, buf: []Cell) Moved {
+        var m: Moved = .{ .old = old, .scroll = scroll, .buf = buf };
+        if (scroll) |s| {
+            const r = s.rect;
+            m.cut_left = r.x > 0 and straddles(old, r, r.x);
+            m.cut_right = r.x + r.cols < old.cols and straddles(old, r, r.x + r.cols);
+        }
+        return m;
+    }
+
+    /// Whether row `y`, which lies in the scroll's rows, equals `want`.
+    fn rowEquals(m: *const Moved, y: usize, want: []const Cell) bool {
+        const here = m.old.row(y);
+        const s = m.scroll orelse return rowsEqual(here, want);
+        if (m.cut_left or m.cut_right) return false;
+        const r = s.rect;
+        if (!rowsEqual(here[0..r.x], want[0..r.x]) or !rowsEqual(here[r.x + r.cols ..], want[r.x + r.cols ..])) return false;
+        const band = want[r.x..][0..r.cols];
+        const from = s.source(y - r.y) orelse return rowsEqual(band, m.blank()[0..r.cols]);
+        return rowsEqual(m.old.row(r.y + from)[r.x..][0..r.cols], band);
+    }
+
+    /// Row `y`, which lies in the scroll's rows. Valid until the next call.
+    fn row(m: *const Moved, y: usize) []const Cell {
+        const here = m.old.row(y);
+        const s = m.scroll orelse return here;
+        const r = s.rect;
+        const out = m.buf;
+        @memcpy(out[0..r.x], here[0..r.x]);
+        @memcpy(out[r.x + r.cols ..], here[r.x + r.cols ..]);
+        if (s.source(y - r.y)) |from| @memcpy(out[r.x..][0..r.cols], m.old.row(r.y + from)[r.x..][0..r.cols]) else @memset(out[r.x..][0..r.cols], .blank);
+        if (m.cut_left) @memset(out[r.x - 1 ..][0..2], unknown);
+        if (m.cut_right) @memset(out[r.x + r.cols - 1 ..][0..2], unknown);
+        return out;
+    }
+
+    fn blank(m: *const Moved) []const Cell {
+        @memset(m.buf, .blank);
+        return m.buf;
+    }
+};
+
 /// What `diffScrolling` works in, kept between diffs so that it allocates
 /// only when the size changes.
 pub const Scratch = struct {
-    /// The old frame's band with a candidate scroll applied.
-    trial: Frame = .{},
+    /// One row of the old frame with a candidate scroll applied.
+    row: []Cell = &.{},
     chosen: std.ArrayList(Scroll) = .empty,
     /// The rows the last count found equal, and the winning count's.
     equal: RowSet = .{},
     best_equal: RowSet = .{},
 
     pub fn deinit(sc: *Scratch, gpa: std.mem.Allocator) void {
-        sc.trial.deinit(gpa);
+        gpa.free(sc.row);
         sc.chosen.deinit(gpa);
         sc.equal.deinit(gpa);
         sc.best_equal.deinit(gpa);
     }
 
     fn ensureSize(sc: *Scratch, gpa: std.mem.Allocator, cols: u16, rows: u16) !void {
-        if (sc.trial.cols != cols or sc.trial.rows != rows) try sc.trial.resize(gpa, cols, rows);
+        if (sc.row.len != cols) {
+            const row = try gpa.alloc(Cell, cols);
+            gpa.free(sc.row);
+            sc.row = row;
+        }
         for ([_]*RowSet{ &sc.equal, &sc.best_equal }) |set| {
             if (set.bit_length != rows) try set.resize(gpa, rows, false);
         }
@@ -156,15 +204,14 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
             i -= 1;
             const c = candidates[i];
             // A scroll changes only its rows, so only they are compared.
-            c.applyFrom(&sc.trial, old);
-            const bytes = bandBytes(&sc.trial, new, g, r, c, best_bytes, &sc.equal);
+            const bytes = bandBytes(&.init(old, c, sc.row), new, g, r, best_bytes, &sc.equal);
             if (bytes < best_bytes) {
                 best = c;
                 best_bytes = bytes;
                 std.mem.swap(RowSet, &sc.equal, &sc.best_equal);
             }
         }
-        if (bandBytes(old, new, g, r, null, best_bytes, &sc.equal) <= best_bytes) {
+        if (bandBytes(&.init(old, null, sc.row), new, g, r, best_bytes, &sc.equal) <= best_bytes) {
             best = null;
             std.mem.swap(RowSet, &sc.equal, &sc.best_equal);
         }
@@ -180,20 +227,23 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
     try emit(old, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y });
 }
 
-/// The bytes that `scroll`, if any, and repainting `r`'s rows of `moved`
-/// into `new` cost, from an unknown cursor position. Counting stops once
-/// it passes `limit`. Sets in `equal` the band's rows that cost nothing,
-/// which are the rows with no changed cell.
-fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rect, scroll: ?Scroll, limit: u64, equal: *RowSet) u64 {
+/// The bytes that `moved`'s scroll, if any, and repainting `r`'s rows of
+/// `moved` into `new` cost, from an unknown cursor position. Counting
+/// stops once it passes `limit`. Sets in `equal` the band's rows that
+/// cost nothing, which are the rows with no changed cell.
+fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Graphemes, r: Rect, limit: u64, equal: *RowSet) u64 {
     var buf: [256]u8 = undefined;
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
-    if (scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
+    if (moved.scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
     equal.setRangeValue(.{ .start = r.y, .end = r.y + r.rows }, false);
     for (r.y..r.y + r.rows) |y| {
-        const before = d.fullCount();
-        o.row(moved.row(y), new.row(y), @intCast(y)) catch unreachable;
-        if (d.fullCount() == before) equal.set(y);
+        const want = new.row(y);
+        if (moved.rowEquals(y, want)) {
+            equal.set(y);
+            continue;
+        }
+        o.row(moved.row(y), want, @intCast(y)) catch unreachable;
         if (d.fullCount() > limit) break;
     }
     return d.fullCount();
@@ -952,33 +1002,39 @@ test "random writes diffed by their dirty rows send what a full-frame diff sends
     }
 }
 
-test "scrolling into another frame matches scrolling a copy in place" {
+test "reading a frame's rows through a scroll matches scrolling a copy in place" {
     var prng: Rng.DefaultPrng = .init(0x6170706c);
     const r = prng.random();
     var g: Graphemes = .{};
     defer g.deinit(alloc);
     var src: Frame = .{};
     defer src.deinit(alloc);
-    var dst: Frame = .{};
-    defer dst.deinit(alloc);
     var copy: Frame = .{};
     defer copy.deinit(alloc);
+    var buf: [16]Cell = undefined;
     for (0..500) |_| {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 2 + r.uintLessThan(u16, 6);
-        for ([_]*Frame{ &src, &dst, &copy }) |f| try f.resize(alloc, cols, rows);
+        for ([_]*Frame{ &src, &copy }) |f| try f.resize(alloc, cols, rows);
         try fillRandom(r, &g, &src);
-        try fillRandom(r, &g, &dst);
         const rect = randomRect(r, &src, 2, 2);
         const n: i32 = 1 + r.uintLessThan(u16, rect.rows - 1);
         const s: Scroll = .{ .rect = rect, .n = if (r.boolean()) n else -n };
         copy.copyFrom(&src);
         s.apply(&copy);
-        s.applyFrom(&dst, &src);
-        for (rect.y..rect.y + rect.rows) |y| for (copy.row(y), dst.row(y), 0..) |a, b, x| if (!a.eql(b)) {
-            std.debug.print("{any} cell ({d},{d})\n", .{ s, x, y });
-            return error.TestExpectedEqual;
-        };
+        const moved: Moved = .init(&src, s, buf[0..cols]);
+        for (rect.y..rect.y + rect.rows) |y| {
+            for (copy.row(y), moved.row(y), 0..) |a, b, x| if (!a.eql(b)) {
+                std.debug.print("{any} cell ({d},{d})\n", .{ s, x, y });
+                return error.TestExpectedEqual;
+            };
+            // A cut leaves unknown cells, which no row is taken to equal.
+            try testing.expectEqual(!moved.cut_left and !moved.cut_right, moved.rowEquals(y, copy.row(y)));
+            const x = r.uintLessThan(usize, cols);
+            var changed = copy.rowMut(y);
+            changed[x] = if (changed[x].cp == 'Z') .{ .cp = 'Q' } else .{ .cp = 'Z' };
+            try testing.expect(!moved.rowEquals(y, changed));
+        }
     }
 }
 
