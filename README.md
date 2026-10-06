@@ -43,15 +43,17 @@ scenarios are 1 and 10 idle panes, a 60 Hz one-cell spinner, 30 lines/s of
 output, and 10 hidden panes that each print 30 lines/s while the focused
 pane is idle. The idle and hidden-producer scenarios also run detached,
 with no client. Kiwa's tabs and tmux's windows hold one pane each. For the
-server and the client separately, the bench reports CPU, context switches,
-and RSS at the end of the sample, plus the bytes that reach the outer
-terminal. Kiwa's outer side answers its probes like a terminal with left
-and right margins; the 30 lines/s scenario also runs Kiwa against one
-without them. Each run checks that every producer kept writing. tmux runs only as
+server and the client separately, the bench reports CPU from
+`/proc/<pid>/task/*/schedstat`, context switches, and RSS at the end of the
+sample, plus the bytes that reach the outer terminal. Kiwa's outer side
+answers its probes like a terminal with left and right margins; the
+30 lines/s scenario also runs Kiwa against one without them. Each run
+checks that every producer kept writing. tmux runs only as
 `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and Kiwa uses a private
 `KIWA_SOCKET` and `KIWA_STATE_DIR`, so the benchmark never touches a
-running session. Pass options after `--`, for example `-- --runs 5` or
-`-- --only detached`.
+running session. SIGTERM, SIGHUP, and ctrl+c still stop every server the
+bench started and remove its tmux sockets. Pass options after `--`, for
+example `-- --runs 5` or `-- --only detached`.
 
 ## Run
 

@@ -5,9 +5,10 @@ Each multiplexer runs at 100x40 with `/bin/sh` in every pane. An attached
 scenario runs the client in a PTY that this script drains; a detached one
 sets the session up through a client, detaches it, and measures the server
 alone. Per scenario and run, it reports the server's and the client's CPU
-(utime + stime from /proc/<pid>/stat), their context switches, their VmRSS
-at the end of the sample, and the bytes read from the outer PTY during the
-sample. Producer programs run inside panes and are not counted.
+(run time from /proc/<pid>/task/*/schedstat, plus utime + stime ticks from
+/proc/<pid>/stat for comparison with older tables), their context switches,
+their VmRSS at the end of the sample, and the bytes read from the outer PTY
+during the sample. Producer programs run inside panes and are not counted.
 
 Kiwa's tabs and tmux's windows have the same structure: one pane each, the
 last one focused. Kiwa runs against an outer side that answers its attach
@@ -18,6 +19,8 @@ go unanswered.
 Kiwa uses a private KIWA_SOCKET and KIWA_STATE_DIR. tmux runs only as
 `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and only that socket is
 killed at the end, so the user's tmux and Kiwa servers are never touched.
+SIGTERM and SIGHUP unwind like ctrl+c, so an interrupted run still stops
+its servers and removes their sockets.
 
 Usage: tools/bench.py KIWA_BINARY [--build MODE] [--runs N] [--warmup S] [--sample S]
 Usually run through `zig build bench -Doptimize=ReleaseFast`.
@@ -25,6 +28,7 @@ Usually run through `zig build bench -Doptimize=ReleaseFast`.
 
 import argparse
 import fcntl
+import glob
 import os
 import select
 import shutil
@@ -40,6 +44,7 @@ from dataclasses import dataclass
 
 COLS, ROWS = 100, 40
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+TMUX_DIR = f"/tmp/tmux-{os.getuid()}"
 PREFIX = b"\x02"
 
 SPINNER = """\
@@ -118,6 +123,15 @@ def cpu_ticks(pid):
     return int(fields[11]) + int(fields[12])
 
 
+def run_ns(pid):
+    """CPU time of all of `pid`'s threads, in nanoseconds."""
+    total = 0
+    for task in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{task}/schedstat") as f:
+            total += int(f.read().split()[0])
+    return total
+
+
 def status_field(pid, *names):
     total = 0
     with open(f"/proc/{pid}/status") as f:
@@ -161,7 +175,9 @@ def script_pids(work):
 
 
 def strays(work):
-    """Pids of processes that still run in `work` or name it on their command line."""
+    """Pids of processes that still run in `work` or name it on their command
+    line or in their environment. The Kiwa server runs in `/`, so only its
+    KIWA_SOCKET ties it to `work`."""
     pids = []
     want = work.encode()
     for entry in os.listdir("/proc"):
@@ -171,9 +187,11 @@ def strays(work):
             cwd = os.readlink(f"/proc/{entry}/cwd")
             with open(f"/proc/{entry}/cmdline", "rb") as f:
                 cmdline = f.read()
+            with open(f"/proc/{entry}/environ", "rb") as f:
+                environ = f.read()
         except OSError:
             continue
-        if cwd == work or cwd.startswith(work + "/") or want in cmdline:
+        if cwd == work or cwd.startswith(work + "/") or want in cmdline or want in environ:
             pids.append(int(entry))
     return pids
 
@@ -203,14 +221,17 @@ class Outer:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         pid = os.fork()
         if pid == 0:
-            os.close(master)
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-            for fd in (0, 1, 2):
-                os.dup2(slave, fd)
-            os.close(slave)
-            os.chdir(cwd)
-            os.execve(argv[0], argv, env)
+            try:
+                os.close(master)
+                os.setsid()
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+                for fd in (0, 1, 2):
+                    os.dup2(slave, fd)
+                os.close(slave)
+                os.chdir(cwd)
+                os.execve(argv[0], argv, env)
+            finally:
+                os._exit(127)
         os.close(slave)
         self.fd = master
         self.pid = pid
@@ -386,7 +407,9 @@ class Tmux:
         Tmux.count += 1
         self.binary = binary
         self.socket = f"kiwa-bench-{os.getpid()}-{Tmux.count}"
-        self.socket_path = None
+        # base_env has no TMUX_TMPDIR, so tmux puts the socket here.
+        self.socket_path = os.path.join(TMUX_DIR, self.socket)
+        self.server = None
         self.env = base_env(work)
         self.base = [binary, "-L", self.socket, "-f", "/dev/null"]
         self.outer = None
@@ -394,7 +417,9 @@ class Tmux:
             # The status line is off so both multiplexers show a 100x40 pane.
             self.run("new-session", "-d", "-x", str(COLS), "-y", str(ROWS), "-c", work, "/bin/sh",
                      ";", "set", "-g", "status", "off")
-            pid, self.socket_path = self.run("display-message", "-p", "#{pid} #{socket_path}").split()
+            pid, socket_path = self.run("display-message", "-p", "#{pid} #{socket_path}").split()
+            if socket_path != self.socket_path:
+                raise RuntimeError(f"tmux socket at {socket_path}, not {self.socket_path}")
             self.server = int(pid)
             for _ in range(scenario.tabs - 1):
                 self.run("new-window", "-c", work, "/bin/sh")
@@ -426,12 +451,18 @@ class Tmux:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if self.outer:
             self.outer.close()
+        if self.server is not None:
+            for _ in range(100):
+                if not os.path.exists(f"/proc/{self.server}"):
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(self.server, signal.SIGKILL)
         # tmux leaves its socket file behind after kill-server.
-        if self.socket_path and os.path.basename(self.socket_path) == self.socket:
-            try:
-                os.unlink(self.socket_path)
-            except FileNotFoundError:
-                pass
+        try:
+            os.unlink(self.socket_path)
+        except FileNotFoundError:
+            pass
 
 
 def wait(v, seconds):
@@ -451,11 +482,11 @@ def measure(name, start, scenario, warmup, sample):
         v = start(work, scenario)
         wait(v, warmup)
         roles = {"server": v.server, "client": v.client}
-        pids = [p for p in roles.values() if p]
         scripts = script_pids(work)
         written = {p: bytes_written(p) for ps in scripts.values() for p in ps}
         ticks = {role: cpu_ticks(p) for role, p in roles.items() if p}
-        switches = sum(context_switches(p) for p in pids)
+        ns = {role: run_ns(p) for role, p in roles.items() if p}
+        switches = {role: context_switches(p) for role, p in roles.items() if p}
         if v.outer:
             v.outer.bytes = 0
             v.outer.tail = b""
@@ -463,13 +494,14 @@ def measure(name, start, scenario, warmup, sample):
         wait(v, sample)
         elapsed = time.monotonic() - began
         ticks = {role: cpu_ticks(p) - ticks[role] for role, p in roles.items() if p}
-        switches = sum(context_switches(p) for p in pids) - switches
+        ns = {role: run_ns(p) - ns[role] for role, p in roles.items() if p}
+        switches = {role: context_switches(p) - switches[role] for role, p in roles.items() if p}
         rss = {role: rss_kib(p) for role, p in roles.items() if p}
         return {
             "elapsed": elapsed,
             "ticks": sum(ticks.values()),
-            "cpu": {role: 100.0 * t / CLK_TCK / elapsed for role, t in ticks.items()},
-            "total": 100.0 * sum(ticks.values()) / CLK_TCK / elapsed,
+            "cpu": {role: 100.0 * t / 1e9 / elapsed for role, t in ns.items()},
+            "total": 100.0 * sum(ns.values()) / 1e9 / elapsed,
             "switches": switches,
             "rss": rss,
             "bytes": v.outer.bytes if v.client else None,
@@ -532,6 +564,8 @@ def main():
     ap.add_argument("--sample", type=float, default=12.0)
     ap.add_argument("--only", help="run only the scenarios whose name contains this text")
     args = ap.parse_args()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, _: sys.exit(128 + signum))
     kiwa = os.path.abspath(args.kiwa)
     scenarios = [s for s in SCENARIOS if not args.only or args.only in s.name]
 
@@ -563,10 +597,14 @@ def main():
                 results.setdefault((scenario.name, name), []).append(r)
                 cpu = ", ".join(f"{role} {pct:.3f}%" for role, pct in r["cpu"].items())
                 rss = ", ".join(f"{role} {kib} KiB" for role, kib in r["rss"].items())
+                switches = ", ".join(f"{role} {n}" for role, n in r["switches"].items())
                 print(f"  {scenario.name} run {run + 1} {name}: {r['ticks']} ticks, {cpu}, "
-                      f"{r['bytes']} bytes, {r['switches']} context switches, RSS {rss}, "
+                      f"{r['bytes']} bytes, context switches {switches}, RSS {rss}, "
                       f"load {r['load']:.2f}", flush=True)
 
+    left = glob.glob(os.path.join(TMUX_DIR, f"kiwa-bench-{os.getpid()}-*"))
+    if left:
+        raise RuntimeError(f"tmux sockets left behind: {left}")
     print()
     print(f"load at the end {' '.join(f'{v:.2f}' for v in os.getloadavg())}")
     print()
@@ -574,7 +612,7 @@ def main():
           f"| Ticks per run | Context switches | Outer bytes in {args.sample:g} s | Outer bytes per frame "
           "| Server RSS MiB | Client RSS MiB |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
-    pct = lambda v: f"{v:.2f}"
+    pct = lambda v: f"{v:.3f}"
     count = lambda v: f"{v:,.0f}"
     mib = lambda v: f"{v / 1024:.1f}"
     for scenario in scenarios:
@@ -596,7 +634,7 @@ def main():
                   f"| {column(lambda r: r['cpu'].get('client'), pct)} "
                   f"| {column(lambda r: r['total'], pct)} "
                   f"| {', '.join(str(r['ticks']) for r in rs)} "
-                  f"| {column(lambda r: r['switches'], count)} "
+                  f"| {column(lambda r: sum(r['switches'].values()), count)} "
                   f"| {column(lambda r: r['bytes'], count)} "
                   f"| {per_frame} "
                   f"| {column(lambda r: r['rss']['server'], mib)} "
