@@ -11,7 +11,7 @@ pub fn event(w: *std.Io.Writer, t: *const vt.Terminal, ev: input.Event) std.Io.W
     switch (ev) {
         .key => |k| {
             var utf8: [4]u8 = undefined;
-            try vt.input.encodeKey(w, keyEvent(k, &utf8), .fromTerminal(t));
+            try vt.input.encodeKey(w, keyEvent(k, &utf8), keyOptions(t));
         },
         .paste => |p| {
             const parts = vt.input.encodePaste(p.data, .fromTerminal(t));
@@ -26,6 +26,15 @@ pub fn event(w: *std.Io.Writer, t: *const vt.Terminal, ev: input.Event) std.Io.W
         .unknown => |bytes| try w.writeAll(bytes),
         .mouse, .reply => {},
     }
+}
+
+/// The pane terminal's key options. Alt is always alt: the outer
+/// terminal already decided what its option key sends, so the macOS
+/// default of option producing text would drop alt from decoded chords.
+pub fn keyOptions(t: *const vt.Terminal) vt.input.KeyEncodeOptions {
+    var opts: vt.input.KeyEncodeOptions = .fromTerminal(t);
+    opts.macos_option_as_alt = .true;
+    return opts;
 }
 
 /// Encodes a mouse report at pane-local cell (`x`, `y`), which lies
@@ -245,8 +254,8 @@ fn encodeWith(ev: KeyEvent, opts: KeyOptions, buf: []u8) ![]const u8 {
 }
 
 test "every press decodes from either outer encoding and re-encodes as the pane would see it directly" {
-    const legacy: KeyOptions = .{ .alt_esc_prefix = true };
-    const kitty: KeyOptions = .{ .alt_esc_prefix = true, .kitty_flags = .{ .disambiguate = true } };
+    const legacy: KeyOptions = .{ .alt_esc_prefix = true, .macos_option_as_alt = .true };
+    const kitty: KeyOptions = .{ .alt_esc_prefix = true, .macos_option_as_alt = .true, .kitty_flags = .{ .disambiguate = true } };
     const outers = [_]KeyOptions{ legacy, kitty };
     var panes = [_]Pane{ undefined, undefined, undefined };
     try panes[0].init("");
@@ -260,7 +269,7 @@ test "every press decodes from either outer encoding and re-encodes as the pane 
         var outer_buf: [64]u8 = undefined;
         const outer_bytes = try encodeWith(press, outer, &outer_buf);
         var direct_buf: [64]u8 = undefined;
-        const direct = try encodeWith(press, .fromTerminal(&pane.t), &direct_buf);
+        const direct = try encodeWith(press, keyOptions(&pane.t), &direct_buf);
 
         var d: input.Decoder = .{};
         defer d.deinit(gpa);

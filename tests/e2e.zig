@@ -222,7 +222,7 @@ const Outer = struct {
             if (sys.openpty(&master, &slave, null, null, &ws) != 0) return error.OpenPtyFailed;
             try sys.setCloexec(master, true);
             try sys.setCloexec(slave, true);
-            slave_flags = try sys.getFlags(slave);
+            slave_flags = try statusFlags(slave);
             const pid = sys.fork();
             if (pid == 0) {
                 _ = sys.setsid();
@@ -328,7 +328,10 @@ const Outer = struct {
     fn press(o: *Outer, ev: vt.input.KeyEvent) !void {
         var buf: [64]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        try vt.input.encodeKey(&w, ev, .fromTerminal(&o.term));
+        var opts: vt.input.KeyEncodeOptions = .fromTerminal(&o.term);
+        // A terminal whose option key sends alt, as Kiwa's users configure it.
+        opts.macos_option_as_alt = .true;
+        try vt.input.encodeKey(&w, ev, opts);
         try o.send(w.buffered());
     }
 
@@ -379,7 +382,7 @@ const Outer = struct {
     /// The file status flags of the client's stdin, which the harness's
     /// slave shares.
     fn slaveFlags(o: *const Outer) !c_int {
-        return sys.getFlags(o.slave.?);
+        return statusFlags(o.slave.?);
     }
 
     /// Feeds everything that arrives within `ms` into the outer model.
@@ -548,6 +551,15 @@ fn char(comptime c: u8, mods: Mods) vt.input.KeyEvent {
 }
 
 const ctrl: Mods = .{ .ctrl = true };
+
+/// The access mode and the flags `F_SETFL` changes. macOS also reports
+/// kernel bookkeeping, such as `FWASWRITTEN` (0x10000) once anything wrote
+/// through the open file description.
+fn statusFlags(fd: sys.fd_t) !c_int {
+    const settable: c_int = @bitCast(libc.O{ .NONBLOCK = true, .APPEND = true });
+    const access_mode = 3;
+    return try sys.getFlags(fd) & (settable | access_mode);
+}
 
 fn expect(ok: bool, what: []const u8) !void {
     if (!ok) {
@@ -2759,9 +2771,15 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
 
 extern "c" fn alarm(seconds: c_uint) c_uint;
 
-/// Ends the whole run, through SIGALRM's default action, when one case
-/// takes longer. The last line printed names the case before it.
+/// Ends the whole run when one case takes longer.
 const case_timeout_s = 180;
+
+var running_case: []const u8 = "";
+
+fn onCaseTimeout(_: std.c.SIG) callconv(.c) void {
+    std.debug.print("TIMEOUT {s}\n", .{running_case});
+    sys._exit(1);
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -2780,12 +2798,16 @@ pub fn main(init: std.process.Init) !u8 {
     const kind = std.meta.stringToEnum(Kind, kind_arg) orelse return error.UnknownKind;
     const filter = args.next();
 
+    var on_alarm: libc.Sigaction = .{ .handler = .{ .handler = onCaseTimeout }, .mask = undefined, .flags = 0 };
+    _ = libc.sigemptyset(&on_alarm.mask);
+    _ = libc.sigaction(.ALRM, &on_alarm, null);
     var passed: usize = 0;
     var failed: usize = 0;
     for (cases, 0..) |case, i| {
         if (case.kind != kind) continue;
         if (filter) |f| if (std.mem.indexOf(u8, case.name, f) == null) continue;
         // A hung case would otherwise hold CI until its job times out.
+        running_case = case.name;
         _ = alarm(case_timeout_s);
         const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, i, case.run) catch |e| blk: {
             std.debug.print("    error: {t}\n", .{e});
