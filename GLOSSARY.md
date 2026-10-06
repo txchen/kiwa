@@ -39,8 +39,9 @@ and the composed frames.
 _Avoid_: daemon, host
 
 **Client**:
-The process in the user's terminal that attaches to the server, forwards
-input, and writes frames to the outer terminal.
+The process in the user's terminal that attaches to the server and hands
+it the outer terminal, then restores the outer terminal on detach. The
+server reads input from and writes frames to the outer terminal itself.
 _Avoid_: UI, viewer
 
 **Outer terminal**:

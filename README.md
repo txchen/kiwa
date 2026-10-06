@@ -87,6 +87,11 @@ kiwa kill-server  # stop the server and its panes
 kiwa --version    # version and pinned Ghostty commit
 ```
 
+On attach, the client puts the terminal in raw mode and passes it to the
+server over the socket, as tmux's client does. The server then reads keys
+from it and writes frames to it directly, and the client sleeps until it
+detaches and restores the terminal.
+
 The prefix is `ctrl+b`. Press it, then one of these keys:
 
 | Key | Action |
