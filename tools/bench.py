@@ -126,10 +126,11 @@ def median(runs, get):
 
 
 def idle_budget(kiwa, tmux):
-    cpu = median(kiwa, lambda r: r["total"])
-    switches = median(kiwa, lambda r: sum(r["switches"].values()))
+    """Idle is a hard rule, so every run must be zero, not only the median."""
+    cpu = max(r["total"] for r in kiwa)
+    switches = max(sum(r["switches"].values()) for r in kiwa)
     return (cpu == 0 and switches == 0,
-            f"Kiwa {cpu:.3f}% CPU and {switches:g} context switches, limit 0 and 0")
+            f"Kiwa worst run {cpu:.3f}% CPU and {switches:g} context switches, limit 0 and 0")
 
 
 def cpu_budget(factor):
@@ -695,7 +696,7 @@ def main():
         return 0
     print()
     print(f"Gates on medians; a relative CPU gate allows {TOLERANCE:.0%} of tmux's value, "
-          f"at least {MIN_TOLERANCE:g} percentage points, for noise; the idle gate allows none.")
+          f"at least {MIN_TOLERANCE:g} percentage points, for noise; the idle gate allows none in any run.")
     failed = 0
     for gate, covers, check in GATES:
         for scenario in filter(covers, scenarios):
