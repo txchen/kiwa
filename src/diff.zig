@@ -39,25 +39,20 @@ pub const Scroll = struct {
     /// blank. A wide character cut by a side margin becomes unknown.
     fn apply(s: Scroll, f: *Frame) void {
         const r = s.rect;
-        std.debug.assert(r.rows >= 2 and s.n != 0 and @abs(s.n) < r.rows and r.x + r.cols <= f.cols);
+        std.debug.assert(r.rows >= 2 and r.x + r.cols <= f.cols);
         const cut_left = r.x > 0 and straddles(f, r, r.x);
         const cut_right = r.x + r.cols < f.cols and straddles(f, r, r.x + r.cols);
-        // Moving up fills the rows top down and moving down bottom up, so
-        // that each row is read before it is overwritten.
-        for (0..r.rows) |k| {
-            const i = if (s.n > 0) k else r.rows - 1 - k;
-            const out = f.rowMut(r.y + i);
-            if (s.source(i)) |fy| @memcpy(out[r.x..][0..r.cols], f.row(r.y + fy)[r.x..][0..r.cols]) else @memset(out[r.x..][0..r.cols], .blank);
+        f.scrollRows(r, s.n);
+        if (cut_left or cut_right) for (r.y..r.y + r.rows) |y| {
+            const out = f.rowMut(y);
             if (cut_left) @memset(out[r.x - 1 ..][0..2], unknown);
             if (cut_right) @memset(out[r.x + r.cols - 1 ..][0..2], unknown);
-        }
+        };
     }
 
     /// The band row whose cells land in band row `i`, if any.
     fn source(s: Scroll, i: usize) ?usize {
-        const n: usize = @abs(s.n);
-        if (s.n > 0) return if (i + n < s.rect.rows) i + n else null;
-        return if (i >= n) i - n else null;
+        return frame.scrollSource(s.rect.rows, s.n, i);
     }
 
     /// Margins that end at the frame's edge leave out that parameter.
@@ -587,7 +582,7 @@ const Outer = struct {
         try o.rs.update(alloc, &o.term);
         try o.seen.resize(alloc, want.cols, want.rows);
         const rect: frame.Rect = .{ .cols = want.cols, .rows = want.rows };
-        try o.seen.composePane(alloc, g, rect, &o.rs, true);
+        try o.seen.composePane(alloc, g, rect, &o.rs, .all);
         o.seen.cursor = frame.paneCursor(rect, &o.rs, o.term.cursor.is_default);
         for (0..want.rows) |y| for (want.row(y), o.seen.row(y), 0..) |a, b, x| {
             if (!a.eql(b)) {

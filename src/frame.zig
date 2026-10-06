@@ -186,6 +186,20 @@ pub const Frame = struct {
         }
     }
 
+    /// Moves the rows inside `r` by `n`: up when positive, as output at
+    /// the bottom of a pane moves them, down when negative. Rows that
+    /// move in are blank.
+    pub fn scrollRows(f: *Frame, r: Rect, n: i32) void {
+        std.debug.assert(n != 0 and @abs(n) < r.rows);
+        // Moving up fills the rows top down and moving down bottom up, so
+        // that each row is read before it is overwritten.
+        for (0..r.rows) |k| {
+            const i = if (n > 0) k else r.rows - 1 - k;
+            const out = f.rowMut(r.y + i)[r.x..][0..r.cols];
+            if (scrollSource(r.rows, n, i)) |from| @memcpy(out, f.row(r.y + from)[r.x..][0..r.cols]) else @memset(out, .blank);
+        }
+    }
+
     /// Copies every cell and the cursor, and marks every row.
     pub fn copyFrom(f: *Frame, src: *const Frame) void {
         std.debug.assert(f.cols == src.cols and f.rows == src.rows);
@@ -203,26 +217,46 @@ pub const Frame = struct {
         f.cursor = src.cursor;
     }
 
-    /// Copies a pane's rows into `rect`. Rows the render state reports clean
-    /// keep their cells, unless `all` is set. Consumes the render state's
-    /// dirty flags.
-    pub fn composePane(f: *Frame, gpa: std.mem.Allocator, g: *Graphemes, rect: Rect, rs: *vt.RenderState, all: bool) !void {
+    /// Which of a pane's rows `composePane` copies.
+    pub const Which = union(enum) {
+        all,
+        /// The rows the render state reports changed.
+        changed,
+        /// Every row but these, whose cells the frame already holds.
+        except: *const std.DynamicBitSetUnmanaged,
+    };
+
+    /// Copies a pane's rows into `rect`. The other rows keep their cells.
+    /// Consumes the render state's dirty flags.
+    pub fn composePane(f: *Frame, gpa: std.mem.Allocator, g: *Graphemes, rect: Rect, rs: *vt.RenderState, which: Which) !void {
         defer rs.clean();
-        if (!all and rs.dirty == .false) return;
-        const every_row = all or rs.dirty == .full;
+        if (which == .changed and rs.dirty == .false) return;
         const rows = rs.row_data.slice();
         const dirty = rows.items(.dirty);
         for (0..rect.rows) |ry| {
+            const wanted = switch (which) {
+                .all => true,
+                .changed => rs.dirty == .full or (ry < rs.rows and dirty[ry]),
+                .except => |held| ry >= held.bit_length or !held.isSet(ry),
+            };
+            if (!wanted) continue;
+            const out = f.rowMut(rect.y + ry)[rect.x..][0..rect.cols];
             if (ry >= rs.rows) {
-                if (every_row) @memset(f.rowMut(rect.y + ry)[rect.x..][0..rect.cols], .blank);
+                @memset(out, .blank);
                 continue;
             }
-            if (!every_row and !dirty[ry]) continue;
-            const out = f.rowMut(rect.y + ry)[rect.x..][0..rect.cols];
             try composeRow(gpa, g, out, rows.items(.cells)[ry], rows.items(.selection)[ry]);
         }
     }
 };
+
+/// The row of a `rows`-tall band whose cells land in row `i` when the band
+/// scrolls by `n`, if any.
+pub fn scrollSource(rows: usize, n: i32, i: usize) ?usize {
+    const d: usize = @abs(n);
+    if (n > 0) return if (i + d < rows) i + d else null;
+    return if (i >= d) i - d else null;
+}
 
 /// `selection` is the row's selected columns, inclusive, drawn in reverse video.
 fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16) !void {
@@ -263,21 +297,53 @@ fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Sty
 }
 
 /// The ids of a pane's rows when a frame last drew them. Comparing them
-/// with the next render tells how far the pane's content scrolled.
+/// with the next render tells how far the pane's content scrolled, and
+/// which rows the frame still holds once its band is scrolled along.
 pub const DrawnRows = struct {
     ids: std.ArrayList(vt.RenderState.Row.Id) = .empty,
+    /// The viewport rows ghostty marked changed since the last render
+    /// update, read by `scan` before the update consumes the marks.
+    changed: std.DynamicBitSetUnmanaged = .{},
+    /// Whether every row may have changed: the screen, its size, a
+    /// selection, or a terminal-wide setting did.
+    all_changed: bool = true,
+    /// After `update` found a shift: the rows whose cells a frame drawn
+    /// from the last record holds once its band is scrolled by the shift.
+    carried: std.DynamicBitSetUnmanaged = .{},
 
     /// A shift that keeps fewer rows than this does not pay for a scroll.
     const min_kept = 2;
 
     pub fn deinit(d: *DrawnRows, gpa: std.mem.Allocator) void {
         d.ids.deinit(gpa);
+        d.changed.deinit(gpa);
+        d.carried.deinit(gpa);
+    }
+
+    /// Reads which viewport rows of `t` changed since `rs` last updated.
+    /// Call right before `rs.update`, which consumes those marks and marks
+    /// every row when the viewport moved. The page and row flags are what
+    /// the update itself reads when the viewport stays put; the checks
+    /// for a whole-screen change mirror its full-rebuild conditions.
+    pub fn scan(d: *DrawnRows, gpa: std.mem.Allocator, t: *const vt.Terminal, rs: *const vt.RenderState) !void {
+        const screen = t.screens.active;
+        const pages = &screen.pages;
+        d.all_changed = t.screens.active_key != rs.screen or rs.rows != pages.rows or rs.cols != pages.cols or
+            !std.meta.eql(t.flags.dirty, .{}) or !std.meta.eql(screen.dirty, .{}) or screen.selection != null;
+        try d.changed.resize(gpa, pages.rows, false);
+        d.changed.unsetAll();
+        if (d.all_changed) return;
+        var it = pages.getTopLeft(.viewport).rowIterator(.right_down, null);
+        for (0..pages.rows) |i| {
+            const pin = it.next() orelse break;
+            if (pin.isDirty()) d.changed.set(i);
+        }
     }
 
     /// Records the rows of `rs` and returns how many rows its content moved
     /// since the last record: positive when it moved up, as output at the
     /// bottom scrolls it, negative when it moved down. Null when it did not
-    /// move or moved too few rows along.
+    /// move or moved too few rows along. Fills `carried` from the last `scan`.
     pub fn update(d: *DrawnRows, gpa: std.mem.Allocator, rs: *const vt.RenderState) !?i32 {
         const rows = rs.row_data.slice();
         const n = @min(rs.rows, rows.len);
@@ -294,6 +360,14 @@ pub const DrawnRows = struct {
                 break;
             };
         }
+        try d.carried.resize(gpa, n, false);
+        d.carried.unsetAll();
+        if (shift) |s| if (!d.all_changed and d.changed.bit_length == n) {
+            for (0..n) |i| {
+                const from = scrollSource(n, s, i) orelse continue;
+                if (d.ids.items[from].eql(rows.get(i).id()) and !d.changed.isSet(i)) d.carried.set(i);
+            }
+        };
         try d.ids.resize(gpa, n);
         for (d.ids.items, 0..) |*id, i| id.* = rows.get(i).id();
         return shift;
@@ -346,7 +420,7 @@ test "composing copies dirty rows and keeps clean ones" {
 
     s.nextSlice("ab\r\n\xe4\xb8\xad\x1b[1mx\x1b[0me\xcc\x81");
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, rect, &rs, false);
+    try f.composePane(testing.allocator, &g, rect, &rs, .changed);
     try testing.expectEqual('a', f.row(0)[0].cp);
     const r1 = f.row(1);
     try testing.expect(r1[0].cp == 0x4e2d and r1[0].width == .wide);
@@ -359,11 +433,11 @@ test "composing copies dirty rows and keeps clean ones" {
     f.rowMut(0)[5].cp = 'Z';
     s.nextSlice("\x1b[3;1Hq");
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, rect, &rs, false);
+    try f.composePane(testing.allocator, &g, rect, &rs, .changed);
     try testing.expectEqual('Z', f.row(0)[5].cp);
     try testing.expectEqual('q', f.row(2)[0].cp);
 
-    try f.composePane(testing.allocator, &g, rect, &rs, true);
+    try f.composePane(testing.allocator, &g, rect, &rs, .all);
     try testing.expectEqual(' ', f.row(0)[5].cp);
 }
 
@@ -410,11 +484,11 @@ test "writers mark the rows they write and no others" {
     defer g.deinit(testing.allocator);
     s.nextSlice("\x1b[3;1H");
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, false);
+    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, .changed);
     f.clearDirty();
     s.nextSlice("q");
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, false);
+    try f.composePane(testing.allocator, &g, .{ .y = 1, .cols = 4, .rows = 3 }, &rs, .changed);
     try expectDirty(&f, &.{3});
     try testing.expectEqual('q', f.row(3)[0].cp);
 }
@@ -435,13 +509,13 @@ test "selected cells are drawn in reverse video" {
     const screen = t.screens.active;
     try screen.select(.init(screen.pages.pin(.{ .viewport = .{ .x = 4 } }).?, screen.pages.pin(.{ .viewport = .{ .x = 0, .y = 1 } }).?, false));
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, false);
+    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, .changed);
     for (f.row(0), 0..) |c, x| try testing.expectEqual(x >= 4, c.style.flags.inverse);
     try testing.expect(!f.row(1)[0].style.flags.inverse);
     try testing.expect(f.row(1)[1].style.flags.inverse);
     screen.clearSelection();
     try rs.update(testing.allocator, &t);
-    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, false);
+    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, .changed);
     try testing.expect(!f.row(0)[4].style.flags.inverse);
 }
 
@@ -481,6 +555,167 @@ test "the cursor follows the pane's shape, visibility, and position" {
     s.nextSlice("\x1b[5 q\x1b[?25l");
     try rs.update(testing.allocator, &t);
     try testing.expectEqual(Cursor{ .x = 3, .y = 1, .visible = false, .shape = .blinking_bar }, paneCursor(rect, &rs, t.cursor.is_default));
+}
+
+test "scrolling rows moves a rect's cells and blanks the rows that come in" {
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 4, 4);
+    for (0..4) |y| for (0..4) |x| {
+        f.rowMut(y)[x] = .{ .cp = @intCast('a' + y * 4 + x) };
+    };
+    f.clearDirty();
+    f.scrollRows(.{ .x = 1, .y = 1, .cols = 2, .rows = 3 }, 2);
+    const want = [4][]const u8{ "abcd", "enoh", "i  l", "m  p" };
+    for (want, 0..) |text, y| for (text, f.row(y)) |cp, cell| try testing.expectEqual(cp, cell.cp);
+    try expectDirty(&f, &.{ 1, 2, 3 });
+
+    f.scrollRows(.{ .x = 1, .y = 1, .cols = 2, .rows = 3 }, -1);
+    const down = [4][]const u8{ "abcd", "e  h", "inol", "m  p" };
+    for (down, 0..) |text, y| for (text, f.row(y)) |cp, cell| try testing.expectEqual(cp, cell.cp);
+}
+
+/// Composes `rs` into a fresh frame the slow way, for comparison.
+fn composeAll(gpa: std.mem.Allocator, g: *Graphemes, f: *Frame, rect: Rect, rs: *vt.RenderState) !void {
+    try f.resize(gpa, rect.x + rect.cols, rect.y + rect.rows);
+    try f.composePane(gpa, g, rect, rs, .all);
+}
+
+fn expectSameCells(a: *const Frame, b: *const Frame) !void {
+    for (0..a.rows) |y| for (a.row(y), b.row(y), 0..) |p, q, x| if (!p.eql(q)) {
+        std.debug.print("cell ({d},{d}): {any}\n vs {any}\n", .{ x, y, p, q });
+        return error.TestExpectedEqual;
+    };
+}
+
+test "a scrolled frame composes only the rows the shift did not carry" {
+    const gpa = testing.allocator;
+    var t: vt.Terminal = try .init(testing.io, gpa, .{ .cols = 6, .rows = 4 });
+    defer t.deinit(gpa);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(gpa);
+    var d: DrawnRows = .{};
+    defer d.deinit(gpa);
+    var g: Graphemes = .{};
+    defer g.deinit(gpa);
+    var f: Frame = .{};
+    defer f.deinit(gpa);
+    var want: Frame = .{};
+    defer want.deinit(gpa);
+    const rect: Rect = .{ .x = 1, .y = 1, .cols = 6, .rows = 4 };
+    try f.resize(gpa, 7, 5);
+
+    s.nextSlice("a\r\nb\r\nc\r\nd");
+    try d.scan(gpa, &t, &rs);
+    try rs.update(gpa, &t);
+    try testing.expectEqual(null, try d.update(gpa, &rs));
+    try f.composePane(gpa, &g, rect, &rs, .all);
+
+    // Two more lines: the band moves up two, the old bottom row gained
+    // text before it moved, and two blank rows came in.
+    s.nextSlice("d2\r\ne\r\nf");
+    try d.scan(gpa, &t, &rs);
+    try testing.expect(!d.all_changed);
+    try rs.update(gpa, &t);
+    try testing.expectEqual(2, try d.update(gpa, &rs));
+    try testing.expect(d.carried.isSet(0));
+    try testing.expect(!d.carried.isSet(1));
+    try testing.expect(!d.carried.isSet(2));
+    try testing.expect(!d.carried.isSet(3));
+    f.scrollRows(rect, 2);
+    f.clearDirty();
+    try f.composePane(gpa, &g, rect, &rs, .{ .except = &d.carried });
+    try expectDirty(&f, &.{ 2, 3, 4 });
+    try composeAll(gpa, &g, &want, rect, &rs);
+    try expectSameCells(&f, &want);
+    try testing.expectEqual('c', f.row(1)[1].cp);
+    try testing.expectEqual('2', f.row(2)[3].cp);
+    try testing.expectEqual('f', f.row(4)[1].cp);
+
+    // Scrolling back keeps every row that reappears.
+    t.scrollViewport(.{ .delta = -1 });
+    try d.scan(gpa, &t, &rs);
+    try rs.update(gpa, &t);
+    try testing.expectEqual(-1, try d.update(gpa, &rs));
+    try testing.expect(!d.carried.isSet(0));
+    for (1..4) |i| try testing.expect(d.carried.isSet(i));
+    f.scrollRows(rect, -1);
+    try f.composePane(gpa, &g, rect, &rs, .{ .except = &d.carried });
+    try composeAll(gpa, &g, &want, rect, &rs);
+    try expectSameCells(&f, &want);
+
+    // A selection may change any row's look, so nothing is carried.
+    t.scrollViewport(.bottom);
+    const screen = t.screens.active;
+    try screen.select(.init(screen.pages.pin(.{ .viewport = .{ .x = 0 } }).?, screen.pages.pin(.{ .viewport = .{ .x = 0, .y = 1 } }).?, false));
+    try d.scan(gpa, &t, &rs);
+    try testing.expect(d.all_changed);
+    try rs.update(gpa, &t);
+    try testing.expectEqual(1, try d.update(gpa, &rs));
+    try testing.expectEqual(0, d.carried.count());
+}
+
+test "random output composed by shift and carried rows matches composing every row" {
+    const gpa = testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(0x63617272);
+    const r = prng.random();
+    var t: vt.Terminal = try .init(testing.io, gpa, .{ .cols = 8, .rows = 5 });
+    defer t.deinit(gpa);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(gpa);
+    var d: DrawnRows = .{};
+    defer d.deinit(gpa);
+    var g: Graphemes = .{};
+    defer g.deinit(gpa);
+    var f: Frame = .{};
+    defer f.deinit(gpa);
+    var want: Frame = .{};
+    defer want.deinit(gpa);
+    const rect: Rect = .{ .x = 2, .y = 1, .cols = 8, .rows = 5 };
+    try f.resize(gpa, 10, 6);
+    var shifts: usize = 0;
+    var carried: usize = 0;
+    for (0..3000) |i| {
+        var buf: [64]u8 = undefined;
+        const op: []const u8 = switch (r.uintLessThan(u8, 10)) {
+            0...3 => try std.fmt.bufPrint(&buf, "{c}{c}\r\n", .{ r.intRangeAtMost(u8, 'a', 'z'), r.intRangeAtMost(u8, 'a', 'z') }),
+            4 => try std.fmt.bufPrint(&buf, "\x1b[{d};{d}H{c}", .{ r.intRangeAtMost(u8, 1, 5), r.intRangeAtMost(u8, 1, 8), r.intRangeAtMost(u8, 'A', 'Z') }),
+            5 => "\x1b[31m\xe4\xb8\xad\x1b[0m",
+            6 => "\r\n\r\n\r\n",
+            7 => "\x1b[2;4r\x1b[4;1H\n\x1b[r",
+            8 => "\x1b[K",
+            else => "",
+        };
+        s.nextSlice(op);
+        switch (r.uintLessThan(u8, 8)) {
+            0 => t.scrollViewport(.{ .delta = -1 }),
+            1 => t.scrollViewport(.bottom),
+            2 => t.scrollViewport(.{ .delta = 2 }),
+            else => {},
+        }
+        try d.scan(gpa, &t, &rs);
+        try rs.update(gpa, &t);
+        const shift = try d.update(gpa, &rs);
+        if (shift) |n| {
+            shifts += 1;
+            carried += d.carried.count();
+            f.scrollRows(rect, n);
+            try f.composePane(gpa, &g, rect, &rs, .{ .except = &d.carried });
+        } else {
+            try f.composePane(gpa, &g, rect, &rs, .changed);
+        }
+        try composeAll(gpa, &g, &want, rect, &rs);
+        expectSameCells(&f, &want) catch |e| {
+            std.debug.print("iteration {d}, op {any}, shift {?d}\n", .{ i, op, shift });
+            return e;
+        };
+    }
+    // The test is only meaningful when it exercised carried rows.
+    try testing.expect(shifts > 200 and carried > shifts);
 }
 
 test "drawn rows tell how far a pane scrolled" {
