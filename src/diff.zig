@@ -299,6 +299,9 @@ const Out = struct {
     }
 
     fn row(o: *Out, old: ?[]const Cell, new: []const Cell, y: u16) Writer.Error!void {
+        // Most rows a scroll moves are unchanged; a plain compare settles
+        // them without the per-character bookkeeping below.
+        if (old) |prev| if (rowsEqual(prev, new)) return;
         const blank_from = blankTailStart(new);
         var erase_declined = false;
         var x: usize = 0;
@@ -373,6 +376,11 @@ fn nextChanged(old: ?[]const Cell, new: []const Cell, from: usize) ?usize {
         x = end;
     }
     return null;
+}
+
+fn rowsEqual(a: []const Cell, b: []const Cell) bool {
+    for (a, b) |x, y| if (!x.eql(y)) return false;
+    return true;
 }
 
 /// An unknown screen has just been cleared, so it is all blanks.
