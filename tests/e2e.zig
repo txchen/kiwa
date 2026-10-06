@@ -352,8 +352,10 @@ const Outer = struct {
             _ = libc.kill(o.pid, .KILL);
             _ = waitChild(o.pid);
         }
-        o.closeSlave();
+        // The master first: on macOS, closing the last slave fd waits for
+        // its unread output to drain, and nothing reads the master then.
         if (!o.hung_up) sys.close(o.master);
+        o.closeSlave();
         o.clipboard.deinit(o.gpa);
         o.stream.deinit();
         o.term.deinit(o.gpa);
@@ -363,8 +365,8 @@ const Outer = struct {
     /// Closes the master, as a terminal emulator does when its window
     /// closes, which hangs up the slave.
     fn hangUp(o: *Outer) void {
-        o.closeSlave();
         sys.close(o.master);
+        o.closeSlave();
         o.hung_up = true;
         o.eof = true;
     }
@@ -598,7 +600,9 @@ fn detachKeepsFileStatusFlags(ctx: *Ctx) !void {
     try o.waitKitty();
     try o.send("echo attached\r");
     try o.waitLine("attached");
-    try expect(try o.slaveFlags() == o.slave_flags, "while attached, the terminal's file status flags are unchanged");
+    const during = try o.slaveFlags();
+    if (during != o.slave_flags) std.debug.print("    flags before attach 0x{x}, while attached 0x{x}\n", .{ o.slave_flags, during });
+    try expect(during == o.slave_flags, "while attached, the terminal's file status flags are unchanged");
     try o.send("\x02q");
     try o.waitLine("detached");
     const after = try o.slaveFlags();
@@ -2753,6 +2757,12 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "a corrupt session.json is moved aside and the server starts fresh", .run = corruptSaveIsMovedAside },
 };
 
+extern "c" fn alarm(seconds: c_uint) c_uint;
+
+/// Ends the whole run, through SIGALRM's default action, when one case
+/// takes longer. The last line printed names the case before it.
+const case_timeout_s = 180;
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
@@ -2775,6 +2785,8 @@ pub fn main(init: std.process.Init) !u8 {
     for (cases, 0..) |case, i| {
         if (case.kind != kind) continue;
         if (filter) |f| if (std.mem.indexOf(u8, case.name, f) == null) continue;
+        // A hung case would otherwise hold CI until its job times out.
+        _ = alarm(case_timeout_s);
         const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, i, case.run) catch |e| blk: {
             std.debug.print("    error: {t}\n", .{e});
             break :blk false;
