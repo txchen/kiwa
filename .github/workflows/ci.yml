@@ -16,3 +16,5 @@ concurrency:
 jobs:
   linux:
     uses: ./.github/workflows/linux.yml
+  macos:
+    uses: ./.github/workflows/macos.yml

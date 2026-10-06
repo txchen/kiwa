@@ -22,8 +22,9 @@ this project.
 ## CI and binary releases
 
 GitHub Actions runs formatting checks, unit tests, and PTY end-to-end tests
-in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners.
-Each successful ReleaseFast job uploads a downloadable archive. The same
+in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners and
+a `macos-15` ARM64 runner. Each successful Linux ReleaseFast job uploads a
+downloadable archive. The same
 workflow builds and tests release artifacts, so release tests use the same
 CPU target and optimization mode as the shipped binary. Zig is installed
 from `mise.toml`; Ghostty remains pinned by `build.zig.zon`.
@@ -71,25 +72,34 @@ before tagging; shared GitHub runners are too noisy for reliable CPU
 performance gates. The benchmark is Linux-only and requires Python 3 and
 tmux.
 
-### macOS ARM64 support
+### macOS
 
-Kiwa currently supports Linux only. Adding `aarch64-macos` to a build matrix
-is insufficient: the client, server, process inspection, file watching,
-and test harness currently use Linux APIs directly. A macOS port needs
-platform implementations for epoll/signalfd/timerfd (using kqueue and
-appropriate signal/timer handling), inotify, pidfds, peer credentials,
-PTY/termios handling, and `/proc` process/executable paths. Preserve the
-existing event-driven behavior while making those changes.
+Kiwa builds for Apple silicon Macs running macOS 13.0 or later. Intel Macs
+are not supported. Build and test on a Mac with:
 
-After the port passes the unit and PTY end-to-end tests, add a native
-[`macos-15` ARM64 job](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-targeting `aarch64-macos`, with an explicit minimum
-macOS version and CPU baseline, to the shared build workflow. Extend the
-release job's required archive list as well. Test the chosen minimum OS
-separately; a successful build on macOS 15 does not establish support for
-older versions. macOS binaries use the system libraries rather than a
-fully static musl executable. Signing and notarization can then be added
-with an Apple Developer identity if required for distribution.
+```sh
+brew install htop fzf   # the end-to-end tests also need git, Python 3, less, and Vim
+mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0
+```
+
+The binary links the system libraries, so it is not a static executable.
+No release publishes it yet, and it is neither signed nor notarized.
+
+OS-specific code lives in `src/os/linux.zig` and `src/os/darwin.zig`, and
+the test harness's in `tests/os/` (ADR 0005). On Linux,
+`zig build check -Dtarget=aarch64-macos.13.0` compiles the macOS binary,
+unit tests, and end-to-end tests without running them. A clean compile
+means the macOS calls exist in libSystem. It does not show that they
+behave, because Zig compiles `std.os.linux` calls for macOS too.
+`tools/check-os-layer.sh` fails when Zig code outside the per-OS files
+names Linux syscalls or a macOS-only API.
+
+Not yet verified on a Mac: every macOS code path. That covers the kqueue
+event loop, signals, and timer; the Git `HEAD` watch; `kill-server`'s wait
+for the server's exit; reopening the passed terminal by its `ttyname_r`
+name; peer credentials; libproc process inspection; and the end-to-end
+harness's macOS process listing. CI runs the tests natively on a
+`macos-15` runner. A pass there does not show that macOS 13 or 14 works.
 
 ## Test
 

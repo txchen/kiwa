@@ -87,6 +87,11 @@ pub fn build(b: *std.Build) void {
     e2e_run.has_side_effects = true;
     b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);
 
+    // Compiling for another OS proves little about what runs there, but it
+    // does catch a call that the target's libc lacks.
+    const check = b.step("check", "Compile kiwa, the unit tests, and the end-to-end tests without running them");
+    for ([_]*std.Build.Step.Compile{ exe, skewed_exe, unit, e2e_exe }) |artifact| check.dependOn(&artifact.step);
+
     const benches = [_]struct { name: []const u8, description: []const u8, check: bool }{
         .{ .name = "bench", .description = "Compare CPU, memory, and outer bytes with tmux; use -Doptimize=ReleaseFast", .check = false },
         .{ .name = "bench-check", .description = "Run the bench and fail if Kiwa misses a v1 budget; use -Doptimize=ReleaseFast", .check = true },

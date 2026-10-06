@@ -1,0 +1,26 @@
+name: macOS builds
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: aarch64-macos.13.0
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - name: Install end-to-end test dependencies
+        run: brew install htop fzf
+      - name: Check formatting
+        run: mise exec -- zig fmt --check build.zig build.zig.zon src tests
+      - name: Build and run unit and end-to-end tests (Debug)
+        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Doptimize=Debug
+      - name: Build and run unit and end-to-end tests (ReleaseFast)
+        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Doptimize=ReleaseFast

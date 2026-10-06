@@ -14,7 +14,8 @@ against it.
 
 - A deadline is armed only while there is pending work (an unrendered frame,
   a dynamic-name check, a session save) and is never re-armed while idle.
-- Git branch display uses inotify on `HEAD`, not polling.
+- Git branch display watches the Git directory for changes to `HEAD`, with
+  inotify on Linux and kqueue on macOS, not polling.
 - Dynamic tab names are re-checked only after pane output or a focus change,
   at most every 500 ms, following tmux's `automatic-rename`.
 - A test checks that a server with quiet panes makes no event-loop wakes.
