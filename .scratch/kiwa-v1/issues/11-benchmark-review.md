@@ -196,3 +196,9 @@ Blocked by: 07, 08, 09, 10, 12
   ```
 
   Remaining for this ticket: update the design draft.
+- 2026-10-06 (review): Gates merged (c42a9d7, eab83ee). I made the idle
+  gate strict: every run must show 0 CPU and 0 context switches, not only
+  the median, because the user called idle a hard rule. A short
+  `bench-check --only idle` run passed with "worst run 0.000% CPU and 0
+  context switches". Remaining for this ticket: the design-draft update
+  after ticket 15 lands.
