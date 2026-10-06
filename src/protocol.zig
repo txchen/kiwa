@@ -9,18 +9,18 @@
 const std = @import("std");
 
 /// Bump on any change to the encoding, and set `encoding_hash` to match.
-pub const version: u16 = 2;
+pub const version: u16 = 3;
 /// Wyhash of the test sample encoded, as `version` encodes it. The test
 /// "the encoding matches the protocol version" fails when they differ.
-const encoding_hash: u64 = 0xb6bef160494a9e23;
+const encoding_hash: u64 = 0x146e0354abd18a15;
 
 /// A frame larger than this is a protocol error, not a big message.
 pub const max_frame_len: u32 = 16 * 1024 * 1024;
 pub const header_len = 5;
 
 /// Values are never reused, so that an old peer cannot mistake a new
-/// message for another one.
-pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, kill = 4, list = 5, stats = 6, text = 7, _ };
+/// message for another one. 4 was `kill`.
+pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, list = 5, stats = 6, text = 7, _ };
 
 pub const Size = struct { cols: u16, rows: u16 };
 
@@ -33,7 +33,6 @@ pub const Message = union(enum) {
     /// From the server: it has let go of the outer terminal, and why.
     /// From the client: asks the server to let go, for that reason.
     detach: []const u8,
-    kill,
     /// Asks for the session as text, answered with `text` and a close.
     list,
     /// Asks for the server's debug counters, answered like `list`.
@@ -46,14 +45,13 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .hello => |h| 6 + h.cwd.len,
         .detach, .text => |b| b.len,
         .resize => 4,
-        .kill, .list, .stats => 0,
+        .list, .stats => 0,
     };
     try w.writeInt(u32, @intCast(1 + payload_len), .little);
     try w.writeByte(@intFromEnum(@as(Tag, switch (msg) {
         .hello => .hello,
         .resize => .resize,
         .detach => .detach,
-        .kill => .kill,
         .list => .list,
         .stats => .stats,
         .text => .text,
@@ -66,7 +64,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         },
         .detach, .text => |b| try w.writeAll(b),
         .resize => |s| try writeSize(w, s),
-        .kill, .list, .stats => {},
+        .list, .stats => {},
     }
 }
 
@@ -111,7 +109,6 @@ pub fn parse(frame: []const u8) DecodeError!Message {
             break :blk .{ .resize = readSize(payload[0..4]) };
         },
         .detach => .{ .detach = payload },
-        .kill => .kill,
         .list => .list,
         .stats => .stats,
         .text => .{ .text = payload },
@@ -174,7 +171,7 @@ fn expectMessage(expected: Message, actual: Message) !void {
         .detach => |b| try testing.expectEqualStrings(b, actual.detach),
         .text => |b| try testing.expectEqualStrings(b, actual.text),
         .resize => |s| try testing.expectEqual(s, actual.resize),
-        .kill, .list, .stats => {},
+        .list, .stats => {},
     }
 }
 
@@ -184,7 +181,6 @@ const sample = [_]Message{
     .{ .hello = .{ .version = 0x0102, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/home/u/src" } },
     .{ .resize = .{ .cols = 90, .rows = 30 } },
     .{ .detach = "attached elsewhere" },
-    .kill,
     .list,
     .stats,
     .{ .text = "main\n  1 sh\n" },

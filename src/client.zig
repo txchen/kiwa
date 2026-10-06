@@ -215,20 +215,48 @@ fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, path
     if (try sys.read(pipe[0], &byte) != 1) return error.ServerFailedToStart;
 }
 
+/// Stops the server with `SIGTERM`, which saves the session, and waits for
+/// it to exit. No message crosses the socket, so this stops a server of any
+/// protocol version.
 pub fn killServer(paths: paths_mod.Paths) !u8 {
-    const sock = try connectRequest(paths, .kill) orelse return 1;
-    defer sys.close(sock);
-    // The server closes the socket only after removing its path.
-    var buf: [4096]u8 = undefined;
-    while ((sys.read(sock, &buf) catch 0) > 0) {}
+    const sock = try connectServer(paths) orelse return 1;
+    const peer = peer: {
+        defer sys.close(sock);
+        break :peer try sys.peerCred(sock);
+    };
+    var buf: [128]u8 = undefined;
+    if (peer.uid != linux.getuid()) {
+        try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) belongs to another user\n", .{peer.pid}));
+        return 1;
+    }
+    const pidfd = sys.pidfdOpen(peer.pid) catch |e| switch (e) {
+        error.NoSuchProcess => return 0,
+        else => return e,
+    };
+    defer sys.close(pidfd);
+    _ = sys.check(linux.pidfd_send_signal(pidfd, .TERM, null, 0)) catch |e| switch (e) {
+        error.NoSuchProcess => return 0,
+        else => return e,
+    };
+    var pfd = [_]linux.pollfd{.{ .fd = pidfd, .events = linux.POLL.IN, .revents = 0 }};
+    if (try sys.check(linux.poll(&pfd, 1, kill_timeout_ms)) == 0) {
+        try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) did not exit within {d} s\n", .{ peer.pid, kill_timeout_ms / 1000 }));
+        return 1;
+    }
     return 0;
 }
+
+const kill_timeout_ms = 5000;
 
 /// Prints the server's text answer to `request`: the session's workspaces
 /// and tabs for `list`, the debug counters for `stats`.
 pub fn print(gpa: std.mem.Allocator, paths: paths_mod.Paths, request: protocol.Message) !u8 {
-    const sock = try connectRequest(paths, request) orelse return 1;
+    const sock = try connectServer(paths) orelse return 1;
     defer sys.close(sock);
+    var frame: [protocol.header_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&frame);
+    try protocol.encode(&w, request);
+    try sys.writeAll(sock, w.buffered());
     var decoder: protocol.Decoder = .{};
     defer decoder.deinit(gpa);
     var buf: [64 * 1024]u8 = undefined;
@@ -246,22 +274,15 @@ pub fn print(gpa: std.mem.Allocator, paths: paths_mod.Paths, request: protocol.M
     }
 }
 
-/// Connects and sends a request without a payload. Null, after telling
-/// the user, when no server runs.
-fn connectRequest(paths: paths_mod.Paths, request: protocol.Message) !?sys.fd_t {
-    const sock = sys.connectUnix(paths.socket) catch |e| switch (e) {
+/// Null, after telling the user, when no server runs.
+fn connectServer(paths: paths_mod.Paths) !?sys.fd_t {
+    return sys.connectUnix(paths.socket) catch |e| switch (e) {
         error.ConnectionRefused, error.FileNotFound => {
             try printErr("kiwa: no server running\n");
             return null;
         },
         else => return e,
     };
-    errdefer sys.close(sock);
-    var frame: [protocol.header_len]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&frame);
-    try protocol.encode(&w, request);
-    try sys.writeAll(sock, w.buffered());
-    return sock;
 }
 
 fn printErr(s: []const u8) !void {

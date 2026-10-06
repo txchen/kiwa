@@ -63,6 +63,17 @@ const Ctx = struct {
     /// Runs `argv` in the case's directory without a terminal and returns
     /// what it printed. Fails unless it exits 0.
     fn capture(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8) ![]u8 {
+        const ran = try ctx.exec(argv, .stdout);
+        errdefer ctx.gpa.free(ran.output);
+        if (ran.code != 0) return error.CommandFailed;
+        return ran.output;
+    }
+
+    const Ran = struct { code: u8, output: []u8 };
+
+    /// Runs `argv` in the case's directory without a terminal and returns
+    /// its exit code and what it printed on `streams`.
+    fn exec(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, streams: enum { stdout, both }) !Ran {
         var pipe: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
         const pid = sys.fork();
@@ -70,7 +81,7 @@ const Ctx = struct {
             const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0));
             _ = linux.dup2(devnull, 0);
             _ = linux.dup2(pipe[1], 1);
-            _ = linux.dup2(devnull, 2);
+            _ = linux.dup2(if (streams == .both) pipe[1] else devnull, 2);
             _ = linux.chdir(ctx.dir_z);
             _ = linux.execve(argv[0].?, argv, ctx.env.slice);
             sys._exit(127);
@@ -87,8 +98,7 @@ const Ctx = struct {
         }
         var status: u32 = 0;
         _ = linux.waitpid(pid, &status, 0);
-        if (linux.W.EXITSTATUS(status) != 0) return error.CommandFailed;
-        return out.toOwnedSlice(ctx.gpa);
+        return .{ .code = linux.W.EXITSTATUS(status), .output = try out.toOwnedSlice(ctx.gpa) };
     }
 
     /// Waits until `kiwa ls` prints `want`.
@@ -742,6 +752,42 @@ fn killServer(ctx: *Ctx) !void {
     try ctx.waitServerGone(pid);
     try expect(!ctx.socketExists(), "the socket path is removed");
     try expect(try ctx.run("kill-server") == 1, "a second kill-server finds no server");
+}
+
+fn killServerGivesUpOnAServerThatStays(ctx: *Ctx) !void {
+    var ready: [2]i32 = undefined;
+    _ = try sys.check(linux.pipe2(&ready, .{ .CLOEXEC = true }));
+    defer sys.close(ready[0]);
+    const pid = sys.fork();
+    if (pid == 0) {
+        // Not Kiwa: it speaks no protocol and survives SIGTERM.
+        const term = sys.sigset(&.{.TERM});
+        _ = linux.sigprocmask(linux.SIG.BLOCK, &term, null);
+        const fd = sys.unixSocket(false) catch sys._exit(1);
+        const addr = sys.unixAddr(ctx.socket) catch sys._exit(1);
+        _ = sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch sys._exit(1);
+        _ = sys.check(linux.listen(fd, 1)) catch sys._exit(1);
+        _ = sys.write(ready[1], "1") catch sys._exit(1);
+        while (true) _ = linux.pause();
+    }
+    defer {
+        _ = linux.kill(pid, .KILL);
+        var status: u32 = 0;
+        _ = linux.waitpid(pid, &status, 0);
+    }
+    sys.close(ready[1]);
+    var byte: [1]u8 = undefined;
+    try expect(try sys.read(ready[0], &byte) == 1, "the stubborn listener is up");
+    const start = now();
+    const ran = try ctx.exec(&.{ ctx.kiwa.ptr, "kill-server", null }, .both);
+    defer ctx.gpa.free(ran.output);
+    const waited = now() - start;
+    std.debug.print("    kill-server printed: {s}", .{ran.output});
+    try expect(ran.code == 1, "kill-server exits 1");
+    try expect(waited >= 5 * std.time.ns_per_s and waited < 7 * std.time.ns_per_s, "kill-server waits 5 s, then gives up");
+    const want = try std.fmt.allocPrint(ctx.gpa, "kiwa: the server (pid {d}) did not exit within 5 s\n", .{pid});
+    defer ctx.gpa.free(want);
+    try expect(std.mem.eql(u8, ran.output, want), "kill-server reports the pid and the timeout");
 }
 
 fn colorsAndWideChars(ctx: *Ctx) !void {
@@ -2636,6 +2682,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "second client takes over", .run = takeover },
     .{ .name = "child exit stops the server", .run = childExitStopsServer },
     .{ .name = "kill-server stops the server", .run = killServer },
+    .{ .name = "kill-server gives up on a server that survives SIGTERM after 5 s", .run = killServerGivesUpOnAServerThatStays },
     .{ .name = "the pane starts in the client's directory with Kiwa's environment", .run = paneStartsWithClientDirAndEnv },
     .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
     .{ .name = "less and vim draw", .run = fullScreenPrograms },

@@ -22,6 +22,7 @@ pub const Error = error{
     ConnectionReset,
     InputOutput,
     AlreadyExists,
+    NoSuchProcess,
     Unexpected,
 };
 
@@ -36,6 +37,7 @@ pub fn check(rc: usize) Error!usize {
         .CONNRESET => error.ConnectionReset,
         .IO => error.InputOutput,
         .EXIST => error.AlreadyExists,
+        .SRCH => error.NoSuchProcess,
         else => |e| {
             std.log.debug("syscall failed: {t}", .{e});
             return error.Unexpected;
@@ -99,6 +101,22 @@ pub fn connectUnix(path: []const u8) (Error || error{NameTooLong})!fd_t {
         };
         return fd;
     }
+}
+
+pub const Ucred = extern struct { pid: pid_t, uid: linux.uid_t, gid: linux.gid_t };
+
+/// The process at the other end of a Unix socket, as of its `connect` or
+/// `listen`.
+pub fn peerCred(sock: fd_t) Error!Ucred {
+    var cred: Ucred = undefined;
+    var len: linux.socklen_t = @sizeOf(Ucred);
+    _ = try check(linux.getsockopt(sock, linux.SOL.SOCKET, linux.SO.PEERCRED, std.mem.asBytes(&cred), &len));
+    return cred;
+}
+
+/// A close-on-exec pidfd, which polls readable once the process exits.
+pub fn pidfdOpen(pid: pid_t) Error!fd_t {
+    return @intCast(try check(linux.pidfd_open(pid, 0)));
 }
 
 /// Sends `bytes` with `fd` attached as `SCM_RIGHTS`. The fd travels with
@@ -313,6 +331,16 @@ test "a reopened terminal is nonblocking on its own and reaches the same termina
     try writeAll(fd, "x");
     var buf: [8]u8 = undefined;
     try testing.expectEqualStrings("x", buf[0..try read(master, &buf)]);
+}
+
+test "a socket's peer is the process at its other end" {
+    var pair: [2]i32 = undefined;
+    _ = try check(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    defer close(pair[0]);
+    defer close(pair[1]);
+    const cred = try peerCred(pair[0]);
+    try testing.expectEqual(linux.getpid(), cred.pid);
+    try testing.expectEqual(linux.getuid(), cred.uid);
 }
 
 test "a pipe is not a terminal" {

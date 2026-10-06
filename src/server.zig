@@ -83,8 +83,8 @@ const Tty = struct {
     events: u32 = EPOLL.IN,
 };
 
-/// One accepted socket: an attached client, or a `kill-server` caller
-/// that has not said anything yet.
+/// One accepted socket: an attached client, or a caller that has not
+/// said anything yet.
 const Conn = struct {
     /// The socket.
     fd: sys.fd_t,
@@ -429,7 +429,6 @@ const Server = struct {
                 try s.relayout();
                 try s.render();
             },
-            .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
             .list => try s.list(c),
             .stats => try s.printStats(c),
             .detach => |reason| if (s.client == c) try s.detach(c, reason) else s.dropConn(c),
@@ -1408,8 +1407,8 @@ const Server = struct {
     /// Tells the attached client why the server is going away, waiting at
     /// most a second for it to read the message.
     fn shutdown(s: *Server, e: Exit) void {
-        // Before the socket goes, so a finished `kiwa kill-server` means a
-        // written file, and before the hangup, while every child's
+        // Before the socket goes, so that a server started once it is gone
+        // reads this save, and before the hangup, while every child's
         // directory can still be read.
         s.save();
         if (s.restore) |*r| r.arena.deinit();
