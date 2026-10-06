@@ -28,14 +28,13 @@ const PaneId = session_mod.PaneId;
 const Placement = session_mod.Placement;
 const Rect = frame_mod.Rect;
 
-const linux = std.os.linux;
-const EPOLL = linux.EPOLL;
+const libc = std.c;
 const Error = std.mem.Allocator.Error || sys.Error;
 
 pub const ready_fd_env = "KIWA_READY_FD";
 
-/// One-shot deadlines that share the timerfd, which is armed for the
-/// nearest one (ADR 0002).
+/// One-shot deadlines that share the poller's timer, which is armed for
+/// the nearest one (ADR 0002).
 const Deadline = enum {
     /// After pane output. Batches bursts into one frame.
     render,
@@ -79,7 +78,7 @@ const msg = struct {
 /// nonblocking, close-on-exec, and never its controlling terminal.
 const Tty = struct {
     fd: sys.fd_t,
-    events: u32 = EPOLL.IN,
+    events: sys.Interest = .read,
 };
 
 /// One accepted socket: an attached client, or a caller that has not
@@ -120,8 +119,8 @@ const Conn = struct {
     /// frames dropped on overflow. The next frame is a full redraw, sent
     /// once `out` drains.
     redraw_pending: bool = true,
-    /// The socket's epoll interest.
-    events: u32 = EPOLL.IN,
+    /// What the poller watches the socket for.
+    events: sys.Interest = .read,
     size: protocol.Size = .{ .cols = 0, .rows = 0 },
     /// The composed frame. Rows the pane did not change carry over.
     frame: frame_mod.Frame = .{},
@@ -203,10 +202,8 @@ const Server = struct {
     io: std.Io,
     env: *std.process.Environ.Map,
     paths: paths_mod.Paths,
-    ep: sys.fd_t,
+    poller: sys.Poller,
     listener: sys.fd_t,
-    sigfd: sys.fd_t,
-    timerfd: sys.fd_t,
     git: git.Watcher,
     /// Monotonic nanoseconds; null when not armed.
     deadlines: std.EnumArray(Deadline, ?u64) = .initFill(null),
@@ -246,29 +243,32 @@ const Server = struct {
     const Restore = struct { arena: std.heap.ArenaAllocator, doc: persist.Doc };
 
     fn loop(s: *Server) !void {
-        var events: [16]linux.epoll_event = undefined;
         while (s.exit == null) {
-            const ready = try sys.epollWait(s.ep, &events);
+            const events = try s.poller.wait();
             s.stats.wakes += 1;
-            for (ready) |ev| {
-                const fd = ev.data.fd;
-                if (fd == s.listener) {
-                    try s.acceptAll();
-                } else if (fd == s.sigfd) {
-                    try s.onSignals();
-                } else if (fd == s.timerfd) {
-                    try s.onTimer();
-                } else if (fd == s.git.fd) {
-                    if (try s.git.onEvents(s.gpa)) try s.markStale();
-                } else if (s.pane_fds.get(fd)) |p| {
-                    try s.onPane(p, ev.events);
-                } else if (s.findConn(fd)) |c| {
-                    if (c.fd == fd) try s.onSocket(c, ev.events) else try s.onTerminal(c, ev.events);
+            for (events) |ev| {
+                switch (ev) {
+                    .signals => |seen| try s.onSignals(seen),
+                    .timer => try s.onTimer(),
+                    .io => |ready| try s.onReady(ready),
                 }
                 if (s.exit != null) break;
             }
             if (s.exit == null) try s.renderStale();
             s.freeDeadConns();
+        }
+    }
+
+    fn onReady(s: *Server, ready: sys.Ready) !void {
+        const fd = ready.fd;
+        if (fd == s.listener) {
+            try s.acceptAll();
+        } else if (fd == s.git.fd()) {
+            if (try s.git.onEvents(s.gpa)) try s.markStale();
+        } else if (s.pane_fds.get(fd)) |p| {
+            try s.onPane(p, ready);
+        } else if (s.findConn(fd)) |c| {
+            if (c.fd == fd) try s.onSocket(c, ready) else try s.onTerminal(c, ready);
         }
     }
 
@@ -287,18 +287,17 @@ const Server = struct {
 
     fn acceptAll(s: *Server) !void {
         while (true) {
-            const rc = linux.accept4(s.listener, null, null, linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC);
-            const fd: sys.fd_t = @intCast(sys.check(rc) catch |e| switch (e) {
+            const fd = sys.accept(s.listener) catch |e| switch (e) {
                 error.WouldBlock => return,
                 else => {
                     std.log.err("accept: {t}", .{e});
                     return;
                 },
-            });
+            };
             const c = try s.gpa.create(Conn);
             c.* = .{ .fd = fd };
             try s.conns.append(s.gpa, c);
-            try sys.epollCtl(s.ep, EPOLL.CTL_ADD, fd, c.events);
+            try s.poller.add(fd, c.events);
         }
     }
 
@@ -312,8 +311,7 @@ const Server = struct {
         return null;
     }
 
-    fn onSignals(s: *Server) !void {
-        const seen = try sys.readSignals(s.sigfd);
+    fn onSignals(s: *Server, seen: sys.Signals) !void {
         if (seen.has(.TERM) or seen.has(.HUP) or seen.has(.INT)) {
             s.exit = .{ .reason = msg.server_exited, .hangup_child = true };
         }
@@ -324,10 +322,9 @@ const Server = struct {
     /// of a pane closed earlier is only reaped.
     fn reapChildren(s: *Server) !void {
         while (true) {
-            var status: u32 = 0;
-            const rc = linux.waitpid(-1, &status, linux.W.NOHANG);
-            if (linux.errno(rc) != .SUCCESS or rc == 0) return;
-            const pid: sys.pid_t = @intCast(rc);
+            var status: c_int = 0;
+            const pid = libc.waitpid(-1, &status, libc.W.NOHANG);
+            if (pid <= 0) return;
             var it = s.panes.valueIterator();
             const p = while (it.next()) |p| {
                 if (p.*.pid == pid) break p.*;
@@ -340,9 +337,9 @@ const Server = struct {
         }
     }
 
-    fn onPane(s: *Server, p: *Pane, events: u32) !void {
-        if (events & EPOLL.OUT != 0) p.flushPending() catch |e| std.log.err("pane write: {t}", .{e});
-        if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) != 0) {
+    fn onPane(s: *Server, p: *Pane, ready: sys.Ready) !void {
+        if (ready.writable) p.flushPending() catch |e| std.log.err("pane write: {t}", .{e});
+        if (ready.readable or ready.hangup) {
             const d = p.drain();
             if (p.clipboard.items.len > 0) try s.forwardClipboard(p);
             if (d.bytes > 0) {
@@ -354,7 +351,7 @@ const Server = struct {
             if (d.moved) try s.markSave();
             // The child exit arrives as SIGCHLD; stop polling a hung-up PTY until then.
             if (d.closed) {
-                sys.epollCtl(s.ep, EPOLL.CTL_DEL, p.fd, 0) catch {};
+                if (p.events) |current| s.poller.remove(p.fd, current);
                 p.events = null;
                 return;
             }
@@ -364,9 +361,8 @@ const Server = struct {
 
     fn syncPaneEvents(s: *Server, p: *Pane) !void {
         const current = p.events orelse return;
-        const want: u32 = EPOLL.IN | @as(u32, if (p.pending.items.len > 0) EPOLL.OUT else 0);
-        if (want == current) return;
-        try sys.epollCtl(s.ep, EPOLL.CTL_MOD, p.fd, want);
+        const want: sys.Interest = if (p.pending.items.len > 0) .read_write else .read;
+        try s.poller.modify(p.fd, current, want);
         p.events = want;
     }
 
@@ -380,10 +376,10 @@ const Server = struct {
         return s.panes.get(s.session.focused());
     }
 
-    fn onSocket(s: *Server, c: *Conn, events: u32) !void {
-        if (events & EPOLL.OUT != 0) try s.flushReplies(c);
+    fn onSocket(s: *Server, c: *Conn, ready: sys.Ready) !void {
+        if (ready.writable) try s.flushReplies(c);
         if (c.state == .closed) return;
-        if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) == 0) return;
+        if (!ready.readable and !ready.hangup) return;
         var buf: [16 * 1024]u8 = undefined;
         while (true) {
             const r = sys.recvWithFd(c.fd, &buf) catch |e| switch (e) {
@@ -407,10 +403,10 @@ const Server = struct {
     }
 
     /// Reads the outer terminal's input. A hangup detaches the client.
-    fn onTerminal(s: *Server, c: *Conn, events: u32) !void {
-        if (events & EPOLL.OUT != 0) try s.flush(c);
+    fn onTerminal(s: *Server, c: *Conn, ready: sys.Ready) !void {
+        if (ready.writable) try s.flush(c);
         const t = c.tty() orelse return;
-        if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) == 0) return;
+        if (!ready.readable and !ready.hangup) return;
         var buf: [16 * 1024]u8 = undefined;
         while (true) {
             const n = sys.read(t.fd, &buf) catch |e| switch (e) {
@@ -422,7 +418,7 @@ const Server = struct {
             try s.drainInput(c);
             if (s.exit != null or s.client != c) return;
         }
-        if (events & (EPOLL.HUP | EPOLL.ERR) != 0) return s.detach(c, msg.hangup);
+        if (ready.hangup) return s.detach(c, msg.hangup);
     }
 
     fn onMessage(s: *Server, c: *Conn, m: protocol.Message) !void {
@@ -487,7 +483,7 @@ const Server = struct {
             return s.detach(c, msg.not_a_terminal);
         };
         sys.close(passed);
-        sys.epollCtl(s.ep, EPOLL.CTL_ADD, fd, EPOLL.IN) catch |e| {
+        s.poller.add(fd, .read) catch |e| {
             sys.close(fd);
             return e;
         };
@@ -719,8 +715,8 @@ const Server = struct {
             p.hangup();
             p.destroy();
         }
-        try sys.epollCtl(s.ep, EPOLL.CTL_ADD, p.fd, EPOLL.IN);
-        p.events = EPOLL.IN;
+        try s.poller.add(p.fd, .read);
+        p.events = .read;
         s.panes.putAssumeCapacity(id, p);
         s.pane_fds.putAssumeCapacity(p.fd, p);
     }
@@ -772,7 +768,7 @@ const Server = struct {
 
     fn act(s: *Server, c: *Conn, a: prefix.Action) !void {
         const area = s.tabArea(c.size);
-        var cwd_buf: [linux.PATH_MAX]u8 = undefined;
+        var cwd_buf: [sys.PATH_MAX]u8 = undefined;
         const ss = &s.session;
         const changed = switch (a) {
             .detach => unreachable,
@@ -1092,7 +1088,7 @@ const Server = struct {
     }
 
     /// Where a new pane starts: the focused pane's directory.
-    fn focusedCwd(s: *const Server, buf: *[linux.PATH_MAX]u8) []const u8 {
+    fn focusedCwd(s: *const Server, buf: *[sys.PATH_MAX]u8) []const u8 {
         const p = s.focusedPane() orelse return "/";
         return p.cwd(buf) orelse "/";
     }
@@ -1149,22 +1145,23 @@ const Server = struct {
     fn setDeadline(s: *Server, which: Deadline, at: ?u64) !void {
         if (s.deadlines.get(which) == at) return;
         s.deadlines.set(which, at);
+        try s.armTimer();
+    }
+
+    /// Arms the poller's timer for the nearest deadline, or disarms it.
+    fn armTimer(s: *Server) !void {
         var nearest: ?u64 = null;
         for (s.deadlines.values) |d| if (d) |t| {
             nearest = @min(t, nearest orelse t);
         };
-        // An all-zero value disarms the timer.
-        const t = nearest orelse 0;
-        const its: linux.itimerspec = .{
-            .it_interval = .{ .sec = 0, .nsec = 0 },
-            .it_value = .{ .sec = @intCast(t / std.time.ns_per_s), .nsec = @intCast(t % std.time.ns_per_s) },
-        };
-        _ = try sys.check(linux.timerfd_settime(s.timerfd, .{ .ABSTIME = true }, &its, null));
+        try s.poller.setTimer(nearest);
     }
 
     fn onTimer(s: *Server) !void {
-        var expirations: u64 = 0;
-        _ = sys.read(s.timerfd, std.mem.asBytes(&expirations)) catch {};
+        // A relative timer, as on macOS, can fire before the clock reaches
+        // the deadline. Then nothing below is due, and this re-arm keeps
+        // the deadline from being lost.
+        defer s.armTimer() catch |e| std.log.err("timer: {t}", .{e});
         const now = monotonicNs();
         for (std.enums.values(Deadline)) |which| {
             const at = s.deadlines.get(which) orelse continue;
@@ -1346,7 +1343,7 @@ const Server = struct {
         try c.title.appendSlice(s.gpa, title);
     }
 
-    /// Writes what the outer terminal accepts and keeps EPOLLOUT armed
+    /// Writes what the outer terminal accepts and keeps write interest
     /// only while bytes remain. A terminal that fails a write has hung up.
     fn flush(s: *Server, c: *Conn) Error!void {
         const t = c.tty() orelse return;
@@ -1358,11 +1355,9 @@ const Server = struct {
             c.out.consume(n);
         }
         if (c.out.isEmpty() and c.redraw_pending) return s.render();
-        const want: u32 = EPOLL.IN | @as(u32, if (c.out.isEmpty()) 0 else EPOLL.OUT);
-        if (want != t.events) {
-            try sys.epollCtl(s.ep, EPOLL.CTL_MOD, t.fd, want);
-            t.events = want;
-        }
+        const want: sys.Interest = if (c.out.isEmpty()) .read else .read_write;
+        try s.poller.modify(t.fd, t.events, want);
+        t.events = want;
     }
 
     /// Writes what the socket accepts and closes the connection once its
@@ -1376,11 +1371,9 @@ const Server = struct {
             c.replies.replaceRangeAssumeCapacity(0, n, &.{});
         }
         if (c.replies.items.len == 0 and c.state == .closing) return s.dropConn(c);
-        const want: u32 = EPOLL.IN | @as(u32, if (c.replies.items.len == 0) 0 else EPOLL.OUT);
-        if (want != c.events) {
-            try sys.epollCtl(s.ep, EPOLL.CTL_MOD, c.fd, want);
-            c.events = want;
-        }
+        const want: sys.Interest = if (c.replies.items.len == 0) .read else .read_write;
+        try s.poller.modify(c.fd, c.events, want);
+        c.events = want;
     }
 
     /// Lets go of the client's terminal, then tells the client why, so that
@@ -1404,7 +1397,7 @@ const Server = struct {
             const n = sys.write(t.fd, c.out.bytes.items) catch break;
             c.out.consume(n);
         }
-        sys.epollCtl(s.ep, EPOLL.CTL_DEL, t.fd, 0) catch {};
+        s.poller.remove(t.fd, t.events);
         sys.close(t.fd);
         c.state = .open;
     }
@@ -1427,16 +1420,16 @@ const Server = struct {
         s.save();
         if (s.restore) |*r| r.arena.deinit();
         if (s.state) |dir| dir.close(s.io);
-        _ = linux.unlink(s.paths.socket);
+        sys.unlink(s.paths.socket);
         var it = s.panes.valueIterator();
         while (it.next()) |p| if (e.hangup_child) p.*.hangup();
         if (s.client) |c| {
             s.releaseTerminal(c);
             c.replies.clearRetainingCapacity();
             if (protocol.append(s.gpa, &c.replies, .{ .detach = e.reason })) {
-                const timeout: linux.timeval = .{ .sec = 1, .usec = 0 };
-                _ = linux.fcntl(c.fd, linux.F.SETFL, 0);
-                _ = linux.setsockopt(c.fd, linux.SOL.SOCKET, linux.SO.SNDTIMEO, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
+                const timeout: libc.timeval = .{ .sec = 1, .usec = 0 };
+                _ = libc.fcntl(c.fd, libc.F.SETFL, @as(c_int, 0));
+                _ = libc.setsockopt(c.fd, libc.SOL.SOCKET, libc.SO.SNDTIMEO, &timeout, @sizeOf(libc.timeval));
                 sys.writeAll(c.fd, c.replies.items) catch {};
             } else |_| {}
         }
@@ -1454,14 +1447,11 @@ const Server = struct {
         s.session.deinit();
         s.git.deinit(s.gpa);
         s.scratch.deinit(s.gpa);
+        s.poller.deinit();
     }
 };
 
-fn monotonicNs() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
+const monotonicNs = sys.monotonicNs;
 
 fn sanitize(size: protocol.Size) protocol.Size {
     return .{ .cols = @max(size.cols, 2), .rows = @max(size.rows, 1) };
@@ -1473,38 +1463,28 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     _ = env.swapRemove(ready_fd_env);
     defer if (ready_fd) |fd| sys.close(fd);
 
-    if (paths.socket_dir) |dir| try paths_mod.ensurePrivateDir(dir, linux.getuid());
+    if (paths.socket_dir) |dir| try paths_mod.ensurePrivateDir(dir, sys.getuid());
     try removeStaleSocket(paths.socket);
 
     sys.ignoreSignal(.PIPE, true);
-    const sigfd = try sys.signalfd(&.{ .CHLD, .TERM, .HUP, .INT });
-    const listener = try sys.unixSocket(true);
-    const addr = try sys.unixAddr(paths.socket);
-    _ = try sys.check(linux.bind(listener, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)));
-    _ = try sys.check(linux.listen(listener, 16));
-
-    const timerfd: sys.fd_t = @intCast(try sys.check(linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true })));
-    const ep = try sys.epollCreate();
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, listener, EPOLL.IN);
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, sigfd, EPOLL.IN);
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, timerfd, EPOLL.IN);
+    var poller: sys.Poller = try .init(&.{ .CHLD, .TERM, .HUP, .INT });
+    const listener = try sys.listenUnix(paths.socket, 16);
+    try poller.add(listener, .read);
     const watcher: git.Watcher = try .init();
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, watcher.fd, EPOLL.IN);
+    try poller.add(watcher.fd(), .read);
 
     if (ready_fd) |fd| _ = sys.write(fd, "1") catch {};
 
-    var uts: linux.utsname = undefined;
-    _ = linux.uname(&uts);
+    var uts: libc.utsname = undefined;
+    _ = libc.uname(&uts);
 
     var s: Server = .{
         .gpa = gpa,
         .io = io,
         .env = env,
         .paths = paths,
-        .ep = ep,
+        .poller = poller,
         .listener = listener,
-        .sigfd = sigfd,
-        .timerfd = timerfd,
         .git = watcher,
         .hostname = std.mem.sliceTo(&uts.nodename, 0),
         .session = .init(gpa, std.fs.path.basename(env.get("SHELL") orelse "/bin/sh")),
@@ -1528,7 +1508,7 @@ const PaneDirs = struct {
 
     pub fn cwd(d: PaneDirs, arena: std.mem.Allocator, id: PaneId) !?[]const u8 {
         const p = d.panes.get(id) orelse return null;
-        var buf: [linux.PATH_MAX]u8 = undefined;
+        var buf: [sys.PATH_MAX]u8 = undefined;
         return try arena.dupe(u8, p.cwd(&buf) orelse return null);
     }
 };
@@ -1564,13 +1544,13 @@ fn startDir(env: *const std.process.Environ.Map, r: persist.Restored) []const u8
 /// is not this user's socket, or a socket that a live server answers on.
 fn removeStaleSocket(path: [:0]const u8) !void {
     const st = paths_mod.lstat(path) catch return;
-    if (st.mode & linux.S.IFMT != linux.S.IFSOCK) return error.SocketPathNotASocket;
-    if (st.uid != linux.getuid()) return error.SocketOwnedByAnotherUser;
+    if (st.kind() != libc.S.IFSOCK) return error.SocketPathNotASocket;
+    if (st.uid != sys.getuid()) return error.SocketOwnedByAnotherUser;
     if (sys.connectUnix(path)) |fd| {
         sys.close(fd);
         return error.ServerAlreadyRunning;
     } else |e| switch (e) {
-        error.ConnectionRefused => _ = linux.unlink(path),
+        error.ConnectionRefused => sys.unlink(path),
         error.FileNotFound => {},
         else => return e,
     }

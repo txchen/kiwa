@@ -1,32 +1,29 @@
 //! The Git branch a workspace shows. A workspace's Git directory is found
 //! once, when the workspace is created; after that `HEAD` is read only
-//! after inotify reports a change to it (ADR 0002).
+//! after the OS reports a change to it (ADR 0002).
 
 const std = @import("std");
 const sys = @import("sys.zig");
 
-const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
-/// An inotify watch on the directory that holds one repository's `HEAD`.
-/// The kernel returns the same watch for the same directory, so
-/// workspaces in one repository share it.
-pub const Watch = enum(i32) { _ };
+/// One repository's watch. Workspaces in one repository share it. Ids are
+/// never reused, so a workspace's stale id cannot name another repository.
+pub const Watch = enum(u32) { _ };
 
 /// The Git directory for `start`: the `.git` directory in `start` or its
 /// nearest ancestor, or the directory a `.git` file names, as worktrees and
 /// submodules have. Null outside a repository.
 pub fn findGitDir(gpa: Allocator, start: []const u8) Allocator.Error!?[:0]u8 {
-    var buf: [linux.PATH_MAX]u8 = undefined;
+    var buf: [sys.PATH_MAX]u8 = undefined;
     var dir: ?[]const u8 = start;
     while (dir) |d| : (dir = std.fs.path.dirname(d)) {
         const dot_git = std.fmt.bufPrintZ(&buf, "{s}/.git", .{std.mem.trimEnd(u8, d, "/")}) catch continue;
-        var stx: linux.Statx = undefined;
-        if (linux.errno(linux.statx(linux.AT.FDCWD, dot_git, 0, .{ .TYPE = true }, &stx)) != .SUCCESS) continue;
-        switch (stx.mode & linux.S.IFMT) {
-            linux.S.IFDIR => return try gpa.dupeZ(u8, dot_git),
-            linux.S.IFREG => {
-                var contents: [linux.PATH_MAX + 16]u8 = undefined;
+        const st = sys.stat(dot_git, .follow) catch continue;
+        switch (st.kind()) {
+            std.c.S.IFDIR => return try gpa.dupeZ(u8, dot_git),
+            std.c.S.IFREG => {
+                var contents: [sys.PATH_MAX + 16]u8 = undefined;
                 const target = parseGitFile(readFile(dot_git, &contents) orelse return null) orelse return null;
                 const resolved = try std.fs.path.resolve(gpa, &.{ d, target });
                 defer gpa.free(resolved);
@@ -71,43 +68,69 @@ fn printable(text: []const u8) bool {
 }
 
 fn readFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
-    const fd: sys.fd_t = @intCast(sys.check(linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)) catch return null);
+    const fd = sys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
     defer sys.close(fd);
     const n = sys.read(fd, buf) catch return null;
     return buf[0..n];
 }
 
-/// The server's one inotify fd and the repositories it watches.
+/// Tells a rewritten file from an untouched one without reading it.
+const Identity = struct {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime_ns: i128,
+
+    fn of(path: [*:0]const u8) ?Identity {
+        const st = sys.stat(path, .follow) catch return null;
+        return .{ .dev = st.dev, .ino = st.ino, .size = st.size, .mtime_ns = st.mtime_ns };
+    }
+};
+
+/// The server's directory watch and the repositories it watches.
 pub const Watcher = struct {
-    fd: sys.fd_t,
+    dirs: sys.DirWatch,
     repos: std.AutoArrayHashMapUnmanaged(Watch, Repo) = .empty,
+    next_id: u32 = 0,
     /// Reads of a `HEAD` file, for `kiwa __stats`.
     head_reads: u64 = 0,
 
     const Repo = struct {
         git_dir: [:0]u8,
+        /// The Git directory's device and inode, which tell that two
+        /// workspaces are in one repository.
+        dev: u64,
+        ino: u64,
+        handle: sys.DirWatch.Handle,
         branch: ?[]u8 = null,
-        /// An event for `HEAD` arrived and it has not been read since.
+        /// `HEAD` as of its last read; null when it could not be stat'ed.
+        head: ?Identity = null,
+        /// `HEAD` may have changed and has not been read since.
         stale: bool = false,
 
         fn free(r: *Repo, gpa: Allocator) void {
             if (r.branch) |b| gpa.free(b);
             gpa.free(r.git_dir);
         }
+
+        fn headPath(r: *const Repo, buf: *[sys.PATH_MAX]u8) ?[:0]const u8 {
+            return std.fmt.bufPrintZ(buf, "{s}/HEAD", .{r.git_dir}) catch null;
+        }
     };
 
-    /// Git replaces `HEAD` by renaming `HEAD.lock` over it.
-    const mask = linux.IN.CLOSE_WRITE | linux.IN.MOVED_TO | linux.IN.CREATE | linux.IN.ONLYDIR;
-
     pub fn init() sys.Error!Watcher {
-        const rc = linux.inotify_init1(linux.IN.NONBLOCK | linux.IN.CLOEXEC);
-        return .{ .fd = @intCast(try sys.check(rc)) };
+        return .{ .dirs = try .init() };
     }
 
     pub fn deinit(w: *Watcher, gpa: Allocator) void {
         for (w.repos.values()) |*r| r.free(gpa);
         w.repos.deinit(gpa);
-        sys.close(w.fd);
+        w.dirs.deinit();
+    }
+
+    /// What the server polls; readable when `onEvents` has work.
+    pub fn fd(w: *const Watcher) sys.fd_t {
+        return w.dirs.fd;
     }
 
     /// Watches the repository that holds `root_dir` and reads its branch.
@@ -115,21 +138,31 @@ pub const Watcher = struct {
     pub fn watch(w: *Watcher, gpa: Allocator, root_dir: []const u8) Allocator.Error!?Watch {
         const git_dir = try findGitDir(gpa, root_dir) orelse return null;
         errdefer gpa.free(git_dir);
-        const rc = linux.inotify_add_watch(w.fd, git_dir, mask);
-        const wd: Watch = @enumFromInt(@as(i32, @intCast(sys.check(rc) catch |e| {
+        const st = sys.stat(git_dir, .follow) catch |e| {
             std.log.err("watch {s}: {t}", .{ git_dir, e });
             gpa.free(git_dir);
             return null;
-        })));
-        const entry = try w.repos.getOrPut(gpa, wd);
-        if (entry.found_existing) {
+        };
+        var it = w.repos.iterator();
+        while (it.next()) |entry| if (entry.value_ptr.dev == st.dev and entry.value_ptr.ino == st.ino) {
             gpa.free(git_dir);
-            return wd;
+            return entry.key_ptr.*;
+        };
+        try w.repos.ensureUnusedCapacity(gpa, 1);
+        const handle = w.dirs.add(git_dir) catch |e| {
+            std.log.err("watch {s}: {t}", .{ git_dir, e });
+            gpa.free(git_dir);
+            return null;
+        };
+        const id: Watch = @enumFromInt(w.next_id);
+        w.next_id += 1;
+        w.repos.putAssumeCapacity(id, .{ .git_dir = git_dir, .dev = st.dev, .ino = st.ino, .handle = handle });
+        errdefer {
+            w.dirs.remove(handle);
+            _ = w.repos.swapRemove(id);
         }
-        entry.value_ptr.* = .{ .git_dir = git_dir };
-        errdefer _ = w.repos.swapRemove(wd);
-        _ = try w.readHead(gpa, entry.value_ptr);
-        return wd;
+        _ = try w.readHead(gpa, w.repos.getPtr(id).?);
+        return id;
     }
 
     pub fn branch(w: *const Watcher, watch_: ?Watch) ?[]const u8 {
@@ -142,52 +175,58 @@ pub const Watcher = struct {
     pub fn prune(w: *Watcher, gpa: Allocator, workspaces: anytype) void {
         var i: usize = 0;
         while (i < w.repos.count()) {
-            const wd = w.repos.keys()[i];
+            const id = w.repos.keys()[i];
             const used = for (workspaces) |ws| {
-                if (ws.git == wd) break true;
+                if (ws.git == id) break true;
             } else false;
             if (used) {
                 i += 1;
                 continue;
             }
-            _ = linux.inotify_rm_watch(w.fd, @intFromEnum(wd));
-            w.repos.values()[i].free(gpa);
-            w.repos.swapRemoveAt(i);
+            w.drop(gpa, i);
         }
     }
 
-    /// Reads the pending events, then each changed `HEAD` once. Returns
+    fn drop(w: *Watcher, gpa: Allocator, i: usize) void {
+        const r = &w.repos.values()[i];
+        w.dirs.remove(r.handle);
+        r.free(gpa);
+        w.repos.swapRemoveAt(i);
+    }
+
+    fn indexOf(w: *const Watcher, handle: sys.DirWatch.Handle) ?usize {
+        for (w.repos.values(), 0..) |r, i| if (r.handle == handle) return i;
+        return null;
+    }
+
+    /// Reads the pending changes, then each changed `HEAD` once. Returns
     /// whether any branch changed.
     pub fn onEvents(w: *Watcher, gpa: Allocator) Allocator.Error!bool {
         var changed = false;
-        var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
-            const n = sys.read(w.fd, &buf) catch |e| switch (e) {
-                error.WouldBlock => break,
-                else => {
-                    std.log.err("inotify read: {t}", .{e});
-                    break;
+            const changes = w.dirs.read() catch |e| {
+                std.log.err("directory watch read: {t}", .{e});
+                break;
+            } orelse break;
+            for (changes) |change| switch (change) {
+                .overflow => for (w.repos.values()) |*r| {
+                    r.stale = true;
+                },
+                .head => |h| if (w.indexOf(h)) |i| {
+                    w.repos.values()[i].stale = true;
+                },
+                // A changed directory reads `HEAD` only if it was replaced.
+                .changed => |h| if (w.indexOf(h)) |i| {
+                    const r = &w.repos.values()[i];
+                    var buf: [sys.PATH_MAX]u8 = undefined;
+                    const now = Identity.of(r.headPath(&buf) orelse continue);
+                    if (!std.meta.eql(now, r.head)) r.stale = true;
+                },
+                .gone => |h| if (w.indexOf(h)) |i| {
+                    if (w.repos.values()[i].branch != null) changed = true;
+                    w.drop(gpa, i);
                 },
             };
-            var at: usize = 0;
-            while (at < n) {
-                const ev: *const linux.inotify_event = @ptrCast(@alignCast(&buf[at]));
-                at += @sizeOf(linux.inotify_event) + ev.len;
-                if (ev.mask & linux.IN.Q_OVERFLOW != 0) {
-                    for (w.repos.values()) |*r| r.stale = true;
-                    continue;
-                }
-                const i = w.repos.getIndex(@enumFromInt(ev.wd)) orelse continue;
-                // The directory is gone, and the kernel dropped the watch.
-                if (ev.mask & linux.IN.IGNORED != 0) {
-                    if (w.repos.values()[i].branch != null) changed = true;
-                    w.repos.values()[i].free(gpa);
-                    w.repos.swapRemoveAt(i);
-                    continue;
-                }
-                const name = ev.getName() orelse continue;
-                if (std.mem.eql(u8, name, "HEAD")) w.repos.values()[i].stale = true;
-            }
         }
         for (w.repos.values()) |*r| if (r.stale) {
             if (try w.readHead(gpa, r)) changed = true;
@@ -199,8 +238,9 @@ pub const Watcher = struct {
     fn readHead(w: *Watcher, gpa: Allocator, r: *Repo) Allocator.Error!bool {
         r.stale = false;
         w.head_reads += 1;
-        var path: [linux.PATH_MAX]u8 = undefined;
-        const head = std.fmt.bufPrintZ(&path, "{s}/HEAD", .{r.git_dir}) catch return false;
+        var path: [sys.PATH_MAX]u8 = undefined;
+        const head = r.headPath(&path) orelse return false;
+        r.head = Identity.of(head);
         var contents: [4096]u8 = undefined;
         const next = parseHead(readFile(head, &contents) orelse "") orelse "";
         const old = r.branch orelse "";
@@ -222,7 +262,7 @@ const Tmp = struct {
     fn init() !Tmp {
         var tmp = testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        var buf: [linux.PATH_MAX]u8 = undefined;
+        var buf: [sys.PATH_MAX]u8 = undefined;
         const n = try tmp.dir.realPath(testing.io, &buf);
         return .{ .tmp = tmp, .path = try testing.allocator.dupe(u8, buf[0..n]) };
     }

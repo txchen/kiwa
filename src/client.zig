@@ -4,8 +4,7 @@ const paths_mod = @import("paths.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
 
-const linux = std.os.linux;
-const EPOLL = linux.EPOLL;
+const libc = std.c;
 
 /// Saves the window title on the terminal's title stack, since the server
 /// retitles the window, then enters the alternate screen and turns on
@@ -41,7 +40,7 @@ const restart_hint = "run kiwa kill-server to restart the server on this version
 /// server owns the terminal from the hello until it sends its detach
 /// message (ADR 0004).
 const Terminal = struct {
-    saved: linux.termios,
+    saved: sys.termios,
     phase: enum {
         /// The client sets raw mode and the outer modes.
         handing_over,
@@ -59,7 +58,7 @@ const Terminal = struct {
 
 pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths: paths_mod.Paths) !u8 {
     var term: Terminal = .{ .saved = undefined };
-    if (linux.errno(linux.tcgetattr(0, &term.saved)) != .SUCCESS) {
+    if (libc.tcgetattr(0, &term.saved) != 0) {
         try printErr("kiwa: stdin is not a terminal\n");
         return 1;
     }
@@ -72,25 +71,25 @@ pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths
     defer sys.close(sock);
 
     sys.ignoreSignal(.PIPE, true);
-    const sigfd = try sys.signalfd(&.{ .WINCH, .TERM, .HUP, .INT });
-    defer sys.close(sigfd);
+    var poller: sys.Poller = try .init(&.{ .WINCH, .TERM, .HUP, .INT });
+    defer poller.deinit();
 
     var raw = term.saved;
-    makeRaw(&raw);
-    _ = try sys.check(linux.tcsetattr(0, .NOW, &raw));
+    sys.cfmakeraw(&raw);
+    _ = try sys.check(libc.tcsetattr(0, .NOW, &raw));
     term.write(enter_seq);
 
     // Owned here because a detach reason points into its buffer.
     var decoder: protocol.Decoder = .{};
     defer decoder.deinit(gpa);
-    const outcome = session(gpa, sock, sigfd, &term, &decoder) catch |e| blk: {
+    const outcome = session(gpa, sock, &poller, &term, &decoder) catch |e| blk: {
         if (term.phase == .attached) awaitRelease(sock);
         break :blk Outcome{ .message = @errorName(e), .code = 1 };
     };
 
     term.phase = .restoring;
     term.write(leave_seq);
-    _ = linux.tcsetattr(0, .DRAIN, &term.saved);
+    _ = libc.tcsetattr(0, .DRAIN, &term.saved);
     term.write(outcome.message);
     term.write("\n");
     if (outcome.hint) |hint| {
@@ -100,51 +99,25 @@ pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths
     return outcome.code;
 }
 
-/// cfmakeraw, as tmux and most terminal programs use it.
-fn makeRaw(t: *linux.termios) void {
-    t.iflag.IGNBRK = false;
-    t.iflag.BRKINT = false;
-    t.iflag.PARMRK = false;
-    t.iflag.ISTRIP = false;
-    t.iflag.INLCR = false;
-    t.iflag.IGNCR = false;
-    t.iflag.ICRNL = false;
-    t.iflag.IXON = false;
-    t.oflag.OPOST = false;
-    t.lflag.ECHO = false;
-    t.lflag.ECHONL = false;
-    t.lflag.ICANON = false;
-    t.lflag.ISIG = false;
-    t.lflag.IEXTEN = false;
-    t.cflag.CSIZE = .CS8;
-    t.cflag.PARENB = false;
-    t.cc[@intFromEnum(linux.V.MIN)] = 1;
-    t.cc[@intFromEnum(linux.V.TIME)] = 0;
-}
-
 /// Hands the terminal over with the hello and waits for the server to
 /// give it back. Only the server's detach message or a closed socket ends
 /// the wait; a signal asks the server to detach first.
-fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, term: *Terminal, decoder: *protocol.Decoder) !Outcome {
-    var cwd_buf: [linux.PATH_MAX]u8 = undefined;
-    const cwd_len = sys.check(linux.getcwd(&cwd_buf, cwd_buf.len)) catch 0;
-    const cwd: []const u8 = if (cwd_len > 0) std.mem.sliceTo(&cwd_buf, 0) else "/";
+fn session(gpa: std.mem.Allocator, sock: sys.fd_t, poller: *sys.Poller, term: *Terminal, decoder: *protocol.Decoder) !Outcome {
+    var cwd_buf: [sys.PATH_MAX]u8 = undefined;
+    const cwd: []const u8 = if (libc.getcwd(&cwd_buf, cwd_buf.len)) |p| std.mem.sliceTo(p, 0) else "/";
     var frame: std.ArrayList(u8) = .empty;
     defer frame.deinit(gpa);
     try protocol.append(gpa, &frame, .{ .hello = .{ .version = protocol.version, .size = try termSize(), .cwd = cwd } });
     term.phase = .attached;
     try sys.sendWithFd(sock, frame.items, 0);
 
-    const ep = try sys.epollCreate();
-    defer sys.close(ep);
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, sock, EPOLL.IN);
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, sigfd, EPOLL.IN);
+    try poller.add(sock, .read);
+    defer poller.remove(sock, .read);
 
     var buf: [4096]u8 = undefined;
-    var events: [2]linux.epoll_event = undefined;
     while (true) {
-        for (try sys.epollWait(ep, &events)) |ev| {
-            if (ev.data.fd == sock) {
+        for (try poller.wait()) |ev| switch (ev) {
+            .io => {
                 const n = sys.read(sock, &buf) catch |e| switch (e) {
                     error.ConnectionReset => 0,
                     else => return e,
@@ -155,8 +128,8 @@ fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, term: *Termi
                     .detach => |reason| return .detached(reason),
                     else => return error.UnexpectedMessage,
                 };
-            } else {
-                const seen = try sys.readSignals(sigfd);
+            },
+            .signals => |seen| {
                 frame.clearRetainingCapacity();
                 if (seen.has(.HUP)) {
                     try protocol.append(gpa, &frame, .{ .detach = "detached: hangup" });
@@ -166,8 +139,9 @@ fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, term: *Termi
                     try protocol.append(gpa, &frame, .{ .resize = try termSize() });
                 }
                 try sys.writeAll(sock, frame.items);
-            }
-        }
+            },
+            .timer => {},
+        };
     }
 }
 
@@ -179,7 +153,7 @@ fn termSize() !protocol.Size {
 /// Waits until the server has closed the connection, which it does only
 /// after closing its handle to the terminal.
 fn awaitRelease(sock: sys.fd_t) void {
-    _ = linux.shutdown(sock, linux.SHUT.WR);
+    _ = libc.shutdown(sock, libc.SHUT.WR);
     var buf: [4096]u8 = undefined;
     while ((sys.read(sock, &buf) catch 0) > 0) {}
 }
@@ -198,8 +172,9 @@ fn connectOrStart(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, p
 /// needs no connect retries.
 fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths: paths_mod.Paths) !void {
     try paths_mod.makePath(gpa, paths.state_dir);
-    var pipe: [2]i32 = undefined;
-    _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    var exe_buf: [sys.PATH_MAX]u8 = undefined;
+    const exe = sys.selfExe(&exe_buf) orelse return error.NoExecutablePath;
+    const pipe = try sys.pipe();
     defer sys.close(pipe[0]);
 
     var server_env = try env.clone(gpa);
@@ -216,20 +191,19 @@ fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, path
         _ = sys.setsid();
         // Fork again so the server is not a child of this client.
         if (sys.fork() != 0) sys._exit(0);
-        const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0));
-        const log_rc = linux.open(paths.log, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, 0o600);
-        const log: i32 = if (linux.errno(log_rc) == .SUCCESS) @intCast(log_rc) else devnull;
-        _ = linux.dup2(devnull, 0);
-        _ = linux.dup2(devnull, 1);
-        _ = linux.dup2(log, 2);
-        _ = linux.chdir("/");
+        const devnull = sys.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch sys._exit(126);
+        const log = sys.open(paths.log, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o600) catch devnull;
+        _ = libc.dup2(devnull, 0);
+        _ = libc.dup2(devnull, 1);
+        _ = libc.dup2(log, 2);
+        _ = libc.chdir("/");
         sys.setCloexec(pipe[1], false) catch sys._exit(126);
-        _ = linux.execve("/proc/self/exe", &argv, block.slice);
+        _ = libc.execve(exe, &argv, block.slice);
         sys._exit(127);
     }
     sys.close(pipe[1]);
-    var status: u32 = 0;
-    _ = linux.waitpid(pid, &status, 0);
+    var status: c_int = 0;
+    _ = libc.waitpid(pid, &status, 0);
     var byte: [1]u8 = undefined;
     if (try sys.read(pipe[0], &byte) != 1) return error.ServerFailedToStart;
 }
@@ -243,21 +217,15 @@ pub fn killServer(paths: paths_mod.Paths) !u8 {
         break :peer try sys.peerCred(sock);
     };
     var buf: [128]u8 = undefined;
-    if (peer.uid != linux.getuid()) {
+    if (peer.uid != sys.getuid()) {
         try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) belongs to another user\n", .{peer.pid}));
         return 1;
     }
-    const pidfd = sys.pidfdOpen(peer.pid) catch |e| switch (e) {
+    const stopped = sys.terminate(peer.pid, kill_timeout_ms) catch |e| switch (e) {
         error.NoSuchProcess => return 0,
         else => return e,
     };
-    defer sys.close(pidfd);
-    _ = sys.check(linux.pidfd_send_signal(pidfd, .TERM, null, 0)) catch |e| switch (e) {
-        error.NoSuchProcess => return 0,
-        else => return e,
-    };
-    var pfd = [_]linux.pollfd{.{ .fd = pidfd, .events = linux.POLL.IN, .revents = 0 }};
-    if (try sys.check(linux.poll(&pfd, 1, kill_timeout_ms)) == 0) {
+    if (stopped == .timed_out) {
         try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) did not exit within {d} s\n", .{ peer.pid, kill_timeout_ms / 1000 }));
         return 1;
     }

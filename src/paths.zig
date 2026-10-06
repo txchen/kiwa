@@ -1,5 +1,5 @@
 const std = @import("std");
-const linux = std.os.linux;
+const sys = @import("sys.zig");
 
 pub const session_name = "default";
 
@@ -19,7 +19,7 @@ pub const Env = struct {
             .xdg_runtime_dir = nonEmpty(map.get("XDG_RUNTIME_DIR")),
             .xdg_state_home = nonEmpty(map.get("XDG_STATE_HOME")),
             .home = nonEmpty(map.get("HOME")),
-            .uid = linux.getuid(),
+            .uid = sys.getuid(),
         };
     }
 };
@@ -75,12 +75,9 @@ pub const DirError = error{ MkdirFailed, StatFailed, NotADirectory, WrongOwner, 
 /// Creates `path` with mode 0700, then checks that this user owns it and that
 /// no one else can enter it, so another user cannot plant or read the socket.
 pub fn ensurePrivateDir(path: [:0]const u8, uid: u32) DirError!void {
-    switch (linux.errno(linux.mkdir(path, 0o700))) {
-        .SUCCESS, .EXIST => {},
-        else => return error.MkdirFailed,
-    }
+    try mkdir(path);
     const st = try lstat(path);
-    if (st.mode & linux.S.IFMT != linux.S.IFDIR) return error.NotADirectory;
+    if (!st.isDir()) return error.NotADirectory;
     if (st.uid != uid) return error.WrongOwner;
     if (st.mode & 0o077 != 0) return error.InsecureMode;
 }
@@ -92,29 +89,28 @@ pub fn makePath(gpa: std.mem.Allocator, path: []const u8) DirError!void {
         if (i != path.len and path[i] != '/') continue;
         const prefix = try gpa.dupeZ(u8, path[0..i]);
         defer gpa.free(prefix);
-        switch (linux.errno(linux.mkdir(prefix, 0o700))) {
-            .SUCCESS, .EXIST => {},
-            else => return error.MkdirFailed,
-        }
+        try mkdir(prefix);
     }
 }
 
-pub const Stat = struct { mode: u32, uid: u32 };
+/// Creates `path` with mode 0700 unless it exists.
+fn mkdir(path: [*:0]const u8) error{MkdirFailed}!void {
+    _ = sys.check(std.c.mkdir(path, 0o700)) catch |e| switch (e) {
+        error.AlreadyExists => {},
+        else => return error.MkdirFailed,
+    };
+}
 
-pub fn lstat(path: [*:0]const u8) error{StatFailed}!Stat {
-    var stx: linux.Statx = undefined;
-    const rc = linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true, .UID = true }, &stx);
-    if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-    return .{ .mode = stx.mode, .uid = stx.uid };
+pub fn lstat(path: [*:0]const u8) error{StatFailed}!sys.Stat {
+    return sys.stat(path, .no_follow) catch error.StatFailed;
 }
 
 /// Whether `path` names a directory, following symlinks.
 pub fn isDir(path: []const u8) bool {
-    var buf: [linux.PATH_MAX]u8 = undefined;
+    var buf: [sys.PATH_MAX]u8 = undefined;
     const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
-    var stx: linux.Statx = undefined;
-    const rc = linux.statx(linux.AT.FDCWD, z, 0, .{ .TYPE = true }, &stx);
-    return linux.errno(rc) == .SUCCESS and stx.mode & linux.S.IFMT == linux.S.IFDIR;
+    const st = sys.stat(z, .follow) catch return false;
+    return st.isDir();
 }
 
 const testing = std.testing;

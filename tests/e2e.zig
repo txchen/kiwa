@@ -756,8 +756,7 @@ fn killServerGivesUpOnAServerThatStays(ctx: *Ctx) !void {
     defer sys.close(ready[0]);
     const pid = sys.fork();
     if (pid == 0) {
-        const term = sys.sigset(&.{.TERM});
-        _ = linux.sigprocmask(linux.SIG.BLOCK, &term, null);
+        sys.blockSignals(&.{.TERM}) catch sys._exit(1);
         const fd = sys.unixSocket(false) catch sys._exit(1);
         const addr = sys.unixAddr(ctx.socket) catch sys._exit(1);
         _ = sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch sys._exit(1);

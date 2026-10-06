@@ -4,7 +4,6 @@
 const std = @import("std");
 const persist = @import("persist.zig");
 
-const linux = std.os.linux;
 const Dir = std.Io.Dir;
 
 pub const name = "session.json";
@@ -39,8 +38,8 @@ pub fn load(io: std.Io, arena: std.mem.Allocator, dir: Dir) error{OutOfMemory}!L
 }
 
 fn moveAside(io: std.Io, arena: std.mem.Allocator, dir: Dir, why: anyerror) !Loaded {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &ts);
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
     const bad = try std.fmt.allocPrint(arena, bad_prefix ++ "{d}", .{ts.sec});
     dir.rename(name, dir, bad, io) catch return .{ .unusable = .{ .why = why, .moved_to = null } };
     // Old files only cost disk space, so a failure here is not worth reporting.

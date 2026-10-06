@@ -7,7 +7,6 @@ const encode = @import("encode.zig");
 const frame = @import("frame.zig");
 const PaneId = @import("layout.zig").PaneId;
 
-const linux = std.os.linux;
 const Handler = vt.TerminalStream.Handler;
 
 pub const scrollback_lines = 10_000;
@@ -33,8 +32,8 @@ pub const Pane = struct {
     drawn_rows: frame.DrawnRows = .{},
     /// Input and terminal replies the PTY has not accepted yet.
     pending: std.ArrayList(u8) = .empty,
-    /// Epoll interest for the PTY. Null once the PTY hung up.
-    events: ?u32 = null,
+    /// What the poller watches the PTY for. Null once the PTY hung up.
+    events: ?sys.Interest = null,
     /// Set when output rang the bell; `drain` reports and clears it.
     rang: bool = false,
     /// A hash of the last OSC 7 report, to tell a new directory from a
@@ -92,9 +91,9 @@ pub const Pane = struct {
         if (pid < 0) return error.ForkPtyFailed;
         if (pid == 0) {
             sys.resetChildSignals();
-            if (linux.errno(linux.chdir(opts.cwd)) != .SUCCESS) _ = linux.chdir("/");
-            _ = linux.execve(opts.shell, &argv, opts.env);
-            _ = linux.execve("/bin/sh", &.{ "/bin/sh", null }, opts.env);
+            if (std.c.chdir(opts.cwd) != 0) _ = std.c.chdir("/");
+            _ = std.c.execve(opts.shell, &argv, opts.env);
+            _ = std.c.execve("/bin/sh", &.{ "/bin/sh", null }, opts.env);
             sys._exit(127);
         }
         p.fd = master;
@@ -136,25 +135,20 @@ pub const Pane = struct {
 
     /// The directory the shell last reported with OSC 7, or else the
     /// child's current directory, read once now. Null when neither is known.
-    pub fn cwd(self: *const Pane, buf: *[linux.PATH_MAX]u8) ?[]const u8 {
+    pub fn cwd(self: *const Pane, buf: *[sys.PATH_MAX]u8) ?[]const u8 {
         if (self.terminal.getPwd()) |url| if (pwdPath(url, buf)) |path| return path;
-        var proc_buf: [32]u8 = undefined;
-        const proc = std.fmt.bufPrintZ(&proc_buf, "/proc/{d}/cwd", .{self.pid}) catch return null;
-        const n = sys.check(linux.readlink(proc, buf, buf.len)) catch return null;
-        return buf[0..n];
+        return sys.processCwd(self.pid, buf);
     }
 
     /// The PTY's foreground process group; null when it cannot be read.
     pub fn foregroundGroup(self: *const Pane) ?sys.pid_t {
-        var pgrp: sys.pid_t = 0;
-        _ = sys.check(linux.ioctl(self.fd, linux.T.IOCGPGRP, @intFromPtr(&pgrp))) catch return null;
-        return if (pgrp > 0) pgrp else null;
+        return sys.foregroundGroup(self.fd);
     }
 
     /// The command of the PTY's foreground process group, such as `vim`
     /// or the shell's own name. Null when it cannot be read.
     pub fn foreground(self: *const Pane, buf: *Comm) ?[]const u8 {
-        return readComm(self.foregroundGroup() orelse return null, buf);
+        return sys.processName(self.foregroundGroup() orelse return null, buf);
     }
 
     /// The command in the foreground when it is not the shell: what
@@ -162,12 +156,12 @@ pub const Pane = struct {
     pub fn busy(self: *const Pane, buf: *Comm) ?[]const u8 {
         const pgrp = self.foregroundGroup() orelse return null;
         if (pgrp == self.pid) return null;
-        return readComm(pgrp, buf) orelse "a program";
+        return sys.processName(pgrp, buf) orelse "a program";
     }
 
     /// Hangs up the child's process group.
     pub fn hangup(self: *const Pane) void {
-        _ = linux.kill(-self.pid, .HUP);
+        _ = std.c.kill(-self.pid, .HUP);
     }
 
     /// Writes to the PTY without blocking and queues what it does not accept.
@@ -287,18 +281,8 @@ pub const Pane = struct {
     }
 };
 
-/// Holds `/proc/<pid>/comm`, which the kernel caps at 15 bytes and a newline.
-pub const Comm = [32]u8;
-
-fn readComm(pid: sys.pid_t, buf: *Comm) ?[]const u8 {
-    var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
-    const fd: sys.fd_t = @intCast(sys.check(linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)) catch return null);
-    defer sys.close(fd);
-    const n = sys.read(fd, buf) catch return null;
-    const name = std.mem.trimEnd(u8, buf[0..n], "\n");
-    return if (name.len > 0) name else null;
-}
+/// Holds a process's command name: at most 15 bytes on Linux and 32 on macOS.
+pub const Comm = [64]u8;
 
 fn writePty(h: *Handler, data: []const u8) void {
     const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
