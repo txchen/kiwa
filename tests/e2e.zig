@@ -8,9 +8,22 @@ const sys = @import("kiwa_sys");
 const protocol = @import("kiwa_protocol");
 const skewed_version = protocol.version + @import("skewed_build_options").protocol_skew;
 
-const linux = std.os.linux;
+const builtin = @import("builtin");
+const libc = std.c;
 
-extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termp: ?*const linux.termios, winp: ?*const sys.Winsize) c_int;
+const os = switch (builtin.os.tag) {
+    .linux => @import("os/linux.zig"),
+    .macos => @import("os/darwin.zig"),
+    else => @compileError("the end-to-end tests run on Linux and macOS"),
+};
+
+/// One process, with its arguments and environment as NUL-terminated strings.
+pub const Process = struct { pid: sys.pid_t, argv: []const u8, env: []const u8 };
+
+/// What `sample` reads of a process's CPU use.
+pub const Sample = struct { switches: u64, ticks: u64 };
+
+extern "c" fn pause() c_int;
 
 const Ctx = struct {
     gpa: std.mem.Allocator,
@@ -43,14 +56,12 @@ const Ctx = struct {
         const argv = [_:null]?[*:0]const u8{ ctx.kiwa.ptr, arg.ptr, null };
         const pid = sys.fork();
         if (pid == 0) {
-            const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0));
-            for ([_]i32{ 0, 1, 2 }) |fd| _ = linux.dup2(devnull, fd);
-            _ = linux.execve(ctx.kiwa, &argv, ctx.env.slice);
+            const devnull = sys.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch sys._exit(126);
+            for ([_]i32{ 0, 1, 2 }) |fd| _ = libc.dup2(devnull, fd);
+            _ = libc.execve(ctx.kiwa, &argv, ctx.env.slice);
             sys._exit(127);
         }
-        var status: u32 = 0;
-        _ = linux.waitpid(pid, &status, 0);
-        return linux.W.EXITSTATUS(status);
+        return exitStatus(waitChild(pid));
     }
 
     /// Runs `kiwa <arg>` without a terminal and returns what it printed.
@@ -77,16 +88,15 @@ const Ctx = struct {
     /// Runs `argv` in the case's directory without a terminal and returns
     /// its exit code and what it printed on `streams`.
     fn exec(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, streams: enum { stdout, both }) !Ran {
-        var pipe: [2]i32 = undefined;
-        _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+        const pipe = try sys.pipe();
         const pid = sys.fork();
         if (pid == 0) {
-            const devnull: i32 = @intCast(linux.open("/dev/null", .{ .ACCMODE = .RDWR }, 0));
-            _ = linux.dup2(devnull, 0);
-            _ = linux.dup2(pipe[1], 1);
-            _ = linux.dup2(if (streams == .both) pipe[1] else devnull, 2);
-            _ = linux.chdir(ctx.dir_z);
-            _ = linux.execve(argv[0].?, argv, ctx.env.slice);
+            const devnull = sys.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch sys._exit(126);
+            _ = libc.dup2(devnull, 0);
+            _ = libc.dup2(pipe[1], 1);
+            _ = libc.dup2(if (streams == .both) pipe[1] else devnull, 2);
+            _ = libc.chdir(ctx.dir_z);
+            _ = libc.execve(argv[0].?, argv, ctx.env.slice);
             sys._exit(127);
         }
         sys.close(pipe[1]);
@@ -99,9 +109,7 @@ const Ctx = struct {
             if (n == 0) break;
             try out.appendSlice(ctx.gpa, buf[0..n]);
         }
-        var status: u32 = 0;
-        _ = linux.waitpid(pid, &status, 0);
-        return .{ .code = linux.W.EXITSTATUS(status), .output = try out.toOwnedSlice(ctx.gpa) };
+        return .{ .code = exitStatus(waitChild(pid)), .output = try out.toOwnedSlice(ctx.gpa) };
     }
 
     /// Waits until `kiwa ls` prints `want`.
@@ -121,32 +129,22 @@ const Ctx = struct {
 
     /// The pid of the server whose environment names this case's socket.
     fn serverPid(ctx: *Ctx) !?sys.pid_t {
-        var proc = try std.Io.Dir.openDirAbsolute(ctx.io, "/proc", .{ .iterate = true });
-        defer proc.close(ctx.io);
-        var it = proc.iterate();
         const want = try std.fmt.allocPrint(ctx.gpa, "KIWA_SOCKET={s}\x00", .{ctx.socket});
         defer ctx.gpa.free(want);
-        var buf: [64 * 1024]u8 = undefined;
-        while (try it.next(ctx.io)) |entry| {
-            const pid = std.fmt.parseInt(sys.pid_t, entry.name, 10) catch continue;
-            var path: [64]u8 = undefined;
-            const cmdline = proc.readFile(ctx.io, try std.fmt.bufPrint(&path, "{d}/cmdline", .{pid}), &buf) catch continue;
-            if (std.mem.indexOf(u8, cmdline, "__server") == null) continue;
-            const environ = proc.readFile(ctx.io, try std.fmt.bufPrint(&path, "{d}/environ", .{pid}), &buf) catch continue;
-            if (std.mem.indexOf(u8, environ, want) != null) return pid;
+        var procs: os.Processes = try .init(ctx.gpa, ctx.io);
+        defer procs.deinit();
+        var buf: [128 * 1024]u8 = undefined;
+        while (try procs.next(&buf)) |p| {
+            if (std.mem.indexOf(u8, p.argv, "__server") == null) continue;
+            if (std.mem.indexOf(u8, p.env, want) != null) return p.pid;
         }
         return null;
     }
 
     fn waitServerGone(ctx: *Ctx, pid: sys.pid_t) !void {
         const deadline = now() + 3 * std.time.ns_per_s;
-        var path: [32]u8 = undefined;
-        const p = try std.fmt.bufPrintZ(&path, "/proc/{d}/stat", .{pid});
         while (now() < deadline) {
-            var buf: [512]u8 = undefined;
-            const stat = std.Io.Dir.cwd().readFile(ctx.io, p, &buf) catch return;
-            // A zombie has released everything; only its parent's wait is left.
-            if (std.mem.indexOf(u8, stat, ") Z ") != null) return;
+            if (os.exited(ctx.io, pid)) return;
             sleepMs(20);
         }
         return error.ServerStillRunning;
@@ -191,7 +189,7 @@ const Outer = struct {
     /// It shares its open file description with the client's stdin.
     slave: ?sys.fd_t = null,
     /// The slave's file status flags before the client ran.
-    slave_flags: usize = 0,
+    slave_flags: c_int = 0,
 
     const Keyboard = enum { kitty, legacy };
 
@@ -215,28 +213,28 @@ const Outer = struct {
         errdefer ctx.gpa.destroy(o);
         var master: c_int = -1;
         var slave: c_int = -1;
-        var slave_flags: usize = 0;
+        var slave_flags: c_int = 0;
         const ws: sys.Winsize = .{ .col = opts.cols, .row = opts.rows, .xpixel = 0, .ypixel = 0 };
         const pid = if (opts.keep_slave) pid: {
-            if (openpty(&master, &slave, null, null, &ws) != 0) return error.OpenPtyFailed;
+            if (sys.openpty(&master, &slave, null, null, &ws) != 0) return error.OpenPtyFailed;
             try sys.setCloexec(master, true);
             try sys.setCloexec(slave, true);
-            slave_flags = try sys.check(linux.fcntl(slave, linux.F.GETFL, 0));
+            slave_flags = try sys.getFlags(slave);
             const pid = sys.fork();
             if (pid == 0) {
                 _ = sys.setsid();
-                if (opts.controlling) _ = linux.ioctl(slave, linux.T.IOCSCTTY, 0);
-                for ([_]i32{ 0, 1, 2 }) |fd| _ = linux.dup2(slave, fd);
-                _ = linux.chdir(ctx.dir_z);
-                _ = linux.execve(argv[0].?, argv, ctx.env.slice);
+                if (opts.controlling) _ = sys.ioctl(slave, sys.TIOCSCTTY, 0);
+                for ([_]i32{ 0, 1, 2 }) |fd| _ = libc.dup2(slave, fd);
+                _ = libc.chdir(ctx.dir_z);
+                _ = libc.execve(argv[0].?, argv, ctx.env.slice);
                 sys._exit(127);
             }
             break :pid pid;
         } else sys.forkpty(&master, null, null, &ws);
         if (pid < 0) return error.ForkPtyFailed;
         if (pid == 0) {
-            _ = linux.chdir(ctx.dir_z);
-            _ = linux.execve(argv[0].?, argv, ctx.env.slice);
+            _ = libc.chdir(ctx.dir_z);
+            _ = libc.execve(argv[0].?, argv, ctx.env.slice);
             sys._exit(127);
         }
         o.* = .{
@@ -348,9 +346,8 @@ const Outer = struct {
 
     fn destroy(o: *Outer) void {
         if (o.status == null) {
-            _ = linux.kill(o.pid, .KILL);
-            var status: u32 = 0;
-            _ = linux.waitpid(o.pid, &status, 0);
+            _ = libc.kill(o.pid, .KILL);
+            _ = waitChild(o.pid);
         }
         o.closeSlave();
         if (!o.hung_up) sys.close(o.master);
@@ -376,8 +373,8 @@ const Outer = struct {
 
     /// The file status flags of the client's stdin, which the harness's
     /// slave shares.
-    fn slaveFlags(o: *const Outer) !usize {
-        return sys.check(linux.fcntl(o.slave.?, linux.F.GETFL, 0));
+    fn slaveFlags(o: *const Outer) !c_int {
+        return sys.getFlags(o.slave.?);
     }
 
     /// Feeds everything that arrives within `ms` into the outer model.
@@ -395,9 +392,9 @@ const Outer = struct {
     }
 
     fn pollOnce(o: *Outer, ns: u64) !bool {
-        var pfd = [_]linux.pollfd{.{ .fd = o.master, .events = linux.POLL.IN, .revents = 0 }};
+        var pfd = [_]libc.pollfd{.{ .fd = o.master, .events = libc.POLL.IN, .revents = 0 }};
         const ms: i32 = @intCast(@max(1, ns / std.time.ns_per_ms));
-        return try sys.check(linux.poll(&pfd, 1, ms)) > 0;
+        return try sys.check(libc.poll(&pfd, 1, ms)) > 0;
     }
 
     fn readOnce(o: *Outer) !usize {
@@ -487,12 +484,11 @@ const Outer = struct {
             if (try o.pollOnce(deadline -| now())) _ = try o.readOnce();
         }
         while (now() < deadline) {
-            var status: u32 = 0;
-            const rc = linux.waitpid(o.pid, &status, linux.W.NOHANG);
-            if (rc == @as(usize, @intCast(o.pid))) {
-                o.status = status;
-                if (!linux.W.IFEXITED(status)) return error.ClientKilledBySignal;
-                return linux.W.EXITSTATUS(status);
+            var status: c_int = 0;
+            if (libc.waitpid(o.pid, &status, libc.W.NOHANG) == o.pid) {
+                o.status = @bitCast(status);
+                if (!libc.W.IFEXITED(@bitCast(status))) return error.ClientKilledBySignal;
+                return exitStatus(status);
             }
             sleepMs(10);
         }
@@ -500,15 +496,22 @@ const Outer = struct {
     }
 };
 
-fn now() u64 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
+const now = sys.monotonicNs;
 
 fn sleepMs(ms: u64) void {
-    const ts: linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-    _ = linux.nanosleep(&ts, null);
+    const ts: libc.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    _ = libc.nanosleep(&ts, null);
+}
+
+/// Waits for a child and returns its wait status.
+fn waitChild(pid: sys.pid_t) c_int {
+    var status: c_int = 0;
+    _ = libc.waitpid(pid, &status, 0);
+    return status;
+}
+
+fn exitStatus(status: c_int) u8 {
+    return libc.W.EXITSTATUS(@bitCast(status));
 }
 
 const Mods = vt.input.KeyMods;
@@ -567,8 +570,8 @@ fn detachRestoresTerminal(ctx: *Ctx) !void {
     try o.press(char('q', .{}));
     try expect(try o.waitExit() == 0, "the client exits 0 after ctrl+b q");
     try expect(try o.hasLine("detached"), "the client prints \"detached\"");
-    var t: linux.termios = undefined;
-    _ = try sys.check(linux.tcgetattr(o.master, &t));
+    var t: sys.termios = undefined;
+    _ = try sys.check(libc.tcgetattr(o.master, &t));
     try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
     try expect(t.oflag.OPOST and t.iflag.ICRNL, "OPOST and ICRNL are set again");
     try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
@@ -590,7 +593,7 @@ fn detachKeepsFileStatusFlags(ctx: *Ctx) !void {
     try o.send("\x02q");
     try o.waitLine("detached");
     const after = try o.slaveFlags();
-    try expect(after & (1 << @bitOffsetOf(linux.O, "NONBLOCK")) == 0, "O_NONBLOCK is off after detach");
+    try expect(after & sys.nonblock_flag == 0, "O_NONBLOCK is off after detach");
     try expect(after == o.slave_flags, "after detach, the terminal's file status flags are as before attach");
     o.closeSlave();
     try expect(try o.waitExit() == 0, "the client exits 0");
@@ -672,29 +675,8 @@ fn quietServer(ctx: *Ctx) !void {
     try expect(bytes == 0, "no output reaches the outer terminal");
 }
 
-const Sample = struct { switches: u64, ticks: u64 };
-
 fn sample(ctx: *Ctx, pid: sys.pid_t) !Sample {
-    var path: [64]u8 = undefined;
-    var buf: [4096]u8 = undefined;
-    var s: Sample = .{ .switches = 0, .ticks = 0 };
-    const status = try std.Io.Dir.cwd().readFile(ctx.io, try std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}), &buf);
-    var lines = std.mem.splitScalar(u8, status, '\n');
-    while (lines.next()) |line| {
-        inline for (.{ "voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:" }) |key| {
-            if (std.mem.startsWith(u8, line, key)) {
-                s.switches += try std.fmt.parseInt(u64, std.mem.trim(u8, line[key.len..], " \t"), 10);
-            }
-        }
-    }
-    const stat = try std.Io.Dir.cwd().readFile(ctx.io, try std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}), &buf);
-    // Fields after the parenthesized command: state is field 3, utime 14, stime 15.
-    var fields = std.mem.tokenizeScalar(u8, stat[std.mem.lastIndexOfScalar(u8, stat, ')').? + 2 ..], ' ');
-    var i: usize = 3;
-    while (fields.next()) |f| : (i += 1) {
-        if (i == 14 or i == 15) s.ticks += try std.fmt.parseInt(u64, f, 10);
-    }
-    return s;
+    return os.sample(ctx.io, pid);
 }
 
 fn statsCountRendersAndWakes(ctx: *Ctx) !void {
@@ -751,23 +733,18 @@ fn killServer(ctx: *Ctx) !void {
 }
 
 fn killServerGivesUpOnAServerThatStays(ctx: *Ctx) !void {
-    var ready: [2]i32 = undefined;
-    _ = try sys.check(linux.pipe2(&ready, .{ .CLOEXEC = true }));
+    const ready = try sys.pipe();
     defer sys.close(ready[0]);
     const pid = sys.fork();
     if (pid == 0) {
         sys.blockSignals(&.{.TERM}) catch sys._exit(1);
-        const fd = sys.unixSocket(false) catch sys._exit(1);
-        const addr = sys.unixAddr(ctx.socket) catch sys._exit(1);
-        _ = sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) catch sys._exit(1);
-        _ = sys.check(linux.listen(fd, 1)) catch sys._exit(1);
+        _ = sys.listenUnix(ctx.socket, 1) catch sys._exit(1);
         _ = sys.write(ready[1], "1") catch sys._exit(1);
-        while (true) _ = linux.pause();
+        while (true) _ = pause();
     }
     defer {
-        _ = linux.kill(pid, .KILL);
-        var status: u32 = 0;
-        _ = linux.waitpid(pid, &status, 0);
+        _ = libc.kill(pid, .KILL);
+        _ = waitChild(pid);
     }
     sys.close(ready[1]);
     var byte: [1]u8 = undefined;
@@ -1024,8 +1001,8 @@ fn skewedClientIsToldToRestart(ctx: *Ctx) !void {
     const reason = try std.fmt.bufPrint(&buf, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, skewed_version });
     try expect(try o.hasLine(reason), "the skewed client prints the reason with both versions");
     try expect(try o.hasLine(restart_hint), "the skewed client prints the restart hint on its own line");
-    var t: linux.termios = undefined;
-    _ = try sys.check(linux.tcgetattr(o.master, &t));
+    var t: sys.termios = undefined;
+    _ = try sys.check(libc.tcgetattr(o.master, &t));
     try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
     try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
     try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
@@ -1059,10 +1036,7 @@ fn skewedKillServerRestartsOntoThisVersion(ctx: *Ctx) !void {
 }
 
 fn staleSocketIsReplaced(ctx: *Ctx) !void {
-    const fd = try sys.unixSocket(false);
-    const addr = try sys.unixAddr(ctx.socket);
-    _ = try sys.check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)));
-    sys.close(fd);
+    sys.close(try sys.listenUnix(ctx.socket, 1));
     try expect(ctx.socketExists(), "a dead server's socket file exists");
     const o = try attachedWithPrompt(ctx);
     try o.send("echo fresh\r");
@@ -1080,10 +1054,10 @@ fn nonSocketIsKept(ctx: *Ctx) !void {
 
 fn signalRestoresTerminal(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    _ = linux.kill(o.pid, .TERM);
+    _ = libc.kill(o.pid, .TERM);
     try expect(try o.waitExit() == 0, "the client exits 0 on SIGTERM");
-    var t: linux.termios = undefined;
-    _ = try sys.check(linux.tcgetattr(o.master, &t));
+    var t: sys.termios = undefined;
+    _ = try sys.check(libc.tcgetattr(o.master, &t));
     try expect(t.lflag.ICANON and t.lflag.ECHO, "ICANON and ECHO are set again");
     try expect(o.term.screens.active_key == .primary, "the outer terminal is back on the primary screen");
     try expect(!o.term.modes.get(.mouse_event_button) and !o.term.modes.get(.mouse_format_sgr), "mouse tracking is off");
@@ -1525,16 +1499,10 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
 
 /// Whether a process runs with exactly this command line.
 fn processRuns(ctx: *Ctx, cmdline: []const u8) !bool {
-    var proc = try std.Io.Dir.openDirAbsolute(ctx.io, "/proc", .{ .iterate = true });
-    defer proc.close(ctx.io);
-    var it = proc.iterate();
-    var buf: [4096]u8 = undefined;
-    while (try it.next(ctx.io)) |entry| {
-        _ = std.fmt.parseInt(sys.pid_t, entry.name, 10) catch continue;
-        var path: [64]u8 = undefined;
-        const got = proc.readFile(ctx.io, try std.fmt.bufPrint(&path, "{s}/cmdline", .{entry.name}), &buf) catch continue;
-        if (std.mem.eql(u8, got, cmdline)) return true;
-    }
+    var procs: os.Processes = try .init(ctx.gpa, ctx.io);
+    defer procs.deinit();
+    var buf: [128 * 1024]u8 = undefined;
+    while (try procs.next(&buf)) |p| if (std.mem.eql(u8, p.argv, cmdline)) return true;
     return false;
 }
 
@@ -1542,7 +1510,7 @@ fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
-    const arg = try std.fmt.allocPrint(ctx.gpa, "{d}", .{4_000_000 + @as(u32, @intCast(linux.getpid()))});
+    const arg = try std.fmt.allocPrint(ctx.gpa, "{d}", .{4_000_000 + @as(u32, @intCast(sys.getpid()))});
     defer ctx.gpa.free(arg);
     const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{s}\x00", .{arg});
     defer ctx.gpa.free(cmdline);
@@ -1568,7 +1536,7 @@ fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
 /// Starts `sleep <unique number>` in the focused pane and waits until it runs.
 /// Returns its command line for `processRuns`.
 fn startSleep(ctx: *Ctx, o: *Outer) ![]u8 {
-    const arg = 4_100_000 + @as(u32, @intCast(linux.getpid()));
+    const arg = 4_100_000 + @as(u32, @intCast(sys.getpid()));
     const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{d}\x00", .{arg});
     errdefer ctx.gpa.free(cmdline);
     var cmd: [64]u8 = undefined;
@@ -1773,9 +1741,9 @@ fn waitCursorHidden(o: *Outer) !void {
 
 fn hostname() []const u8 {
     const S = struct {
-        var uts: linux.utsname = undefined;
+        var uts: libc.utsname = undefined;
     };
-    _ = linux.uname(&S.uts);
+    _ = libc.uname(&S.uts);
     return std.mem.sliceTo(&S.uts.nodename, 0);
 }
 
@@ -2776,9 +2744,8 @@ pub fn main(init: std.process.Init) !u8 {
     _ = args.next();
     const kiwa_arg = args.next() orelse return error.MissingKiwaPath;
     const skewed_arg = args.next() orelse return error.MissingKiwaPath;
-    var cwd_buf: [linux.PATH_MAX]u8 = undefined;
-    _ = try sys.check(linux.getcwd(&cwd_buf, cwd_buf.len));
-    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+    var cwd_buf: [sys.PATH_MAX]u8 = undefined;
+    const cwd = std.mem.sliceTo(libc.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd, 0);
     const kiwa = try std.fs.path.joinZ(gpa, &.{ cwd, kiwa_arg });
     defer gpa.free(kiwa);
     const skewed = try std.fs.path.joinZ(gpa, &.{ cwd, skewed_arg });
@@ -2801,10 +2768,15 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
-    const dir = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ linux.getpid(), index }, 0);
+    const made = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ sys.getpid(), index }, 0);
+    defer gpa.free(made);
+    try std.Io.Dir.cwd().createDirPath(io, made);
+    defer std.Io.Dir.cwd().deleteTree(io, made) catch {};
+    // On macOS /tmp is a link to /private/tmp, the path that panes report.
+    var real_buf: [sys.PATH_MAX]u8 = undefined;
+    const real = libc.realpath(made, &real_buf) orelse return error.NoRealPath;
+    const dir = try gpa.dupeZ(u8, std.mem.sliceTo(real, 0));
     defer gpa.free(dir);
-    try std.Io.Dir.cwd().createDirPath(io, dir);
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     var env: std.process.Environ.Map = .init(gpa);
     defer env.deinit();
@@ -2847,7 +2819,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
             _ = ctx.run("kill-server") catch 0;
             ctx.waitServerGone(pid) catch {
                 std.debug.print("    cleanup: kill-server failed; sending SIGKILL to {d}\n", .{pid});
-                _ = linux.kill(pid, .KILL);
+                _ = libc.kill(pid, .KILL);
             };
         }
         for (ctx.outers.items) |o| o.destroy();
