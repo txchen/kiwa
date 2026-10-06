@@ -19,3 +19,4 @@ against it.
 - Dynamic tab names are re-checked only after pane output or a focus change,
   at most every 500 ms, following tmux's `automatic-rename`.
 - A test checks that a server with quiet panes makes no event-loop wakes.
+  It is a `zig build e2e-perf` case, run on demand rather than in CI.

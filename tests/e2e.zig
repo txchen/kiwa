@@ -25,6 +25,9 @@ pub const Sample = struct { switches: u64, ticks: u64 };
 
 extern "c" fn pause() c_int;
 
+/// The shell prompt in every case's panes.
+const prompt = "$ ";
+
 const Ctx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -415,6 +418,10 @@ const Outer = struct {
     }
 
     /// Whether a row reads `line`, either whole or right of the sidebar.
+    /// A row may also read `line` after the prompt: a shell without line
+    /// editing, such as dash, prints its first prompt after the terminal
+    /// has echoed input typed before the shell was ready, and the output
+    /// then follows that late prompt.
     fn hasLine(o: *Outer, line: []const u8) !bool {
         var g: Grid = try .load(o);
         defer g.deinit();
@@ -422,7 +429,9 @@ const Outer = struct {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(o.gpa);
         for (0..g.rs.rows) |y| for ([_]usize{ 0, sidebar }) |from| {
-            if (std.mem.eql(u8, try g.rowText(&buf, y, from), line)) return true;
+            const row = try g.rowText(&buf, y, from);
+            if (std.mem.eql(u8, row, line)) return true;
+            if (std.mem.startsWith(u8, row, prompt) and std.mem.eql(u8, row[prompt.len..], line)) return true;
         };
         return false;
     }
@@ -1075,8 +1084,10 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     try o.waitLine("$");
     // The loop ends on a file, not on ctrl+c: under load, the shell
     // sometimes kept looping after a ctrl+c.
-    try o.send("a=$(printf 'abcdefghij%.0s' $(seq 24)); printf '\\033[1;79r\\033[79H'; " ++
-        "while [ ! -e stop ]; do printf '%s%s\\n' $RANDOM \"$a\"; sleep 0.01; done\r");
+    // A counter, not $RANDOM, which dash lacks: identical lines would
+    // scroll without changing a cell, and the frames would stay small.
+    try o.send("a=$(printf 'abcdefghij%.0s' $(seq 24)); i=0; printf '\\033[1;79r\\033[79H'; " ++
+        "while [ ! -e stop ]; do i=$((i+1)); printf '%s%s\\n' $i \"$a\"; sleep 0.01; done\r");
     _ = try o.pump(200);
     // Not reading stalls the client. How long the producer takes to fill
     // the buffer depends on the machine's load, so wait for the overflow.
@@ -2662,7 +2673,12 @@ fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
     try o.waitLine("fresh");
 }
 
-const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
+/// `functional` cases check behavior and run in CI. `perf` cases measure
+/// cost (wakes, context switches, outer bytes) or load the machine; their
+/// results depend on it, so they run on demand with `zig build e2e-perf`.
+pub const Kind = enum { functional, perf };
+
+const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void, kind: Kind = .functional }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
     .{ .name = "detach leaves the outer terminal's file status flags as they were", .run = detachKeepsFileStatusFlags },
@@ -2670,7 +2686,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a terminal without the kitty protocol gets no kitty flags", .run = legacyKeyboardGetsNoKittyFlags },
     .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },
-    .{ .name = "quiet server makes no wakes", .run = quietServer },
+    .{ .name = "quiet server makes no wakes", .run = quietServer, .kind = .perf },
     .{ .name = "kiwa __stats counts renders and wakes", .run = statsCountRendersAndWakes },
     .{ .name = "resize reaches the pane", .run = resizeReachesPane },
     .{ .name = "second client takes over", .run = takeover },
@@ -2693,10 +2709,10 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void 
     .{ .name = "a dead server's socket is replaced", .run = staleSocketIsReplaced },
     .{ .name = "a non-socket at the socket path is kept", .run = nonSocketIsKept },
     .{ .name = "SIGTERM restores the outer terminal", .run = signalRestoresTerminal },
-    .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers },
-    .{ .name = "a one-cell spinner costs bytes per frame, not per screen", .run = spinnerCostsBytesPerFrame },
-    .{ .name = "scrolling output costs bytes per line, not per screen (margins)", .run = scrollingCostsBytesPerLineWithMargins },
-    .{ .name = "scrolling output costs bytes per line, not per screen (no margins)", .run = scrollingCostsBytesPerLineWithoutMargins },
+    .{ .name = "a stalled client recovers after its buffer overflows", .run = stalledClientRecovers, .kind = .perf },
+    .{ .name = "a one-cell spinner costs bytes per frame, not per screen", .run = spinnerCostsBytesPerFrame, .kind = .perf },
+    .{ .name = "scrolling output costs bytes per line, not per screen (margins)", .run = scrollingCostsBytesPerLineWithMargins, .kind = .perf },
+    .{ .name = "scrolling output costs bytes per line, not per screen (no margins)", .run = scrollingCostsBytesPerLineWithoutMargins, .kind = .perf },
     .{ .name = "workspaces, tabs, and a 3-pane split: focus, borders, and closes", .run = workspacesTabsAndSplits },
     .{ .name = "zoom fills the tab and unzoom restores the split", .run = zoomAndUnzoom },
     .{ .name = "resize mode moves the divider", .run = resizeModeMovesTheDivider },
@@ -2750,11 +2766,14 @@ pub fn main(init: std.process.Init) !u8 {
     defer gpa.free(kiwa);
     const skewed = try std.fs.path.joinZ(gpa, &.{ cwd, skewed_arg });
     defer gpa.free(skewed);
+    const kind_arg = args.next() orelse return error.MissingKind;
+    const kind = std.meta.stringToEnum(Kind, kind_arg) orelse return error.UnknownKind;
     const filter = args.next();
 
     var passed: usize = 0;
     var failed: usize = 0;
     for (cases, 0..) |case, i| {
+        if (case.kind != kind) continue;
         if (filter) |f| if (std.mem.indexOf(u8, case.name, f) == null) continue;
         const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, i, case.run) catch |e| blk: {
             std.debug.print("    error: {t}\n", .{e});
@@ -2783,7 +2802,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     try env.put("PATH", parent_env.get("PATH") orelse "/usr/bin:/bin");
     try env.put("HOME", dir);
     try env.put("SHELL", "/bin/sh");
-    try env.put("PS1", "$ ");
+    try env.put("PS1", prompt);
     try env.put("TERM", "xterm-256color");
     // Fake values that the server must strip from the pane's environment.
     const fake_tmux = try std.fmt.allocPrint(gpa, "{s}/no-such-tmux,1,0", .{dir});

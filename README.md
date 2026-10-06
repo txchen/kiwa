@@ -104,9 +104,16 @@ harness's macOS process listing. CI runs the tests natively on a
 ## Test
 
 ```sh
-mise exec -- zig build test   # unit tests for the pure modules
-mise exec -- zig build e2e    # end-to-end tests against the built kiwa binary
+mise exec -- zig build test       # unit tests for the pure modules
+mise exec -- zig build e2e        # functional end-to-end tests against the built kiwa binary
+mise exec -- zig build e2e-perf   # end-to-end tests that measure cost; run on demand
 ```
+
+`e2e-perf` holds the cases that measure wakes, context switches, or outer
+bytes, or that load the machine on purpose, such as the stalled-client
+overflow. Their results depend on the machine, so CI does not run them.
+Run them before a change that could affect the event loop or the renderer.
+Both steps take a name filter, as in `zig build e2e -- vim`.
 
 The end-to-end tests require git, Python 3, less, Vim, htop, fzf, and ncurses
 utilities/terminfo (CI installs these explicitly).

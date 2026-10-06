@@ -80,12 +80,19 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addImport("kiwa_protocol", e2e_protocol);
     e2e_mod.addOptions("skewed_build_options", skewed_options);
     const e2e_exe = b.addExecutable(.{ .name = "kiwa-e2e", .root_module = e2e_mod });
-    const e2e_run = b.addRunArtifact(e2e_exe);
-    e2e_run.addArtifactArg(exe);
-    e2e_run.addArtifactArg(skewed_exe);
-    if (b.args) |args| e2e_run.addArgs(args);
-    e2e_run.has_side_effects = true;
-    b.step("e2e", "Run end-to-end tests against the kiwa binary").dependOn(&e2e_run.step);
+    const e2e_steps = [_]struct { name: []const u8, kind: []const u8, description: []const u8 }{
+        .{ .name = "e2e", .kind = "functional", .description = "Run the functional end-to-end tests against the kiwa binary" },
+        .{ .name = "e2e-perf", .kind = "perf", .description = "Run the end-to-end tests that measure cost or load the machine; not run in CI" },
+    };
+    for (e2e_steps) |spec| {
+        const e2e_run = b.addRunArtifact(e2e_exe);
+        e2e_run.addArtifactArg(exe);
+        e2e_run.addArtifactArg(skewed_exe);
+        e2e_run.addArg(spec.kind);
+        if (b.args) |args| e2e_run.addArgs(args);
+        e2e_run.has_side_effects = true;
+        b.step(spec.name, spec.description).dependOn(&e2e_run.step);
+    }
 
     // Compiling for another OS proves little about what runs there, but it
     // does catch a call that the target's libc lacks.
