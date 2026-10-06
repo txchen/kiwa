@@ -3,48 +3,49 @@
 
 const std = @import("std");
 
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 
 /// A frame larger than this is a protocol error, not a big message.
 pub const max_frame_len: u32 = 16 * 1024 * 1024;
 pub const header_len = 5;
 
-pub const Tag = enum(u8) { hello = 1, input, resize, output, detach, kill, list, stats, _ };
+pub const Tag = enum(u8) { hello = 1, resize, detach, kill, list, stats, text, _ };
 
 pub const Size = struct { cols: u16, rows: u16 };
 
+/// Sent with the client's outer terminal attached as `SCM_RIGHTS`.
 pub const Hello = struct { version: u16, size: Size, cwd: []const u8 };
 
 pub const Message = union(enum) {
     hello: Hello,
-    input: []const u8,
     resize: Size,
-    output: []const u8,
+    /// From the server: it has let go of the outer terminal, and why.
+    /// From the client: asks the server to let go, for that reason.
     detach: []const u8,
     kill,
-    /// Asks for the session as text, answered with `output` and a close.
+    /// Asks for the session as text, answered with `text` and a close.
     list,
     /// Asks for the server's debug counters, answered like `list`.
     stats,
+    text: []const u8,
 };
 
 pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
     const payload_len: usize = switch (msg) {
         .hello => |h| 6 + h.cwd.len,
-        .input, .output, .detach => |b| b.len,
+        .detach, .text => |b| b.len,
         .resize => 4,
         .kill, .list, .stats => 0,
     };
     try w.writeInt(u32, @intCast(1 + payload_len), .little);
     try w.writeByte(@intFromEnum(@as(Tag, switch (msg) {
         .hello => .hello,
-        .input => .input,
         .resize => .resize,
-        .output => .output,
         .detach => .detach,
         .kill => .kill,
         .list => .list,
         .stats => .stats,
+        .text => .text,
     })));
     switch (msg) {
         .hello => |h| {
@@ -52,7 +53,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
             try writeSize(w, h.size);
             try w.writeAll(h.cwd);
         },
-        .input, .output, .detach => |b| try w.writeAll(b),
+        .detach, .text => |b| try w.writeAll(b),
         .resize => |s| try writeSize(w, s),
         .kill, .list, .stats => {},
     }
@@ -94,16 +95,15 @@ pub fn parse(frame: []const u8) DecodeError!Message {
                 .cwd = payload[6..],
             } };
         },
-        .input => .{ .input = payload },
         .resize => blk: {
             if (payload.len != 4) return error.Malformed;
             break :blk .{ .resize = readSize(payload[0..4]) };
         },
-        .output => .{ .output = payload },
         .detach => .{ .detach = payload },
         .kill => .kill,
         .list => .list,
         .stats => .stats,
+        .text => .{ .text = payload },
         _ => error.UnknownTag,
     };
 }
@@ -160,9 +160,8 @@ fn expectMessage(expected: Message, actual: Message) !void {
             try testing.expectEqual(h.size, actual.hello.size);
             try testing.expectEqualStrings(h.cwd, actual.hello.cwd);
         },
-        .input => |b| try testing.expectEqualStrings(b, actual.input),
-        .output => |b| try testing.expectEqualStrings(b, actual.output),
         .detach => |b| try testing.expectEqualStrings(b, actual.detach),
+        .text => |b| try testing.expectEqualStrings(b, actual.text),
         .resize => |s| try testing.expectEqual(s, actual.resize),
         .kill, .list, .stats => {},
     }
@@ -170,14 +169,13 @@ fn expectMessage(expected: Message, actual: Message) !void {
 
 const sample = [_]Message{
     .{ .hello = .{ .version = version, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/home/u/src" } },
-    .{ .input = "echo hi\r" },
     .{ .resize = .{ .cols = 90, .rows = 30 } },
-    .{ .output = "\x1b[?2026h\x1b[H$ \x1b[?2026l" },
     .{ .detach = "attached elsewhere" },
     .kill,
     .list,
     .stats,
-    .{ .input = "" },
+    .{ .text = "main\n  1 sh\n" },
+    .{ .detach = "" },
 };
 
 test "every message survives a round trip fed one byte at a time" {

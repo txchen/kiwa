@@ -9,6 +9,8 @@ const protocol = @import("kiwa_protocol");
 
 const linux = std.os.linux;
 
+extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termp: ?*const linux.termios, winp: ?*const sys.Winsize) c_int;
+
 const Ctx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -175,10 +177,16 @@ const Outer = struct {
     keyboard: Keyboard,
     margins: bool,
     eof: bool = false,
+    hung_up: bool = false,
     status: ?u32 = null,
     capture: ?*std.ArrayList(u8) = null,
     /// What the client last wrote to the clipboard with OSC 52.
     clipboard: std.ArrayList(u8) = .empty,
+    /// The PTY slave, held open only when `Options.keep_slave` asks for it.
+    /// It shares its open file description with the client's stdin.
+    slave: ?sys.fd_t = null,
+    /// The slave's file status flags before the client ran.
+    slave_flags: usize = 0,
 
     const Keyboard = enum { kitty, legacy };
 
@@ -189,14 +197,37 @@ const Outer = struct {
         keyboard: Keyboard = .kitty,
         /// Without margins, the terminal does not know DECLRMM.
         margins: bool = true,
+        /// Keeps the PTY slave open here. The client's exit then reaches
+        /// the master as EOF only after `closeSlave`.
+        keep_slave: bool = false,
+        /// Whether the PTY is the client's controlling terminal, so that
+        /// its hangup signals the client. Needs `keep_slave`.
+        controlling: bool = true,
     };
 
     fn spawn(ctx: *Ctx, argv: [*:null]const ?[*:0]const u8, opts: Options) !*Outer {
         const o = try ctx.gpa.create(Outer);
         errdefer ctx.gpa.destroy(o);
         var master: c_int = -1;
+        var slave: c_int = -1;
+        var slave_flags: usize = 0;
         const ws: sys.Winsize = .{ .col = opts.cols, .row = opts.rows, .xpixel = 0, .ypixel = 0 };
-        const pid = sys.forkpty(&master, null, null, &ws);
+        const pid = if (opts.keep_slave) pid: {
+            if (openpty(&master, &slave, null, null, &ws) != 0) return error.OpenPtyFailed;
+            try sys.setCloexec(master, true);
+            try sys.setCloexec(slave, true);
+            slave_flags = try sys.check(linux.fcntl(slave, linux.F.GETFL, 0));
+            const pid = sys.fork();
+            if (pid == 0) {
+                _ = sys.setsid();
+                if (opts.controlling) _ = linux.ioctl(slave, linux.T.IOCSCTTY, 0);
+                for ([_]i32{ 0, 1, 2 }) |fd| _ = linux.dup2(slave, fd);
+                _ = linux.chdir(ctx.dir_z);
+                _ = linux.execve(argv[0].?, argv, ctx.env.slice);
+                sys._exit(127);
+            }
+            break :pid pid;
+        } else sys.forkpty(&master, null, null, &ws);
         if (pid < 0) return error.ForkPtyFailed;
         if (pid == 0) {
             _ = linux.chdir(ctx.dir_z);
@@ -211,6 +242,8 @@ const Outer = struct {
             .stream = undefined,
             .keyboard = opts.keyboard,
             .margins = opts.margins,
+            .slave = if (opts.keep_slave) slave else null,
+            .slave_flags = slave_flags,
         };
         var handler: vt.TerminalStream.Handler = .init(&o.term);
         handler.effects.write_pty = &answer;
@@ -314,11 +347,32 @@ const Outer = struct {
             var status: u32 = 0;
             _ = linux.waitpid(o.pid, &status, 0);
         }
-        sys.close(o.master);
+        o.closeSlave();
+        if (!o.hung_up) sys.close(o.master);
         o.clipboard.deinit(o.gpa);
         o.stream.deinit();
         o.term.deinit(o.gpa);
         o.gpa.destroy(o);
+    }
+
+    /// Closes the master, as a terminal emulator does when its window
+    /// closes, which hangs up the slave.
+    fn hangUp(o: *Outer) void {
+        o.closeSlave();
+        sys.close(o.master);
+        o.hung_up = true;
+        o.eof = true;
+    }
+
+    fn closeSlave(o: *Outer) void {
+        if (o.slave) |fd| sys.close(fd);
+        o.slave = null;
+    }
+
+    /// The file status flags of the client's stdin, which the harness's
+    /// slave shares.
+    fn slaveFlags(o: *const Outer) !usize {
+        return sys.check(linux.fcntl(o.slave.?, linux.F.GETFL, 0));
     }
 
     /// Feeds everything that arrives within `ms` into the outer model.
@@ -519,6 +573,43 @@ fn detachRestoresTerminal(ctx: *Ctx) !void {
     try expect(!o.term.modes.get(.bracketed_paste), "bracketed paste is off");
     try expect(!o.term.modes.get(.focus_event), "focus events are off");
     try expect(!o.term.modes.get(.mouse_event_button) and !o.term.modes.get(.mouse_format_sgr), "mouse tracking is off");
+}
+
+fn detachKeepsFileStatusFlags(ctx: *Ctx) !void {
+    const o = try ctx.attachWith(.{ .keep_slave = true });
+    try o.waitLine("$");
+    try o.waitKitty();
+    try o.send("echo attached\r");
+    try o.waitLine("attached");
+    try expect(try o.slaveFlags() == o.slave_flags, "while attached, the terminal's file status flags are unchanged");
+    try o.send("\x02q");
+    try o.waitLine("detached");
+    const after = try o.slaveFlags();
+    try expect(after & (1 << @bitOffsetOf(linux.O, "NONBLOCK")) == 0, "O_NONBLOCK is off after detach");
+    try expect(after == o.slave_flags, "after detach, the terminal's file status flags are as before attach");
+    o.closeSlave();
+    try expect(try o.waitExit() == 0, "the client exits 0");
+}
+
+fn terminalHangupDetaches(ctx: *Ctx) !void {
+    // Not the client's controlling terminal, so no SIGHUP tells the client;
+    // only the server's handle sees the hangup.
+    const o = try ctx.attachWith(.{ .keep_slave = true, .controlling = false });
+    try o.waitLine("$");
+    try o.waitKitty();
+    // Past the prompt's last dynamic-name check, one interval after it.
+    _ = try o.pump(1200);
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    o.hangUp();
+    try expect(try o.waitExit() == 0, "the client exits 0 once the server detaches it");
+    sleepMs(100);
+    const before = try sample(ctx, pid);
+    sleepMs(1000);
+    const after = try sample(ctx, pid);
+    try expect(after.switches - before.switches <= 2, "the server does not spin on the hung-up terminal");
+    const b = try attachedWithPrompt(ctx);
+    try b.send("echo after hangup\r");
+    try b.waitLine("after hangup");
 }
 
 fn legacyKeyboardGetsNoKittyFlags(ctx: *Ctx) !void {
@@ -2534,6 +2625,8 @@ fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void }{
     .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
+    .{ .name = "detach leaves the outer terminal's file status flags as they were", .run = detachKeepsFileStatusFlags },
+    .{ .name = "a hangup on the server's terminal handle detaches the client", .run = terminalHangupDetaches },
     .{ .name = "a terminal without the kitty protocol gets no kitty flags", .run = legacyKeyboardGetsNoKittyFlags },
     .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },

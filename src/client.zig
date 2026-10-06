@@ -21,9 +21,30 @@ const leave_seq = "\x1b[?2026l\x1b[0m\x1b[?25h\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[
 
 const Outcome = struct { message: []const u8, code: u8 };
 
+/// The outer terminal, and who may write to it. The client reads its
+/// modes on stdin, passes stdin to the server, and writes to stdout. The
+/// server owns the terminal from the hello until it sends its detach
+/// message (ADR 0004).
+const Terminal = struct {
+    saved: linux.termios,
+    phase: enum {
+        /// The client sets raw mode and the outer modes.
+        handing_over,
+        /// The server reads and writes the terminal; the client must not.
+        attached,
+        /// The server has let go; the client restores the terminal.
+        restoring,
+    } = .handing_over,
+
+    fn write(t: *const Terminal, bytes: []const u8) void {
+        std.debug.assert(t.phase != .attached);
+        sys.writeAll(1, bytes) catch {};
+    }
+};
+
 pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths: paths_mod.Paths) !u8 {
-    var saved: linux.termios = undefined;
-    if (linux.errno(linux.tcgetattr(0, &saved)) != .SUCCESS) {
+    var term: Terminal = .{ .saved = undefined };
+    if (linux.errno(linux.tcgetattr(0, &term.saved)) != .SUCCESS) {
         try printErr("kiwa: stdin is not a terminal\n");
         return 1;
     }
@@ -39,20 +60,24 @@ pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths
     const sigfd = try sys.signalfd(&.{ .WINCH, .TERM, .HUP, .INT });
     defer sys.close(sigfd);
 
-    var raw = saved;
+    var raw = term.saved;
     makeRaw(&raw);
     _ = try sys.check(linux.tcsetattr(0, .NOW, &raw));
-    sys.writeAll(1, enter_seq) catch {};
+    term.write(enter_seq);
 
     // Owned here because a detach reason points into its buffer.
     var decoder: protocol.Decoder = .{};
     defer decoder.deinit(gpa);
-    const outcome = session(gpa, sock, sigfd, &decoder) catch |e| Outcome{ .message = @errorName(e), .code = 1 };
+    const outcome = session(gpa, sock, sigfd, &term, &decoder) catch |e| blk: {
+        if (term.phase == .attached) awaitRelease(sock);
+        break :blk Outcome{ .message = @errorName(e), .code = 1 };
+    };
 
-    sys.writeAll(1, leave_seq) catch {};
-    _ = linux.tcsetattr(0, .DRAIN, &saved);
-    sys.writeAll(1, outcome.message) catch {};
-    sys.writeAll(1, "\n") catch {};
+    term.phase = .restoring;
+    term.write(leave_seq);
+    _ = linux.tcsetattr(0, .DRAIN, &term.saved);
+    term.write(outcome.message);
+    term.write("\n");
     return outcome.code;
 }
 
@@ -78,33 +103,29 @@ fn makeRaw(t: *linux.termios) void {
     t.cc[@intFromEnum(linux.V.TIME)] = 0;
 }
 
-fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, decoder: *protocol.Decoder) !Outcome {
+/// Hands the terminal over with the hello and waits for the server to
+/// give it back. Only the server's detach message or a closed socket ends
+/// the wait; a signal asks the server to detach first.
+fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, term: *Terminal, decoder: *protocol.Decoder) !Outcome {
     var cwd_buf: [linux.PATH_MAX]u8 = undefined;
     const cwd_len = sys.check(linux.getcwd(&cwd_buf, cwd_buf.len)) catch 0;
     const cwd: []const u8 = if (cwd_len > 0) std.mem.sliceTo(&cwd_buf, 0) else "/";
     var frame: std.ArrayList(u8) = .empty;
     defer frame.deinit(gpa);
     try protocol.append(gpa, &frame, .{ .hello = .{ .version = protocol.version, .size = try termSize(), .cwd = cwd } });
-    try sys.writeAll(sock, frame.items);
+    term.phase = .attached;
+    try sys.sendWithFd(sock, frame.items, 0);
 
     const ep = try sys.epollCreate();
     defer sys.close(ep);
-    try sys.epollCtl(ep, EPOLL.CTL_ADD, 0, EPOLL.IN);
     try sys.epollCtl(ep, EPOLL.CTL_ADD, sock, EPOLL.IN);
     try sys.epollCtl(ep, EPOLL.CTL_ADD, sigfd, EPOLL.IN);
 
-    var buf: [64 * 1024]u8 = undefined;
-    var events: [4]linux.epoll_event = undefined;
+    var buf: [4096]u8 = undefined;
+    var events: [2]linux.epoll_event = undefined;
     while (true) {
         for (try sys.epollWait(ep, &events)) |ev| {
-            const fd = ev.data.fd;
-            if (fd == 0) {
-                const n = try sys.read(0, &buf);
-                if (n == 0) return .{ .message = "detached: end of input", .code = 0 };
-                frame.clearRetainingCapacity();
-                try protocol.append(gpa, &frame, .{ .input = buf[0..n] });
-                try sys.writeAll(sock, frame.items);
-            } else if (fd == sock) {
+            if (ev.data.fd == sock) {
                 const n = sys.read(sock, &buf) catch |e| switch (e) {
                     error.ConnectionReset => 0,
                     else => return e,
@@ -112,19 +133,20 @@ fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, decoder: *pr
                 if (n == 0) return .{ .message = "lost server", .code = 1 };
                 try decoder.feed(gpa, buf[0..n]);
                 while (try decoder.next()) |m| switch (m) {
-                    .output => |bytes| try sys.writeAll(1, bytes),
                     .detach => |reason| return .{ .message = reason, .code = 0 },
                     else => return error.UnexpectedMessage,
                 };
-            } else if (fd == sigfd) {
+            } else {
                 const seen = try sys.readSignals(sigfd);
-                if (seen.has(.HUP)) return .{ .message = "detached: hangup", .code = 0 };
-                if (seen.has(.TERM) or seen.has(.INT)) return .{ .message = "detached: terminated", .code = 0 };
-                if (seen.has(.WINCH)) {
-                    frame.clearRetainingCapacity();
+                frame.clearRetainingCapacity();
+                if (seen.has(.HUP)) {
+                    try protocol.append(gpa, &frame, .{ .detach = "detached: hangup" });
+                } else if (seen.has(.TERM) or seen.has(.INT)) {
+                    try protocol.append(gpa, &frame, .{ .detach = "detached: terminated" });
+                } else if (seen.has(.WINCH)) {
                     try protocol.append(gpa, &frame, .{ .resize = try termSize() });
-                    try sys.writeAll(sock, frame.items);
                 }
+                try sys.writeAll(sock, frame.items);
             }
         }
     }
@@ -133,6 +155,14 @@ fn session(gpa: std.mem.Allocator, sock: sys.fd_t, sigfd: sys.fd_t, decoder: *pr
 fn termSize() !protocol.Size {
     const ws = try sys.getWinsize(1);
     return .{ .cols = ws.col, .rows = ws.row };
+}
+
+/// Waits until the server has closed the connection, which it does only
+/// after closing its handle to the terminal.
+fn awaitRelease(sock: sys.fd_t) void {
+    _ = linux.shutdown(sock, linux.SHUT.WR);
+    var buf: [4096]u8 = undefined;
+    while ((sys.read(sock, &buf) catch 0) > 0) {}
 }
 
 fn connectOrStart(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths: paths_mod.Paths) !sys.fd_t {
@@ -210,7 +240,7 @@ pub fn print(gpa: std.mem.Allocator, paths: paths_mod.Paths, request: protocol.M
         if (n == 0) return 0;
         try decoder.feed(gpa, buf[0..n]);
         while (try decoder.next()) |m| switch (m) {
-            .output => |text| try sys.writeAll(1, text),
+            .text => |text| try sys.writeAll(1, text),
             else => return error.UnexpectedMessage,
         };
     }

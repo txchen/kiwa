@@ -70,16 +70,28 @@ const msg = struct {
     const detached = "detached";
     const elsewhere = "detached: attached elsewhere";
     const version_mismatch = "detached: version mismatch";
+    const not_a_terminal = "detached: not a terminal";
+    const hangup = "detached: hangup";
     const exited = "exited";
     const server_exited = "server exited";
+};
+
+/// The server's own handle to an attached client's outer terminal:
+/// nonblocking, close-on-exec, and never its controlling terminal.
+const Tty = struct {
+    fd: sys.fd_t,
+    events: u32 = EPOLL.IN,
 };
 
 /// One accepted socket: an attached client, or a `kill-server` caller
 /// that has not said anything yet.
 const Conn = struct {
+    /// The socket.
     fd: sys.fd_t,
     decoder: protocol.Decoder = .{},
-    /// Decodes the outer terminal's input inside `input` messages.
+    /// A terminal passed with `SCM_RIGHTS` that no hello has claimed yet.
+    passed: ?sys.fd_t = null,
+    /// Decodes the outer terminal's input.
     input: input.Decoder = .{},
     prefix: prefix.Prefix = .{},
     /// Whether the replies to the attach probes may still come; the DA1
@@ -90,10 +102,17 @@ const Conn = struct {
     /// Whether the outer terminal supports left and right margins, so that
     /// a pane narrower than the frame can scroll alone.
     lr_margins: bool = false,
+    /// Bytes for the outer terminal.
     out: OutBuffer = .{},
-    state: enum {
+    /// Encoded messages for the socket: an answer or a detach, after which
+    /// the connection closes.
+    replies: std.ArrayList(u8) = .empty,
+    state: union(enum) {
         open,
-        /// A detach is queued; close once `out` drains.
+        /// The server reads and writes the client's outer terminal through
+        /// its own handle (ADR 0004). Only the client in `Server.client`.
+        attached: Tty,
+        /// A reply is queued; close once `replies` drains.
         closing,
         /// The fd is closed; the Conn is freed after the current batch of events.
         closed,
@@ -102,6 +121,7 @@ const Conn = struct {
     /// frames dropped on overflow. The next frame is a full redraw, sent
     /// once `out` drains.
     redraw_pending: bool = true,
+    /// The socket's epoll interest.
     events: u32 = EPOLL.IN,
     size: protocol.Size = .{ .cols = 0, .rows = 0 },
     /// The composed frame. Rows the pane did not change carry over.
@@ -137,7 +157,15 @@ const Conn = struct {
         return false;
     }
 
+    fn tty(c: *Conn) ?*Tty {
+        return switch (c.state) {
+            .attached => |*t| t,
+            else => null,
+        };
+    }
+
     fn deinit(c: *Conn, gpa: std.mem.Allocator) void {
+        c.replies.deinit(gpa);
         c.drawn.deinit(gpa);
         c.title.deinit(gpa);
         c.decoder.deinit(gpa);
@@ -229,7 +257,7 @@ const Server = struct {
                 } else if (s.pane_fds.get(fd)) |p| {
                     try s.onPane(p, ev.events);
                 } else if (s.findConn(fd)) |c| {
-                    try s.onConn(c, ev.events);
+                    if (c.fd == fd) try s.onSocket(c, ev.events) else try s.onTerminal(c, ev.events);
                 }
                 if (s.exit != null) break;
             }
@@ -268,8 +296,13 @@ const Server = struct {
         }
     }
 
+    /// The connection whose socket or terminal is `fd`.
     fn findConn(s: *Server, fd: sys.fd_t) ?*Conn {
-        for (s.conns.items) |c| if (c.state != .closed and c.fd == fd) return c;
+        for (s.conns.items) |c| {
+            if (c.state == .closed) continue;
+            if (c.fd == fd) return c;
+            if (c.tty()) |t| if (t.fd == fd) return c;
+        }
         return null;
     }
 
@@ -341,36 +374,54 @@ const Server = struct {
         return s.panes.get(s.session.focused());
     }
 
-    fn onConn(s: *Server, c: *Conn, events: u32) !void {
-        if (events & EPOLL.OUT != 0) try s.flush(c);
+    fn onSocket(s: *Server, c: *Conn, events: u32) !void {
+        if (events & EPOLL.OUT != 0) try s.flushReplies(c);
         if (c.state == .closed) return;
         if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) == 0) return;
         var buf: [16 * 1024]u8 = undefined;
         while (true) {
-            const n = sys.read(c.fd, &buf) catch |e| switch (e) {
+            const r = sys.recvWithFd(c.fd, &buf) catch |e| switch (e) {
                 error.WouldBlock => return,
                 else => return s.dropConn(c),
             };
-            if (n == 0) return s.dropConn(c);
+            if (r.fd) |fd| {
+                if (c.passed) |old| sys.close(old);
+                c.passed = fd;
+            }
+            if (r.n == 0) return s.dropConn(c);
             // A closing client's input is read only so that close() does not reset the connection.
             if (c.state == .closing) continue;
-            try c.decoder.feed(s.gpa, buf[0..n]);
+            try c.decoder.feed(s.gpa, buf[0..r.n]);
             while (c.decoder.next() catch return s.dropConn(c)) |m| {
                 try s.onMessage(c, m);
-                if (c.state != .open or s.exit != null) break;
+                if (c.state == .closing or c.state == .closed or s.exit != null) break;
             }
             if (s.exit != null or c.state == .closed) return;
         }
     }
 
+    /// Reads the outer terminal's input. A hangup detaches the client.
+    fn onTerminal(s: *Server, c: *Conn, events: u32) !void {
+        if (events & EPOLL.OUT != 0) try s.flush(c);
+        const t = c.tty() orelse return;
+        if (events & (EPOLL.IN | EPOLL.HUP | EPOLL.ERR) == 0) return;
+        var buf: [16 * 1024]u8 = undefined;
+        while (true) {
+            const n = sys.read(t.fd, &buf) catch |e| switch (e) {
+                error.WouldBlock => break,
+                else => return s.detach(c, msg.hangup),
+            };
+            if (n == 0) return s.detach(c, msg.hangup);
+            try c.input.feed(s.gpa, buf[0..n]);
+            try s.drainInput(c);
+            if (s.exit != null or s.client != c) return;
+        }
+        if (events & (EPOLL.HUP | EPOLL.ERR) != 0) return s.detach(c, msg.hangup);
+    }
+
     fn onMessage(s: *Server, c: *Conn, m: protocol.Message) !void {
         switch (m) {
             .hello => |h| try s.attach(c, h),
-            .input => |bytes| {
-                if (s.client != c) return;
-                try c.input.feed(s.gpa, bytes);
-                try s.drainInput(c);
-            },
             .resize => |size| {
                 if (s.client != c) return;
                 c.size = sanitize(size);
@@ -381,7 +432,8 @@ const Server = struct {
             .kill => s.exit = .{ .reason = msg.server_exited, .hangup_child = true },
             .list => try s.list(c),
             .stats => try s.printStats(c),
-            .output, .detach => s.dropConn(c),
+            .detach => |reason| if (s.client == c) try s.detach(c, reason) else s.dropConn(c),
+            .text => s.dropConn(c),
         }
     }
 
@@ -407,17 +459,31 @@ const Server = struct {
 
     /// Sends `scratch` as a request's answer and closes the connection.
     fn answer(s: *Server, c: *Conn) !void {
+        if (c.state != .open) return s.dropConn(c);
         c.state = .closing;
-        c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
-            error.Overflow => return s.dropConn(c),
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        try s.flush(c);
+        try protocol.append(s.gpa, &c.replies, .{ .text = s.scratch.items });
+        try s.flushReplies(c);
     }
 
+    /// Takes over the terminal passed with the hello and shows the session on it.
     fn attach(s: *Server, c: *Conn, h: protocol.Hello) !void {
+        if (c.state != .open) return s.dropConn(c);
         if (h.version != protocol.version) return s.detach(c, msg.version_mismatch);
-        if (s.client) |old| if (old != c) try s.detach(old, msg.elsewhere);
+        const passed = c.passed orelse return s.detach(c, msg.not_a_terminal);
+        c.passed = null;
+        // Its own open file description, so that O_NONBLOCK never reaches the shell's.
+        const fd = sys.reopenTerminal(passed, true) catch |e| {
+            sys.close(passed);
+            std.log.err("attach: {t}", .{e});
+            return s.detach(c, msg.not_a_terminal);
+        };
+        sys.close(passed);
+        sys.epollCtl(s.ep, EPOLL.CTL_ADD, fd, EPOLL.IN) catch |e| {
+            sys.close(fd);
+            return e;
+        };
+        if (s.client) |old| try s.detach(old, msg.elsewhere);
+        c.state = .{ .attached = .{ .fd = fd } };
         s.client = c;
         c.size = sanitize(h.size);
         c.redraw_pending = true;
@@ -1044,7 +1110,7 @@ const Server = struct {
     /// Returns false if they did not fit; the dropped frames then need a
     /// full redraw.
     fn pushTerminal(s: *Server, c: *Conn, bytes: []const u8) !bool {
-        c.out.push(s.gpa, .{ .output = bytes }) catch |e| switch (e) {
+        c.out.push(s.gpa, bytes) catch |e| switch (e) {
             error.Overflow => {
                 c.redraw_pending = true;
                 return false;
@@ -1158,9 +1224,9 @@ const Server = struct {
             c.frame.clearDirty();
             return;
         }
-        c.out.push(s.gpa, .{ .output = s.scratch.items }) catch |e| switch (e) {
+        c.out.push(s.gpa, s.scratch.items) catch |e| switch (e) {
             error.Overflow => {
-                std.log.info("client output buffer overflowed; redrawing after it drains", .{});
+                std.log.info("outer terminal buffer overflowed; redrawing after it drains", .{});
                 // The rows stay dirty until the redraw reaches `last_frame`.
                 c.redraw_pending = true;
                 return s.flush(c);
@@ -1267,38 +1333,74 @@ const Server = struct {
         try c.title.appendSlice(s.gpa, title);
     }
 
-    /// Writes what the socket accepts and keeps EPOLLOUT armed only while
-    /// bytes remain.
+    /// Writes what the outer terminal accepts and keeps EPOLLOUT armed
+    /// only while bytes remain. A terminal that fails a write has hung up.
     fn flush(s: *Server, c: *Conn) Error!void {
+        const t = c.tty() orelse return;
         while (!c.out.isEmpty()) {
-            const n = sys.write(c.fd, c.out.bytes.items) catch |e| switch (e) {
+            const n = sys.write(t.fd, c.out.bytes.items) catch |e| switch (e) {
                 error.WouldBlock => break,
-                else => return s.dropConn(c),
+                else => return s.detach(c, msg.hangup),
             };
             c.out.consume(n);
         }
-        if (c.out.isEmpty()) {
-            if (c.state == .closing) return s.dropConn(c);
-            if (c.redraw_pending and s.client == c) return s.render();
-        }
+        if (c.out.isEmpty() and c.redraw_pending) return s.render();
         const want: u32 = EPOLL.IN | @as(u32, if (c.out.isEmpty()) 0 else EPOLL.OUT);
+        if (want != t.events) {
+            try sys.epollCtl(s.ep, EPOLL.CTL_MOD, t.fd, want);
+            t.events = want;
+        }
+    }
+
+    /// Writes what the socket accepts and closes the connection once its
+    /// replies are out.
+    fn flushReplies(s: *Server, c: *Conn) Error!void {
+        while (c.replies.items.len > 0) {
+            const n = sys.write(c.fd, c.replies.items) catch |e| switch (e) {
+                error.WouldBlock => break,
+                else => return s.dropConn(c),
+            };
+            c.replies.replaceRangeAssumeCapacity(0, n, &.{});
+        }
+        if (c.replies.items.len == 0 and c.state == .closing) return s.dropConn(c);
+        const want: u32 = EPOLL.IN | @as(u32, if (c.replies.items.len == 0) 0 else EPOLL.OUT);
         if (want != c.events) {
             try sys.epollCtl(s.ep, EPOLL.CTL_MOD, c.fd, want);
             c.events = want;
         }
     }
 
+    /// Lets go of the client's terminal, then tells the client why, so that
+    /// it restores the terminal only once the server has stopped writing.
     fn detach(s: *Server, c: *Conn, reason: []const u8) !void {
-        if (s.client == c) s.client = null;
+        if (c.state == .closing or c.state == .closed) return;
+        s.releaseTerminal(c);
         c.state = .closing;
+        try protocol.append(s.gpa, &c.replies, .{ .detach = reason });
+        try s.flushReplies(c);
+    }
+
+    /// Writes what is left of a write the terminal took part of, if it
+    /// takes it now, and closes the server's handle. Nothing else queued
+    /// goes out.
+    fn releaseTerminal(s: *Server, c: *Conn) void {
+        const t = c.tty() orelse return;
+        if (s.client == c) s.client = null;
         c.out.dropQueued();
-        try c.out.push(s.gpa, .{ .detach = reason });
-        try s.flush(c);
+        while (!c.out.isEmpty()) {
+            const n = sys.write(t.fd, c.out.bytes.items) catch break;
+            c.out.consume(n);
+        }
+        sys.epollCtl(s.ep, EPOLL.CTL_DEL, t.fd, 0) catch {};
+        sys.close(t.fd);
+        c.state = .open;
     }
 
     fn dropConn(s: *Server, c: *Conn) void {
         if (c.state == .closed) return;
-        if (s.client == c) s.client = null;
+        s.releaseTerminal(c);
+        if (c.passed) |fd| sys.close(fd);
+        c.passed = null;
         c.state = .closed;
         sys.close(c.fd);
     }
@@ -1316,12 +1418,13 @@ const Server = struct {
         var it = s.panes.valueIterator();
         while (it.next()) |p| if (e.hangup_child) p.*.hangup();
         if (s.client) |c| {
-            c.out.dropQueued();
-            if (c.out.push(s.gpa, .{ .detach = e.reason })) {
+            s.releaseTerminal(c);
+            c.replies.clearRetainingCapacity();
+            if (protocol.append(s.gpa, &c.replies, .{ .detach = e.reason })) {
                 const timeout: linux.timeval = .{ .sec = 1, .usec = 0 };
                 _ = linux.fcntl(c.fd, linux.F.SETFL, 0);
                 _ = linux.setsockopt(c.fd, linux.SOL.SOCKET, linux.SO.SNDTIMEO, std.mem.asBytes(&timeout), @sizeOf(linux.timeval));
-                sys.writeAll(c.fd, c.out.bytes.items) catch {};
+                sys.writeAll(c.fd, c.replies.items) catch {};
             } else |_| {}
         }
         for (s.conns.items) |c| s.dropConn(c);
