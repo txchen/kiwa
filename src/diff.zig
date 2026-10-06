@@ -23,7 +23,7 @@ const replacement = "\u{fffd}";
 /// the default pen, which is where every diff and full redraw leaves it.
 /// Only `new`'s dirty rows are compared; the others are taken as equal.
 pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
-    return emit(old, new, g, w, &.{}, .{ .x = old.cursor.x, .y = old.cursor.y }, &new.dirty);
+    return emit(old, new, g, w, &.{}, .{ .x = old.cursor.x, .y = old.cursor.y });
 }
 
 /// Content that moved `n` rows inside `rect`: up when positive, as SU
@@ -92,9 +92,6 @@ pub const Scratch = struct {
     /// The old frame's band with a candidate scroll applied.
     trial: Frame = .{},
     chosen: std.ArrayList(Scroll) = .empty,
-    /// The rows `emit` compares: `new`'s dirty rows, less the rows the
-    /// winning count of each scroll already found equal.
-    visit: RowSet = .{},
     /// The rows the last count found equal, and the winning count's.
     equal: RowSet = .{},
     best_equal: RowSet = .{},
@@ -102,14 +99,13 @@ pub const Scratch = struct {
     pub fn deinit(sc: *Scratch, gpa: std.mem.Allocator) void {
         sc.trial.deinit(gpa);
         sc.chosen.deinit(gpa);
-        sc.visit.deinit(gpa);
         sc.equal.deinit(gpa);
         sc.best_equal.deinit(gpa);
     }
 
     fn ensureSize(sc: *Scratch, gpa: std.mem.Allocator, cols: u16, rows: u16) !void {
         if (sc.trial.cols != cols or sc.trial.rows != rows) try sc.trial.resize(gpa, cols, rows);
-        for ([_]*RowSet{ &sc.visit, &sc.equal, &sc.best_equal }) |set| {
+        for ([_]*RowSet{ &sc.equal, &sc.best_equal }) |set| {
             if (set.bit_length != rows) try set.resize(gpa, rows, false);
         }
     }
@@ -125,13 +121,13 @@ pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 /// (`lr_margins`), only its rect. The cell diff that follows repaints
 /// whatever else moved, so the rows of every scroll are marked dirty in
 /// `new`. Each scroll sent is applied to `old`, as the outer terminal
-/// applies it, so `old` keeps modeling the outer terminal.
+/// applies it, so `old` keeps modeling the outer terminal. Rows that the
+/// scroll leaves equal to `new` are unmarked: they need no write and no
+/// copy into `old`.
 pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
     if (scrolls.len == 0) return diff(old, new, g, w);
     for (scrolls) |s| new.markRows(s.rect.y, s.rect.rows);
     try sc.ensureSize(gpa, old.cols, old.rows);
-    sc.visit.unsetAll();
-    sc.visit.setUnion(new.dirty);
     sc.chosen.clearRetainingCapacity();
     try sc.chosen.ensureTotalCapacity(gpa, scrolls.len);
     for (scrolls) |s| {
@@ -162,14 +158,15 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
             std.mem.swap(RowSet, &sc.equal, &sc.best_equal);
         }
         // A count that won never passed its limit, so it compared every row
-        // of the band. The rows it found equal need no second look.
-        for (r.y..r.y + r.rows) |y| if (sc.best_equal.isSet(y)) sc.visit.unset(y);
+        // of the band. The rows it found equal need no second look, and a
+        // row an earlier scroll left equal may differ again after this one.
+        for (r.y..r.y + r.rows) |y| new.dirty.setValue(y, !sc.best_equal.isSet(y));
         if (best) |b| {
             b.apply(old);
             sc.chosen.appendAssumeCapacity(b);
         }
     }
-    try emit(old, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y }, &sc.visit);
+    try emit(old, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y });
 }
 
 /// The bytes that `scroll`, if any, and repainting `r`'s rows of `moved`
@@ -192,12 +189,12 @@ fn bandBytes(moved: *const Frame, new: *const Frame, g: *const Graphemes, r: Rec
 }
 
 /// Writes `scrolls`, then what turns `moved`, the old frame with `scrolls`
-/// applied, into `new`, comparing only the rows in `visit`. The outer
+/// applied, into `new`, comparing only `new`'s dirty rows. The outer
 /// cursor starts at `start`.
-fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, start: Pos, visit: *const RowSet) Writer.Error!void {
+fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, start: Pos) Writer.Error!void {
     std.debug.assert(moved.cols == new.cols and moved.rows == new.rows);
     // One row's write cannot tear, so it needs no synchronized output.
-    const sync = scrolls.len > 0 or changedRows(moved, new, visit) > 1;
+    const sync = scrolls.len > 0 or changedRows(moved, new) > 1;
     var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = start, .sync = sync };
     for (scrolls) |s| {
         try o.begin();
@@ -205,16 +202,16 @@ fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer,
         // Setting and resetting the margins homes the cursor.
         o.pos = null;
     }
-    var it = visit.iterator(.{});
+    var it = new.dirtyRows();
     while (it.next()) |y| try o.row(moved.row(y), new.row(y), @intCast(y));
     try o.cursor(moved.cursor, new.cursor);
     try o.finish();
 }
 
-/// The number of rows in `visit` that differ, counting no further than 2.
-fn changedRows(old: *const Frame, new: *const Frame, visit: *const RowSet) usize {
+/// The number of dirty rows that differ, counting no further than 2.
+fn changedRows(old: *const Frame, new: *const Frame) usize {
     var n: usize = 0;
-    var it = visit.iterator(.{});
+    var it = new.dirtyRows();
     while (it.next()) |y| {
         for (old.row(y), new.row(y)) |a, b| if (!a.eql(b)) {
             n += 1;
@@ -474,7 +471,7 @@ const Fixture = struct {
             .forced => |scrolls| {
                 const work = try f.workingOld();
                 for (scrolls) |sc| sc.apply(work);
-                try emit(work, &f.new, &f.g, w, scrolls, start, &f.new.dirty);
+                try emit(work, &f.new, &f.g, w, scrolls, start);
             },
             .choose => |c| try diffScrolling(alloc, &f.scratch, try f.workingOld(), &f.new, &f.g, w, c.scrolls, c.lr_margins),
         }
@@ -942,6 +939,35 @@ test "random writes diffed by their dirty rows send what a full-frame diff sends
             return e;
         };
     }
+}
+
+test "a row an earlier scroll left equal is repainted when a later scroll moves it" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(32, 7);
+    // Two panes side by side, both scrolling. The right pane's program
+    // redraws a status line in place on its top row every frame.
+    for (1..7) |y| {
+        for (0..16) |x| f.old.rowMut(y)[x] = .{ .cp = @intCast('A' + y) };
+        for (16..32) |x| f.old.rowMut(y)[x] = .{ .cp = if (y == 1) 'S' else @intCast('a' + y) };
+    }
+    f.new.copyFrom(&f.old);
+    const left: Scroll = .{ .rect = .{ .x = 0, .y = 1, .cols = 16, .rows = 6 }, .n = 1 };
+    const right: Scroll = .{ .rect = .{ .x = 16, .y = 1, .cols = 16, .rows = 6 }, .n = 2 };
+    left.apply(&f.new);
+    right.apply(&f.new);
+    for (0..16) |x| f.new.rowMut(6)[x] = .{ .cp = 'Z' };
+    for (16..32) |x| f.new.rowMut(5)[x] = .{ .cp = 'y' };
+    for (16..32) |x| f.new.rowMut(6)[x] = .{ .cp = 'z' };
+    for (16..32) |x| f.new.rowMut(1)[x] = .{ .cp = 'S' };
+    f.how = .{ .choose = .{ .scrolls = &.{ left, right }, .lr_margins = true } };
+    const by_dirty_rows = try alloc.dupe(u8, try f.diffBytes());
+    defer alloc.free(by_dirty_rows);
+    // Each pane scrolls alone, inside its own margins.
+    try testing.expectEqual(2, std.mem.count(u8, by_dirty_rows, "\x1b[?69h"));
+    try f.expectRoundTrip();
+    f.new.markAll();
+    try testing.expectEqualStrings(try f.diffBytes(), by_dirty_rows);
 }
 
 /// Makes a row valid again after a scroll cut wide characters at a margin.

@@ -103,9 +103,11 @@ pub const Cursor = struct {
 
 /// A `cols x rows` grid, row-major. Every wide head is followed by its tail.
 ///
-/// `dirty` holds every row written since `clearDirty`. Cells are written
-/// only through `rowMut`, which marks its row, so a row that is not dirty
-/// is known to be unchanged. The differ visits dirty rows only.
+/// `dirty` holds the rows that may differ from the frame the outer
+/// terminal shows: every row written since `clearDirty`, less the rows a
+/// diff found equal. By convention every writer goes through `rowMut`,
+/// which marks its row, so a row that is not dirty is known to be
+/// unchanged. The differ visits dirty rows only.
 pub const Frame = struct {
     cols: u16 = 0,
     rows: u16 = 0,
