@@ -1,6 +1,6 @@
 # 01 Run Kiwa on macOS
 
-Status: in progress
+Status: needs verification on a Mac
 
 ## Why
 
@@ -46,3 +46,8 @@ Linux syscalls, so it cannot work. The compiler does not catch this, because
 - Verified on a Mac by the user: `zig build test e2e` passes natively.
 
 ## Comments
+
+- Implemented on Linux. `zig build test` and `zig build e2e` pass there (72
+  e2e cases, in Debug and ReleaseFast). `zig build check
+  -Dtarget=aarch64-macos.13.0` compiles and links every macOS artifact, and
+  `tools/check-os-layer.sh` is clean. No macOS binary has run yet.
