@@ -86,10 +86,10 @@ fn straddles(f: *const Frame, r: Rect, x: usize) bool {
 /// so the diff always rewrites it.
 const unknown: Cell = .{ .cp = std.math.maxInt(u21) };
 
-/// Frames that `diffScrolling` works in, kept between diffs so that they
-/// allocate only when the size changes.
+/// What `diffScrolling` works in, kept between diffs so that it allocates
+/// only when the size changes.
 pub const Scratch = struct {
-    base: Frame = .{},
+    /// The old frame's band with a candidate scroll applied.
     trial: Frame = .{},
     chosen: std.ArrayList(Scroll) = .empty,
     /// The rows `emit` compares: `new`'s dirty rows, less the rows the
@@ -100,7 +100,6 @@ pub const Scratch = struct {
     best_equal: RowSet = .{},
 
     pub fn deinit(sc: *Scratch, gpa: std.mem.Allocator) void {
-        sc.base.deinit(gpa);
         sc.trial.deinit(gpa);
         sc.chosen.deinit(gpa);
         sc.visit.deinit(gpa);
@@ -109,9 +108,7 @@ pub const Scratch = struct {
     }
 
     fn ensureSize(sc: *Scratch, gpa: std.mem.Allocator, cols: u16, rows: u16) !void {
-        for ([_]*Frame{ &sc.base, &sc.trial }) |f| {
-            if (f.cols != cols or f.rows != rows) try f.resize(gpa, cols, rows);
-        }
+        if (sc.trial.cols != cols or sc.trial.rows != rows) try sc.trial.resize(gpa, cols, rows);
         for ([_]*RowSet{ &sc.visit, &sc.equal, &sc.best_equal }) |set| {
             if (set.bit_length != rows) try set.resize(gpa, rows, false);
         }
@@ -127,15 +124,12 @@ pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 /// its rows or, when the outer terminal supports left and right margins
 /// (`lr_margins`), only its rect. The cell diff that follows repaints
 /// whatever else moved, so the rows of every scroll are marked dirty in
-/// `new`.
-pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, new: *Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
+/// `new`. Each scroll sent is applied to `old`, as the outer terminal
+/// applies it, so `old` keeps modeling the outer terminal.
+pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
     if (scrolls.len == 0) return diff(old, new, g, w);
     for (scrolls) |s| new.markRows(s.rect.y, s.rect.rows);
     try sc.ensureSize(gpa, old.cols, old.rows);
-    // Only the rows the diff visits are read from `base`.
-    var it = new.dirtyRows();
-    while (it.next()) |y| @memcpy(sc.base.rowMut(y), old.row(y));
-    sc.base.cursor = old.cursor;
     sc.visit.unsetAll();
     sc.visit.setUnion(new.dirty);
     sc.chosen.clearRetainingCapacity();
@@ -154,7 +148,7 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
             i -= 1;
             const c = candidates[i];
             // A scroll changes only its rows, so only they are compared.
-            for (r.y..r.y + r.rows) |y| @memcpy(sc.trial.rowMut(y), sc.base.row(y));
+            for (r.y..r.y + r.rows) |y| @memcpy(sc.trial.rowMut(y), old.row(y));
             c.apply(&sc.trial);
             const bytes = bandBytes(&sc.trial, new, g, r, c, best_bytes, &sc.equal);
             if (bytes < best_bytes) {
@@ -163,7 +157,7 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
                 std.mem.swap(RowSet, &sc.equal, &sc.best_equal);
             }
         }
-        if (bandBytes(&sc.base, new, g, r, null, best_bytes, &sc.equal) <= best_bytes) {
+        if (bandBytes(old, new, g, r, null, best_bytes, &sc.equal) <= best_bytes) {
             best = null;
             std.mem.swap(RowSet, &sc.equal, &sc.best_equal);
         }
@@ -171,11 +165,11 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *const Frame, ne
         // of the band. The rows it found equal need no second look.
         for (r.y..r.y + r.rows) |y| if (sc.best_equal.isSet(y)) sc.visit.unset(y);
         if (best) |b| {
-            b.apply(&sc.base);
+            b.apply(old);
             sc.chosen.appendAssumeCapacity(b);
         }
     }
-    try emit(&sc.base, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y }, &sc.visit);
+    try emit(old, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y }, &sc.visit);
 }
 
 /// The bytes that `scroll`, if any, and repainting `r`'s rows of `moved`
@@ -420,6 +414,9 @@ const Fixture = struct {
     g: Graphemes = .{},
     old: Frame = .{},
     new: Frame = .{},
+    /// The copy of `old` a scrolling diff works on, so that `old` stays
+    /// as set up and a diff can run more than once.
+    work: Frame = .{},
     out: Writer.Allocating,
     how: How = .plain,
     scratch: Scratch = .{},
@@ -444,6 +441,7 @@ const Fixture = struct {
         f.g.deinit(alloc);
         f.old.deinit(alloc);
         f.new.deinit(alloc);
+        f.work.deinit(alloc);
         f.out.deinit();
         f.scratch.deinit(alloc);
     }
@@ -466,14 +464,18 @@ const Fixture = struct {
         switch (f.how) {
             .plain => try diff(&f.old, &f.new, &f.g, w),
             .forced => |scrolls| {
-                const base = &f.scratch.base;
-                try base.resize(alloc, f.old.cols, f.old.rows);
-                base.copyFrom(&f.old);
-                for (scrolls) |sc| sc.apply(base);
-                try emit(base, &f.new, &f.g, w, scrolls, start, &f.new.dirty);
+                const work = try f.workingOld();
+                for (scrolls) |sc| sc.apply(work);
+                try emit(work, &f.new, &f.g, w, scrolls, start, &f.new.dirty);
             },
-            .choose => |c| try diffScrolling(alloc, &f.scratch, &f.old, &f.new, &f.g, w, c.scrolls, c.lr_margins),
+            .choose => |c| try diffScrolling(alloc, &f.scratch, try f.workingOld(), &f.new, &f.g, w, c.scrolls, c.lr_margins),
         }
+    }
+
+    fn workingOld(f: *Fixture) !*Frame {
+        if (f.work.cols != f.old.cols or f.work.rows != f.old.rows) try f.work.resize(alloc, f.old.cols, f.old.rows);
+        f.work.copyFrom(&f.old);
+        return &f.work;
     }
 
     fn expectRoundTrip(f: *Fixture) !void {

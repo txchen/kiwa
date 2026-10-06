@@ -107,6 +107,7 @@ const Conn = struct {
     /// The composed frame. Rows the pane did not change carry over.
     frame: frame_mod.Frame = .{},
     /// What the outer terminal shows; meaningful only without `redraw_pending`.
+    /// The differ applies the scrolls it sends to it.
     last_frame: frame_mod.Frame = .{},
     /// Panes whose content moved since `last_frame`, which the diff may
     /// scroll instead of repainting.
