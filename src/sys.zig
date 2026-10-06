@@ -101,6 +101,89 @@ pub fn connectUnix(path: []const u8) (Error || error{NameTooLong})!fd_t {
     }
 }
 
+/// Sends `bytes` with `fd` attached as `SCM_RIGHTS`. The fd travels with
+/// the first byte.
+pub fn sendWithFd(sock: fd_t, bytes: []const u8, fd: fd_t) Error!void {
+    std.debug.assert(bytes.len > 0);
+    var control: FdControl = .{ .fd = fd };
+    const iov = [_]std.posix.iovec_const{.{ .base = bytes.ptr, .len = bytes.len }};
+    const m: linux.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @sizeOf(FdControl),
+        .flags = 0,
+    };
+    const n = while (true) break check(linux.sendmsg(sock, &m, linux.MSG.NOSIGNAL)) catch |e| switch (e) {
+        error.Interrupted => continue,
+        else => return e,
+    };
+    try writeAll(sock, bytes[n..]);
+}
+
+/// One `SCM_RIGHTS` control message with room for one fd, laid out as
+/// `CMSG_SPACE(sizeof(int))`.
+const FdControl = extern struct {
+    hdr: linux.cmsghdr = .{ .len = @sizeOf(linux.cmsghdr) + @sizeOf(fd_t), .level = linux.SOL.SOCKET, .type = linux.SCM.RIGHTS },
+    fd: fd_t,
+    pad: u32 = 0,
+};
+
+pub const Received = struct { n: usize, fd: ?fd_t };
+
+/// Reads like `read` and also takes an fd passed with `SCM_RIGHTS`, with
+/// close-on-exec set. Any further fds in the same message are closed.
+pub fn recvWithFd(sock: fd_t, buf: []u8) Error!Received {
+    var control: [4]FdControl align(@alignOf(linux.cmsghdr)) = undefined;
+    var iov = [_]std.posix.iovec{.{ .base = buf.ptr, .len = buf.len }};
+    var m: linux.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @sizeOf(@TypeOf(control)),
+        .flags = 0,
+    };
+    const n = while (true) break check(linux.recvmsg(sock, &m, linux.MSG.CMSG_CLOEXEC)) catch |e| switch (e) {
+        error.Interrupted => continue,
+        else => return e,
+    };
+    var got: ?fd_t = null;
+    const bytes = std.mem.asBytes(&control)[0..m.controllen];
+    var at: usize = 0;
+    while (at + @sizeOf(linux.cmsghdr) <= bytes.len) {
+        const hdr = std.mem.bytesToValue(linux.cmsghdr, bytes[at..][0..@sizeOf(linux.cmsghdr)]);
+        if (hdr.len < @sizeOf(linux.cmsghdr) or at + hdr.len > bytes.len) break;
+        if (hdr.level == linux.SOL.SOCKET and hdr.type == linux.SCM.RIGHTS) {
+            const fds = bytes[at + @sizeOf(linux.cmsghdr) .. at + hdr.len];
+            var i: usize = 0;
+            while (i + @sizeOf(fd_t) <= fds.len) : (i += @sizeOf(fd_t)) {
+                const fd = std.mem.bytesToValue(fd_t, fds[i..][0..@sizeOf(fd_t)]);
+                if (got == null) got = fd else close(fd);
+            }
+        }
+        at += std.mem.alignForward(usize, hdr.len, @alignOf(linux.cmsghdr));
+    }
+    return .{ .n = n, .fd = got };
+}
+
+/// Opens a new open file description for the terminal that `fd` refers
+/// to, so that flags set on it, such as `O_NONBLOCK`, stay off `fd`.
+/// Fails unless `fd` is a character device and a terminal.
+pub fn reopenTerminal(fd: fd_t, nonblocking: bool) (Error || error{NotATerminal})!fd_t {
+    var stx: linux.Statx = undefined;
+    _ = check(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &stx)) catch return error.NotATerminal;
+    if (stx.mode & linux.S.IFMT != linux.S.IFCHR) return error.NotATerminal;
+    var t: linux.termios = undefined;
+    if (linux.errno(linux.tcgetattr(fd, &t)) != .SUCCESS) return error.NotATerminal;
+    var path: [32]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&path, "/proc/self/fd/{d}", .{fd}) catch unreachable;
+    return @intCast(try check(linux.open(z, .{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = nonblocking, .CLOEXEC = true }, 0)));
+}
+
 pub fn getWinsize(fd: fd_t) Error!Winsize {
     var ws: Winsize = undefined;
     _ = try check(linux.ioctl(fd, linux.T.IOCGWINSZ, @intFromPtr(&ws)));
@@ -183,4 +266,59 @@ pub fn resetChildSignals() void {
     const all = linux.sigfillset();
     _ = linux.sigprocmask(linux.SIG.UNBLOCK, &all, null);
     ignoreSignal(.PIPE, false);
+}
+
+const testing = std.testing;
+
+extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termp: ?*const linux.termios, winp: ?*const Winsize) c_int;
+
+const nonblock_flag: usize = 1 << @bitOffsetOf(linux.O, "NONBLOCK");
+
+test "an fd sent with SCM_RIGHTS arrives with the bytes and works" {
+    var pair: [2]i32 = undefined;
+    _ = try check(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &pair));
+    defer close(pair[0]);
+    defer close(pair[1]);
+    var pipe: [2]i32 = undefined;
+    _ = try check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    defer close(pipe[0]);
+
+    try sendWithFd(pair[0], "hello", pipe[1]);
+    close(pipe[1]);
+    var buf: [16]u8 = undefined;
+    const r = try recvWithFd(pair[1], &buf);
+    try testing.expectEqualStrings("hello", buf[0..r.n]);
+    const fd = r.fd orelse return error.NoFd;
+    defer close(fd);
+    try testing.expect(try check(linux.fcntl(fd, linux.F.GETFD, 0)) & linux.FD_CLOEXEC != 0);
+    try writeAll(fd, "via fd");
+    try testing.expectEqualStrings("via fd", buf[0..try read(pipe[0], &buf)]);
+
+    try writeAll(pair[0], "plain");
+    const plain = try recvWithFd(pair[1], &buf);
+    try testing.expectEqualStrings("plain", buf[0..plain.n]);
+    try testing.expectEqual(null, plain.fd);
+}
+
+test "a reopened terminal is nonblocking on its own and reaches the same terminal" {
+    var master: c_int = -1;
+    var slave: c_int = -1;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.OpenPtyFailed;
+    defer close(master);
+    defer close(slave);
+    const fd = try reopenTerminal(slave, true);
+    defer close(fd);
+    try testing.expect(try check(linux.fcntl(fd, linux.F.GETFL, 0)) & nonblock_flag != 0);
+    try testing.expect(try check(linux.fcntl(slave, linux.F.GETFL, 0)) & nonblock_flag == 0);
+    try writeAll(fd, "x");
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("x", buf[0..try read(master, &buf)]);
+}
+
+test "a pipe is not a terminal" {
+    var pipe: [2]i32 = undefined;
+    _ = try check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    defer close(pipe[0]);
+    defer close(pipe[1]);
+    try testing.expectError(error.NotATerminal, reopenTerminal(pipe[0], false));
 }

@@ -42,6 +42,7 @@ fn fail(message: []const u8) u8 {
 
 test {
     _ = @import("paths.zig");
+    _ = @import("sys.zig");
     _ = @import("protocol.zig");
     _ = @import("sgr.zig");
     _ = @import("input.zig");
