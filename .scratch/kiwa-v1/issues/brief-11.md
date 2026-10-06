@@ -4,6 +4,14 @@ Extend the benchmark to the full v1 scenario set, run it, and record the
 results. Do not change product code in this ticket; if you find a product
 bug, describe it in the report.
 
+## State of the work
+
+A first delegate extended `tools/bench.py` to these scenarios (commit
+`6711ea1`, now on `master`) and was stopped before its runs finished,
+because tickets 13 and 14 changed the renderer. Start from that commit:
+review it, fix what is wrong, then run the full set on the current code.
+The earlier partial results are void.
+
 ## Read first
 
 - `AGENTS.md` (including the Git commits rule), `docs/adr/0002`.
