@@ -1185,14 +1185,10 @@ const Server = struct {
             const p = s.panes.get(pl.pane) orelse continue;
             const same = !all and c.drewAt(pl);
             if (!same) moved = true;
-            try p.drawn_rows.scan(s.gpa, &p.terminal, &p.render);
-            try p.render.update(s.gpa, &p.terminal);
-            const shift = try p.drawn_rows.update(s.gpa, &p.render);
+            const shift = try p.drawn_rows.update(s.gpa, &p.terminal, &p.render);
             var which: frame_mod.Frame.Which = if (same) .changed else .all;
             if (shift) |n| if (c.drewAt(pl) and p.render.rows == pl.inner.rows) {
                 try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n });
-                // The frame's band already holds the rows that moved; only
-                // the rows the shift exposed or the pane rewrote need composing.
                 if (same) {
                     c.frame.scrollRows(pl.inner, n);
                     which = .{ .except = &p.drawn_rows.carried };

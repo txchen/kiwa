@@ -52,7 +52,6 @@ pub const Scroll = struct {
         };
     }
 
-    /// The band row whose cells land in band row `i`, if any.
     fn source(s: Scroll, i: usize) ?usize {
         return frame.scrollSource(s.rect.rows, s.n, i);
     }
@@ -87,14 +86,12 @@ fn straddles(f: *const Frame, r: Rect, x: usize) bool {
 const unknown: Cell = .{ .cp = std.math.maxInt(u21) };
 
 /// The rows of `old` as `scroll` would leave them, read without applying
-/// it. Most rows a scroll moves equal the new frame's, and `rowEquals`
-/// settles those by comparing the parts in place.
+/// it.
 const Moved = struct {
     old: *const Frame,
     scroll: ?Scroll,
     cut_left: bool = false,
     cut_right: bool = false,
-    /// Where `row` assembles a row from the parts of two rows.
     buf: []Cell,
 
     fn init(old: *const Frame, scroll: ?Scroll, buf: []Cell) Moved {
@@ -234,8 +231,6 @@ fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Graphemes, r: Rec
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
     if (moved.scroll) |s| s.write(&d.writer, new.cols, new.rows) catch unreachable;
-    // Most candidates lose by a wide margin, which a cheap floor settles
-    // without writing a single row.
     equal.setRangeValue(.{ .start = r.y, .end = r.y + r.rows }, false);
     var floor = d.fullCount();
     for (r.y..r.y + r.rows) |y| {
@@ -252,8 +247,8 @@ fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Graphemes, r: Rec
 }
 
 /// A lower bound on the bytes `Out.row` writes to turn `old` into `new`:
-/// every changed character that is not a default blank is written, and
-/// its encoding is at least one byte. Only blank tails may be erased.
+/// a changed character that is not a default blank is always written, as
+/// at least one byte.
 fn rowFloor(old: []const Cell, new: []const Cell) u64 {
     var n: u64 = 0;
     for (old, new) |a, b| {
@@ -909,7 +904,6 @@ test "a row's floor never exceeds the bytes its repaint writes" {
         try editRandom(r, &g, &new, r.uintLessThan(usize, 4));
         var buf: [256]u8 = undefined;
         var d: Writer.Discarding = .init(&buf);
-        // The pen and position that make a repaint cheapest.
         var o: Out = .{ .w = &d.writer, .g = &g, .cols = cols, .pos = .{ .x = 0, .y = 0 }, .sync = false };
         try o.row(old.row(0), new.row(0), 0);
         const floor = rowFloor(old.row(0), new.row(0));
@@ -1065,7 +1059,6 @@ test "reading a frame's rows through a scroll matches scrolling a copy in place"
                 std.debug.print("{any} cell ({d},{d})\n", .{ s, x, y });
                 return error.TestExpectedEqual;
             };
-            // A cut leaves unknown cells, which no row is taken to equal.
             try testing.expectEqual(!moved.cut_left and !moved.cut_right, moved.rowEquals(y, copy.row(y)));
             const x = r.uintLessThan(usize, cols);
             var changed = copy.rowMut(y);

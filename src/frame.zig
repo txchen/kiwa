@@ -7,9 +7,7 @@ pub const Width = enum(u2) { narrow, wide, tail };
 
 /// One outer-terminal cell. A grapheme's extra codepoints live in the
 /// client's `Graphemes` table and the cell holds only their id. Cells are
-/// 16-byte values without padding: composing allocates nothing per cell,
-/// equality is one integer compare, rows compare and copy as plain bytes,
-/// and graphemes of any length stay intact.
+/// 16-byte values without padding.
 pub const Cell = packed struct(u128) {
     cp: u21 = ' ',
     width: Width = .narrow,
@@ -34,14 +32,11 @@ pub const Cell = packed struct(u128) {
     }
 };
 
-/// Whether two rows hold the same cells.
 pub fn rowsEqual(a: []const Cell, b: []const Cell) bool {
     return std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b));
 }
 
-/// A cell's SGR attributes, packed so that a `Cell` is one machine word
-/// pair. Composing converts ghostty-vt's style once; the differ compares
-/// and writes this one.
+/// A cell's SGR attributes.
 pub const Style = packed struct(u89) {
     fg_color: Color = .none,
     bg_color: Color = .none,
@@ -389,11 +384,9 @@ fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Sty
 /// which rows the frame still holds once its band is scrolled along.
 pub const DrawnRows = struct {
     ids: std.ArrayList(vt.RenderState.Row.Id) = .empty,
-    /// The viewport rows ghostty marked changed since the last render
-    /// update, read by `scan` before the update consumes the marks.
+    /// The viewport rows ghostty marked changed since the last render update.
     changed: std.DynamicBitSetUnmanaged = .{},
-    /// Whether every row may have changed: the screen, its size, a
-    /// selection, or a terminal-wide setting did.
+    /// Whether every row may have changed.
     all_changed: bool = true,
     /// After `update` found a shift: the rows whose cells a frame drawn
     /// from the last record holds once its band is scrolled by the shift.
@@ -408,12 +401,12 @@ pub const DrawnRows = struct {
         d.carried.deinit(gpa);
     }
 
-    /// Reads which viewport rows of `t` changed since `rs` last updated.
-    /// Call right before `rs.update`, which consumes those marks and marks
-    /// every row when the viewport moved. The page and row flags are what
-    /// the update itself reads when the viewport stays put; the checks
-    /// for a whole-screen change mirror its full-rebuild conditions.
-    pub fn scan(d: *DrawnRows, gpa: std.mem.Allocator, t: *const vt.Terminal, rs: *const vt.RenderState) !void {
+    /// Reads which viewport rows of `t` changed since `rs` last updated,
+    /// before the update consumes those marks and marks every row when
+    /// the viewport moved. The page and row flags are what the update
+    /// itself reads when the viewport stays put; the checks for a
+    /// whole-screen change mirror its full-rebuild conditions.
+    fn scan(d: *DrawnRows, gpa: std.mem.Allocator, t: *const vt.Terminal, rs: *const vt.RenderState) !void {
         const screen = t.screens.active;
         const pages = &screen.pages;
         d.all_changed = t.screens.active_key != rs.screen or rs.rows != pages.rows or rs.cols != pages.cols or
@@ -428,11 +421,14 @@ pub const DrawnRows = struct {
         }
     }
 
-    /// Records the rows of `rs` and returns how many rows its content moved
-    /// since the last record: positive when it moved up, as output at the
-    /// bottom scrolls it, negative when it moved down. Null when it did not
-    /// move or moved too few rows along. Fills `carried` from the last `scan`.
-    pub fn update(d: *DrawnRows, gpa: std.mem.Allocator, rs: *const vt.RenderState) !?i32 {
+    /// Updates `rs` from `t`, records its rows, and returns how many rows
+    /// the content moved since the last record: positive when it moved up,
+    /// as output at the bottom scrolls it, negative when it moved down.
+    /// Null when it did not move or moved too few rows along. Fills
+    /// `carried`.
+    pub fn update(d: *DrawnRows, gpa: std.mem.Allocator, t: *vt.Terminal, rs: *vt.RenderState) !?i32 {
+        try d.scan(gpa, t, rs);
+        try rs.update(gpa, t);
         const rows = rs.row_data.slice();
         const n = @min(rs.rows, rows.len);
         var shift: ?i32 = null;
@@ -711,18 +707,12 @@ test "a scrolled frame composes only the rows the shift did not carry" {
     try f.resize(gpa, 7, 5);
 
     s.nextSlice("a\r\nb\r\nc\r\nd");
-    try d.scan(gpa, &t, &rs);
-    try rs.update(gpa, &t);
-    try testing.expectEqual(null, try d.update(gpa, &rs));
+    try testing.expectEqual(null, try d.update(gpa, &t, &rs));
     try f.composePane(gpa, &g, rect, &rs, .all);
 
-    // Two more lines: the band moves up two, the old bottom row gained
-    // text before it moved, and two blank rows came in.
     s.nextSlice("d2\r\ne\r\nf");
-    try d.scan(gpa, &t, &rs);
+    try testing.expectEqual(2, try d.update(gpa, &t, &rs));
     try testing.expect(!d.all_changed);
-    try rs.update(gpa, &t);
-    try testing.expectEqual(2, try d.update(gpa, &rs));
     try testing.expect(d.carried.isSet(0));
     try testing.expect(!d.carried.isSet(1));
     try testing.expect(!d.carried.isSet(2));
@@ -737,11 +727,8 @@ test "a scrolled frame composes only the rows the shift did not carry" {
     try testing.expectEqual('2', f.row(2)[3].cp);
     try testing.expectEqual('f', f.row(4)[1].cp);
 
-    // Scrolling back keeps every row that reappears.
     t.scrollViewport(.{ .delta = -1 });
-    try d.scan(gpa, &t, &rs);
-    try rs.update(gpa, &t);
-    try testing.expectEqual(-1, try d.update(gpa, &rs));
+    try testing.expectEqual(-1, try d.update(gpa, &t, &rs));
     try testing.expect(!d.carried.isSet(0));
     for (1..4) |i| try testing.expect(d.carried.isSet(i));
     f.scrollRows(rect, -1);
@@ -749,14 +736,11 @@ test "a scrolled frame composes only the rows the shift did not carry" {
     try composeAll(gpa, &g, &want, rect, &rs);
     try expectSameCells(&f, &want);
 
-    // A selection may change any row's look, so nothing is carried.
     t.scrollViewport(.bottom);
     const screen = t.screens.active;
     try screen.select(.init(screen.pages.pin(.{ .viewport = .{ .x = 0 } }).?, screen.pages.pin(.{ .viewport = .{ .x = 0, .y = 1 } }).?, false));
-    try d.scan(gpa, &t, &rs);
+    try testing.expectEqual(1, try d.update(gpa, &t, &rs));
     try testing.expect(d.all_changed);
-    try rs.update(gpa, &t);
-    try testing.expectEqual(1, try d.update(gpa, &rs));
     try testing.expectEqual(0, d.carried.count());
 }
 
@@ -800,9 +784,7 @@ test "random output composed by shift and carried rows matches composing every r
             2 => t.scrollViewport(.{ .delta = 2 }),
             else => {},
         }
-        try d.scan(gpa, &t, &rs);
-        try rs.update(gpa, &t);
-        const shift = try d.update(gpa, &rs);
+        const shift = try d.update(gpa, &t, &rs);
         if (shift) |n| {
             shifts += 1;
             carried += d.carried.count();
@@ -817,7 +799,6 @@ test "random output composed by shift and carried rows matches composing every r
             return e;
         };
     }
-    // The test is only meaningful when it exercised carried rows.
     try testing.expect(shifts > 200 and carried > shifts);
 }
 
@@ -831,24 +812,18 @@ test "drawn rows tell how far a pane scrolled" {
     var d: DrawnRows = .{};
     defer d.deinit(testing.allocator);
 
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(null, try d.update(testing.allocator, &t, &rs));
     s.nextSlice("a\r\nb\r\nc\r\nd\r\ne");
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(null, try d.update(testing.allocator, &t, &rs));
     s.nextSlice("\r\nf\r\ng");
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(2, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(2, try d.update(testing.allocator, &t, &rs));
 
     // Scrolling back moves the content down; most of the screen is gone
     // after a clear, which is no scroll.
     t.scrollViewport(.{ .delta = -1 });
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(-1, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(-1, try d.update(testing.allocator, &t, &rs));
     t.scrollViewport(.bottom);
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(1, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(1, try d.update(testing.allocator, &t, &rs));
     s.nextSlice("\r\n1\r\n2\r\n3\r\n4");
-    try rs.update(testing.allocator, &t);
-    try testing.expectEqual(null, try d.update(testing.allocator, &rs));
+    try testing.expectEqual(null, try d.update(testing.allocator, &t, &rs));
 }
