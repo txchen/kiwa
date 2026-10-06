@@ -1,15 +1,26 @@
 //! Client-server messages. A frame is a little-endian u32 length, a u8 tag,
 //! and a payload. The length counts the tag and the payload.
+//!
+//! The handshake is frozen across all protocol versions, so that any client
+//! and any server can at least report a mismatch: the frame header, the
+//! `hello` tag with `version: u16` as its first field, and the `detach` tag
+//! with its reason payload. Everything else may change with `version`.
 
 const std = @import("std");
 
+/// Bump on any change to the encoding, and set `encoding_hash` to match.
 pub const version: u16 = 2;
+/// Wyhash of the test sample encoded, as `version` encodes it. The test
+/// "the encoding matches the protocol version" fails when they differ.
+const encoding_hash: u64 = 0xb6bef160494a9e23;
 
 /// A frame larger than this is a protocol error, not a big message.
 pub const max_frame_len: u32 = 16 * 1024 * 1024;
 pub const header_len = 5;
 
-pub const Tag = enum(u8) { hello = 1, resize, detach, kill, list, stats, text, _ };
+/// Values are never reused, so that an old peer cannot mistake a new
+/// message for another one.
+pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, kill = 4, list = 5, stats = 6, text = 7, _ };
 
 pub const Size = struct { cols: u16, rows: u16 };
 
@@ -167,8 +178,10 @@ fn expectMessage(expected: Message, actual: Message) !void {
     }
 }
 
+/// Every message type, with fixed values. Its encoding is what
+/// `encoding_hash` pins.
 const sample = [_]Message{
-    .{ .hello = .{ .version = version, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/home/u/src" } },
+    .{ .hello = .{ .version = 0x0102, .size = .{ .cols = 80, .rows = 24 }, .cwd = "/home/u/src" } },
     .{ .resize = .{ .cols = 90, .rows = 30 } },
     .{ .detach = "attached elsewhere" },
     .kill,
@@ -177,6 +190,27 @@ const sample = [_]Message{
     .{ .text = "main\n  1 sh\n" },
     .{ .detach = "" },
 };
+
+test "the sample has every message type" {
+    inline for (@typeInfo(Message).@"union".fields) |f| {
+        for (sample) |m| {
+            if (std.mem.eql(u8, @tagName(m), f.name)) break;
+        } else {
+            std.debug.print("add a {s} message to the sample\n", .{f.name});
+            return error.MessageMissingFromSample;
+        }
+    }
+}
+
+test "the encoding matches the protocol version" {
+    const bytes = try encodeAll(testing.allocator, &sample);
+    defer testing.allocator.free(bytes);
+    const hash = std.hash.Wyhash.hash(0, bytes);
+    if (hash != encoding_hash) {
+        std.debug.print("the message encoding changed: bump protocol.version (now {d}) and set encoding_hash to 0x{x:0>16}\n", .{ version, hash });
+        return error.EncodingChangedWithoutVersionBump;
+    }
+}
 
 test "every message survives a round trip fed one byte at a time" {
     const bytes = try encodeAll(testing.allocator, &sample);
