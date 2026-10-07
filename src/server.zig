@@ -1506,7 +1506,7 @@ const Server = struct {
             const shift = try p.drawn_rows.update(s.gpa, &p.terminal, &p.render);
             var which: frame_mod.Frame.Which = if (same) .changed else .all;
             if (shift) |n| if (same and p.render.rows == pl.inner.rows) {
-                try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n });
+                try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n, .confined = s.geometry.effective == .framed });
                 c.frame.scrollRows(pl.inner, n);
                 which = .{ .except = &p.drawn_rows.carried };
             };

@@ -35,6 +35,8 @@ pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Write
 pub const Scroll = struct {
     rect: Rect,
     n: i32,
+    /// Never widen the hardware scroll beyond `rect`.
+    confined: bool = false,
 
     /// Applies the scroll to a model of the outer terminal, as the outer
     /// terminal applies the bytes `write` sends. Rows that scroll in are
@@ -170,10 +172,10 @@ const RowSet = std.DynamicBitSetUnmanaged;
 pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 
 /// Like `diff`, but first scrolls the outer terminal for each of `scrolls`
-/// where that writes fewer bytes. Each scroll can move the whole width of
-/// its rows or, when the outer terminal supports left and right margins
-/// (`lr_margins`), only its rect. The cell diff that follows repaints
-/// whatever else moved, so the rows of every scroll are marked dirty in
+/// where that writes fewer bytes. Unless confined, each scroll can move the
+/// whole width of its rows or, when the outer terminal supports left and
+/// right margins (`lr_margins`), only its rect. The cell diff that follows
+/// repaints whatever else moved, so the rows of every scroll are marked dirty in
 /// `new`. Each scroll sent is applied to `old`, as the outer terminal
 /// applies it, so `old` keeps modeling the outer terminal. Rows that the
 /// scroll leaves equal to `new` are unmarked: they need no write and no
@@ -197,6 +199,7 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
         while (i > 0) {
             i -= 1;
             const c = candidates[i];
+            if (s.confined and !std.meta.eql(c.rect, r)) continue;
             // A scroll changes only its rows, so only they are compared.
             const bytes = bandBytes(&.init(old, c, sc.row), new, g, r, best_bytes, &sc.equal);
             if (bytes < best_bytes) {
@@ -949,6 +952,59 @@ test "a pane that scrolled moves with a scroll and repaints only the row that ca
     f.new.copyFrom(&f.old);
     f.new.rowMut(2)[9] = .{ .cp = 'q' };
     try testing.expectEqualStrings("\x1b[3;10Hq\x1b[5;8H", try f.diffBytes());
+    try f.expectRoundTrip();
+}
+
+test "confined scrolls never widen even when whole-width scrolling is cheaper" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(80, 10);
+    for (0..10) |y| {
+        @memset(f.old.rowMut(y)[0..7], .{ .cp = 'S' });
+        @memset(f.old.rowMut(y)[8..79], .{ .cp = @intCast('a' + y) });
+    }
+    f.new.copyFrom(&f.old);
+    var up: Scroll = .{ .rect = .{ .x = 8, .y = 1, .cols = 71, .rows = 9 }, .n = 1 };
+    up.apply(&f.new);
+    @memset(f.new.rowMut(9)[8..79], .{ .cp = 'z' });
+
+    for ([_]bool{ false, true }) |margins| {
+        up.confined = false;
+        f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = margins } };
+        const adaptive_bytes = (try f.diffBytes()).len;
+        try testing.expectEqual(1, f.scratch.chosen.items.len);
+        try testing.expectEqual(@as(u16, 80), f.scratch.chosen.items[0].rect.cols);
+        try f.expectRoundTrip();
+
+        up.confined = true;
+        f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = margins } };
+        const confined_bytes = try f.diffBytes();
+        if (margins) {
+            try testing.expectEqual(1, f.scratch.chosen.items.len);
+            try testing.expectEqual(up.rect, f.scratch.chosen.items[0].rect);
+            try testing.expect(std.mem.indexOf(u8, confined_bytes, "\x1b[?69h\x1b[9;79s") != null);
+            try testing.expect(std.mem.indexOf(u8, confined_bytes, "\x1b[S") != null);
+        } else {
+            try testing.expectEqual(0, f.scratch.chosen.items.len);
+            try testing.expect(std.mem.indexOf(u8, confined_bytes, "\x1b[S") == null);
+        }
+        try testing.expect(confined_bytes.len > adaptive_bytes);
+        try f.expectRoundTrip();
+    }
+}
+
+test "confined full-width scrolls work without left and right margins" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(80, 10);
+    for (0..10) |y| @memset(f.old.rowMut(y), .{ .cp = @intCast('a' + y) });
+    f.new.copyFrom(&f.old);
+    const up: Scroll = .{ .rect = .{ .y = 1, .cols = 80, .rows = 9 }, .n = 1, .confined = true };
+    up.apply(&f.new);
+    f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = false } };
+    try testing.expect(std.mem.indexOf(u8, try f.diffBytes(), "\x1b[S") != null);
+    try testing.expectEqual(1, f.scratch.chosen.items.len);
+    try testing.expectEqual(up.rect, f.scratch.chosen.items[0].rect);
     try f.expectRoundTrip();
 }
 

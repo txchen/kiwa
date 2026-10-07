@@ -2502,6 +2502,10 @@ fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     try prefixed(o, "v");
     try prefixed(o, "-");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    var seen: std.ArrayList(u8) = .empty;
+    defer seen.deinit(ctx.gpa);
+    o.capture = &seen;
+    defer o.capture = null;
     try o.send("i=0; while [ $i -lt 80 ]; do printf 'scroll-%03d\\n' $i; i=$((i+1)); sleep 0.01; done\r");
     try o.waitText("scroll-079");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
@@ -2510,6 +2514,10 @@ fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     try o.send("clear; echo SCROLL-$((40+2))\r");
     try o.waitText("SCROLL-42");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    if (!margins) {
+        try expect(std.mem.indexOf(u8, seen.items, "S\x1b[r") == null, "framed scrolling without margins emits no widened scroll-up commands");
+        try expect(std.mem.indexOf(u8, seen.items, "T\x1b[r") == null, "framed scrolling without margins emits no widened scroll-down commands");
+    }
 }
 
 fn paneStyleScrollMargins(ctx: *Ctx) !void {
