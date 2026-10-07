@@ -1486,9 +1486,6 @@ const Server = struct {
         try s.flush(c);
     }
 
-    /// Brings `c.frame` up to date with the visible panes. Panes copy only
-    /// their dirty rows unless geometry changed. Clear decorations before any
-    /// pane composition so old content cannot survive in new gutters.
     fn compose(s: *Server, c: *Conn, all: bool) !void {
         const focus = s.session.focused();
         var moved = all or c.drawn.items.len != s.geometry.panes.items.len;
@@ -1532,24 +1529,12 @@ const Server = struct {
         if (moved or c.drawn_focus != focus) {
             const focused = s.placementOf(focus);
             for (s.geometry.panes.items) |pl| {
-                const right = pl.box.x + pl.box.cols;
-                const bottom = pl.box.y + pl.box.rows;
                 if (s.geometry.effective == .framed) {
-                    const style = if (pl.pane == focus) focused_border_style else border_style;
-                    for (pl.box.x..right) |x| {
-                        c.frame.rowMut(pl.box.y)[x] = .{ .cp = 0x2500, .style = style };
-                        c.frame.rowMut(bottom - 1)[x] = .{ .cp = 0x2500, .style = style };
-                    }
-                    for (pl.box.y..bottom) |y| {
-                        c.frame.rowMut(y)[pl.box.x] = .{ .cp = 0x2502, .style = style };
-                        c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = style };
-                    }
-                    c.frame.rowMut(pl.box.y)[pl.box.x] = .{ .cp = 0x250c, .style = style };
-                    c.frame.rowMut(pl.box.y)[right - 1] = .{ .cp = 0x2510, .style = style };
-                    c.frame.rowMut(bottom - 1)[pl.box.x] = .{ .cp = 0x2514, .style = style };
-                    c.frame.rowMut(bottom - 1)[right - 1] = .{ .cp = 0x2518, .style = style };
+                    c.frame.drawBox(pl.box, if (pl.pane == focus) focused_border_style else border_style);
                     continue;
                 }
+                const right = pl.box.x + pl.box.cols;
+                const bottom = pl.box.y + pl.box.rows;
                 if (pl.inner.cols < pl.box.cols) for (pl.box.y..bottom) |y| {
                     const active = pl.pane == focus or if (focused) |f| f.box.x == right and y >= f.box.y and y < f.box.y + f.box.rows else false;
                     c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = if (active) focused_border_style else border_style };

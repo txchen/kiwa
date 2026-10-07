@@ -430,9 +430,6 @@ fn tabWidth(index: usize, name_cols: usize, tab: Tab) usize {
 
 const plus = " + ";
 
-/// Shared slots for tab drawing and hits. Names shrink before the row
-/// scrolls to the active tab. Zoom reserves the number and marker even
-/// when no name fits.
 const TabSlots = struct {
     tabs: []const Tab,
     cols: usize,
