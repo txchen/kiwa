@@ -96,24 +96,39 @@ test "an unmarked tab is never due" {
 
 /// The shell's directory is useful even when it has no foreground job.
 /// Keep the full UTF-8 name here; the tab row clips by display cells.
-pub fn label(buf: []u8, cwd: []const u8, command: ?[]const u8, shell: []const u8) []const u8 {
+pub fn directory(cwd: []const u8, home: ?[]const u8) []const u8 {
+    const path = std.mem.trimEnd(u8, cwd, "/");
+    if (home) |h| if (h.len > 0 and std.mem.eql(u8, path, std.mem.trimEnd(u8, h, "/"))) return "~";
     const base = std.fs.path.basename(cwd);
-    const directory = if (base.len == 0) cwd else base;
-    const cmd = command orelse return directory;
+    return if (base.len == 0) cwd else base;
+}
+
+pub fn label(buf: []u8, cwd: []const u8, home: ?[]const u8, command: ?[]const u8, shell: []const u8) []const u8 {
+    const dir = directory(cwd, home);
+    const cmd = command orelse return dir;
     const executable = std.mem.trimStart(u8, std.fs.path.basename(cmd), "-");
-    if (std.mem.eql(u8, executable, std.fs.path.basename(shell))) return directory;
+    if (std.mem.eql(u8, executable, std.fs.path.basename(shell))) return dir;
     for ([_][]const u8{ "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu" }) |known| {
-        if (std.mem.eql(u8, executable, known)) return directory;
+        if (std.mem.eql(u8, executable, known)) return dir;
     }
-    return std.fmt.bufPrint(buf, "{s} · {s}", .{ executable, directory }) catch directory;
+    return std.fmt.bufPrint(buf, "{s} · {s}", .{ executable, dir }) catch dir;
 }
 
 test "tab labels show the directory for shells and pair it with foreground programs" {
     var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings("interview", label(&buf, "/code/interview", "zsh", "zsh"));
-    try testing.expectEqualStrings("src", label(&buf, "/code/src", "-bash", "zsh"));
-    try testing.expectEqualStrings("src", label(&buf, "/code/src", null, "zsh"));
-    try testing.expectEqualStrings("vim · src", label(&buf, "/code/src", "vim", "zsh"));
-    try testing.expectEqualStrings("codex · 中文", label(&buf, "/code/中文", "codex", "zsh"));
-    try testing.expectEqualStrings("/", label(&buf, "/", "zsh", "zsh"));
+    try testing.expectEqualStrings("interview", label(&buf, "/code/interview", null, "zsh", "zsh"));
+    try testing.expectEqualStrings("src", label(&buf, "/code/src", null, "-bash", "zsh"));
+    try testing.expectEqualStrings("src", label(&buf, "/code/src", null, null, "zsh"));
+    try testing.expectEqualStrings("vim · src", label(&buf, "/code/src", null, "vim", "zsh"));
+    try testing.expectEqualStrings("codex · 中文", label(&buf, "/code/中文", null, "codex", "zsh"));
+    try testing.expectEqualStrings("/", label(&buf, "/", null, "zsh", "zsh"));
+}
+
+test "home uses a tilde without shortening other directories or prefix matches" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("~", label(&buf, "/home/alice", "/home/alice/", "zsh", "zsh"));
+    try testing.expectEqualStrings("vim · ~", label(&buf, "/home/alice/", "/home/alice", "vim", "zsh"));
+    try testing.expectEqualStrings("src", directory("/home/alice/src", "/home/alice"));
+    try testing.expectEqualStrings("alice-other", directory("/home/alice-other", "/home/alice"));
+    try testing.expectEqualStrings("/", directory("/", ""));
 }

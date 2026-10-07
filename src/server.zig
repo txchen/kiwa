@@ -44,6 +44,7 @@ const Deadline = enum {
     input,
     /// The earliest dynamic-name check that had to wait.
     names,
+    notice,
     /// After a change to what `session.json` holds. Batches a burst of
     /// changes into one write.
     save,
@@ -53,6 +54,7 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .render = 8 * std.time.ns_per_ms,
     .input = 25 * std.time.ns_per_ms,
     .names = names.interval_ns,
+    .notice = 3 * std.time.ns_per_s,
     .save = std.time.ns_per_s,
 });
 
@@ -141,6 +143,7 @@ const Conn = struct {
     drawn_chrome: ?u64 = null,
     /// Whether `frame` holds the key help box over the panes.
     drawn_help: bool = false,
+    notice: bool = false,
     /// The navigate cursor, a workspace index.
     nav: usize = 0,
     mouse: mouse.State = .idle,
@@ -354,7 +357,7 @@ const Server = struct {
             if (p.clipboard.items.len > 0) try s.forwardClipboard(p);
             if (d.bytes > 0) {
                 // Output in a hidden pane changes nothing on screen, except
-                // the first time it marks its workspace.
+                // the first time it marks its tab or workspace.
                 if (s.isVisible(p.id) or (p.shown and s.session.noteOutput(p.id, d.bell))) try s.markStale();
                 if (s.session.tabOf(p.id)) |t| if (t.focused == p.id) try s.markName(t);
             }
@@ -450,11 +453,22 @@ const Server = struct {
     }
 
     fn reloadConfig(s: *Server, c: *Conn) !void {
-        if (c.state != .open) return s.dropConn(c);
+        const attached = s.client == c;
+        if (!attached and c.state != .open) return s.dropConn(c);
+        if (attached) {
+            c.notice = false;
+            try s.setDeadline(.notice, null);
+        }
         var line: usize = 0;
         s.scratch.clearRetainingCapacity();
         const cfg = config.load(s.gpa, s.io, s.config_path, &line) catch |e| {
             try s.scratch.print(s.gpa, "error: {s}:{d}: {t}; live configuration unchanged\n", .{ s.config_path, line, e });
+            if (attached) {
+                var message: dialog_mod.Message = .{};
+                const text = std.fmt.bufPrint(&message.text, "Line {d}: {t}. Live configuration unchanged.", .{ line, e }) catch unreachable;
+                message.len = text.len;
+                return s.openDialog(c, .{ .message = message });
+            }
             return s.answer(c);
         };
         s.configuration = cfg;
@@ -466,6 +480,11 @@ const Server = struct {
         }
         try s.relayout();
         try s.markStale();
+        if (attached) {
+            c.notice = true;
+            try s.setDeadline(.notice, monotonicNs() + delay_ns.get(.notice));
+            return s.markStale();
+        }
         try s.scratch.print(s.gpa, "Reloaded {s}. Scrollback limits apply to new panes.\n", .{s.config_path});
         try s.answer(c);
     }
@@ -586,7 +605,7 @@ const Server = struct {
         // A new pane always goes on the visible tab.
         s.panes.get(id).?.shown = true;
         if (s.session.tabOf(id)) |t| {
-            _ = try s.session.setDynamicName(t, session_mod.rootName(cwd));
+            _ = try s.session.setDynamicName(t, names.directory(cwd, s.env.get("HOME")));
             try s.markName(t);
         }
         try s.markStale();
@@ -624,7 +643,7 @@ const Server = struct {
                     try failed.append(s.gpa, pl.pane);
                 };
             }
-            if (s.panes.get(t.focused)) |pane| _ = try s.session.setDynamicName(t, session_mod.rootName(pane.start_dir));
+            if (s.panes.get(t.focused)) |pane| _ = try s.session.setDynamicName(t, names.directory(pane.start_dir, s.env.get("HOME")));
             try s.markName(t);
         };
         r.arena.deinit();
@@ -696,7 +715,7 @@ const Server = struct {
         var cwd_buf: [sys.PATH_MAX]u8 = undefined;
         var label_buf: [sys.PATH_MAX + 128]u8 = undefined;
         const cwd = pane.cwd(&cwd_buf) orelse pane.start_dir;
-        const name = names.label(&label_buf, cwd, pane.foreground(&comm), s.session.tab_name);
+        const name = names.label(&label_buf, cwd, s.env.get("HOME"), pane.foreground(&comm), s.session.tab_name);
         if (try s.session.setDynamicName(t, name) and s.session.showsTab(t)) try s.markStale();
     }
 
@@ -839,6 +858,7 @@ const Server = struct {
         const ss = &s.session;
         const changed = switch (a) {
             .detach => unreachable,
+            .reload_config => return s.reloadConfig(c),
             .new_tab => {
                 const cwd = ss.activeWorkspace().root_dir;
                 if (!paths_mod.isDir(cwd)) {
@@ -1119,6 +1139,7 @@ const Server = struct {
             .select_workspace => |i| if (s.session.selectWorkspace(i)) try s.showChanges(),
             .select_tab => |i| if (s.session.selectTab(i)) try s.showChanges(),
             .new_workspace => try s.act(c, .new_workspace),
+            .workspace_directory => try s.act(c, .change_workspace_directory),
             .toggle_sidebar => try s.act(c, .toggle_sidebar),
             .resize_sidebar => |width| {
                 if (c.size.cols < chrome.expand_min_cols) return;
@@ -1252,6 +1273,7 @@ const Server = struct {
     fn runMenuItem(s: *Server, c: *Conn, m: Menu, item: usize) !void {
         const ss = &s.session;
         switch (m.subject) {
+            .application => {},
             .workspace => |i| {
                 if (i >= ss.workspaces.items.len) return;
                 _ = ss.selectWorkspace(i);
@@ -1266,7 +1288,13 @@ const Server = struct {
             },
         }
         try s.showChanges();
-        try s.act(c, m.items()[item].action);
+        const action = m.items()[item].action;
+        if (action == .detach) return s.detach(c, msg.detached);
+        if (action == .help) {
+            c.prefix.mode = .help;
+            c.prefix.help_offset = 0;
+        }
+        try s.act(c, action);
     }
 
     /// Where a new pane starts: the focused pane's directory.
@@ -1356,6 +1384,10 @@ const Server = struct {
                     try s.drainInput(c);
                 },
                 .names => try s.checkDueNames(),
+                .notice => if (s.client) |c| {
+                    c.notice = false;
+                    try s.markStale();
+                },
                 .save => s.save(),
             }
         }
@@ -1521,8 +1553,16 @@ const Server = struct {
         });
         const current = ss.activeWorkspace();
         s.chrome_tabs.clearRetainingCapacity();
-        for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .active = t.id == current.active });
+        for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .activity = t.activity, .active = t.id == current.active });
+        var pane_count: usize = 0;
+        for (current.tabs.items) |t| pane_count += t.layout.count();
         return .{
+            .username = s.env.get("USER") orelse s.env.get("LOGNAME") orelse "",
+            .hostname = s.hostname,
+            .directory = current.root_dir,
+            .home = s.env.get("HOME") orelse "",
+            .pane_count = pane_count,
+            .notice = c.notice,
             .workspaces = s.chrome_workspaces.items,
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,

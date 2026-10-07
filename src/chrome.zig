@@ -41,6 +41,7 @@ pub const Workspace = struct {
 
 pub const Tab = struct {
     name: []const u8,
+    activity: Activity = .none,
     active: bool = false,
 };
 
@@ -51,6 +52,12 @@ pub const View = struct {
     tabs: []const Tab,
     mode: Mode = .normal,
     custom_keys: bool = false,
+    username: []const u8 = "",
+    hostname: []const u8 = "",
+    directory: []const u8 = "",
+    home: []const u8 = "",
+    pane_count: usize = 0,
+    notice: bool = false,
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
     sidebar_width: u16 = sidebar_cols,
@@ -119,15 +126,20 @@ pub fn draw(f: *Frame, v: View) void {
     const row = f.rowMut(0)[g.sidebar..];
     @memset(row, .blank);
     drawTabs(row, v.tabs);
+    // Use the tab row's underline instead of taking a row from the panes.
+    for (row) |*cell| {
+        cell.style.flags.underline = .single;
+        cell.style.underline_color = divider.fg_color;
+    }
     if (!g.status_row) return;
     const footer = f.rowMut(f.rows - 1)[g.sidebar..];
     @memset(footer, .blank);
     switch (v.mode) {
-        .normal, .help => {
-            _ = put(footer, 0, if (v.custom_keys) " keys: kiwa config bindings" else " ctrl+b ? help", dim);
+        .normal, .help => if (v.notice) {
+            _ = put(footer, 1, "Configuration reloaded", plain);
         },
         .copy => |failed| drawModeBar(footer, " COPY ", if (failed) "copy failed: shorten selection or retry" else "h j k l move  v select  y copy  esc back"),
-        .prefix => drawModeBar(footer, " PREFIX ", if (v.custom_keys) "custom keys: kiwa config bindings" else "c tab  | split  - split  x close  w navigate  [ copy  ? help"),
+        .prefix => drawModeBar(footer, " PREFIX ", if (v.custom_keys) "custom keys: kiwa config bindings" else "c tab  \\ vsplit  - hsplit  [ copy mode  ? help"),
         .resize => drawModeBar(footer, " RESIZE ", "h j k l resize  esc done"),
         .navigate => drawModeBar(footer, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back"),
     }
@@ -139,6 +151,8 @@ pub const Hit = union(enum) {
     none,
     workspace: usize,
     new_workspace,
+    application_menu,
+    workspace_directory,
     toggle_sidebar,
     resize_sidebar,
     tab: usize,
@@ -152,10 +166,17 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
     if (x < g.sidebar) {
         if (x == g.sidebar - 1) return .resize_sidebar;
         const expanded = g.sidebar > collapsed_cols;
-        const list: List = .of(rows, expanded);
-        if (y == list.end and list.end < rows) {
+        const full: List = .of(rows, expanded);
+        if (expanded) if (infoTop(v, rows)) |top| {
+            if (y == top + 4) return .workspace_directory;
+            if (y >= top and y < full.end) return .none;
+        };
+        const list = sidebarList(v, rows, expanded);
+        if (y == full.end and full.end < rows) {
             // The `«` and the cells around it toggle; the rest of the footer is `+ new`.
-            return if (!expanded or x >= g.sidebar - 3) .toggle_sidebar else .new_workspace;
+            if (!expanded or x >= g.sidebar - 3) return .toggle_sidebar;
+            if (x >= g.sidebar - 10) return .application_menu;
+            return .new_workspace;
         }
         var entries: Entries = .init(v, list, expanded);
         while (entries.next()) |e| {
@@ -188,6 +209,23 @@ const List = struct {
         return l.end - l.top;
     }
 };
+
+/// Show details only in spare space; never displace workspace entries.
+fn infoTop(v: View, rows: u16) ?u16 {
+    if (v.hostname.len == 0 or rows < 12) return null;
+    var used: usize = 1;
+    for (v.workspaces) |ws| used += entryRows(ws, true);
+    const top = rows - 8;
+    return if (used + 1 <= top) top else null;
+}
+
+fn sidebarList(v: View, rows: u16, expanded: bool) List {
+    var list = List.of(rows, expanded);
+    if (expanded) if (infoTop(v, rows)) |top| {
+        list.end = top;
+    };
+    return list;
+}
 
 /// The workspaces a sidebar list shows, top to bottom.
 const Entries = struct {
@@ -263,12 +301,32 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         @memset(row[0..width], .blank);
         row[width] = .{ .cp = 0x2502, .style = divider };
     }
-    const list: List = .of(f.rows, true);
+    const list = sidebarList(v, f.rows, true);
     if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " Workspaces", sidebar_heading);
-    if (list.end < f.rows) {
-        const footer = f.rowMut(list.end)[0..width];
+    if (f.rows >= 2) {
+        const footer = f.rowMut(f.rows - 1)[0..width];
         _ = put(footer, 0, " + new", plain);
+        _ = put(footer, width - 9, "menu", plain);
         footer[width - 1] = .{ .cp = 0x00ab };
+    }
+
+    if (infoTop(v, f.rows)) |top| {
+        const inner = width - 2;
+        for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = divider };
+        _ = put(f.rowMut(top + 1)[1..width], 0, "Host", sidebar_heading);
+        var host_buf: [512]u8 = undefined;
+        const host = std.fmt.bufPrint(&host_buf, "{s}{s}{s}", .{ v.username, if (v.username.len > 0) "@" else "", v.hostname }) catch v.hostname;
+        fit(f.rowMut(top + 2)[1..][0..inner], 0, host, plain);
+        _ = put(f.rowMut(top + 3)[1..width], 0, "Workspace", sidebar_heading);
+        var path_buf: [4096]u8 = undefined;
+        const path = if (v.home.len > 0 and std.mem.startsWith(u8, v.directory, v.home) and
+            (v.directory.len == v.home.len or v.directory[v.home.len] == '/'))
+            std.fmt.bufPrint(&path_buf, "~{s}", .{v.directory[v.home.len..]}) catch v.directory
+        else
+            v.directory;
+        fit(f.rowMut(top + 4)[1..][0..inner], 0, path, plain);
+        var counts: [80]u8 = undefined;
+        fit(f.rowMut(top + 5)[1..][0..inner], 0, std.fmt.bufPrint(&counts, "{d} {s} · {d} {s}", .{ v.tabs.len, if (v.tabs.len == 1) "tab" else "tabs", v.pane_count, if (v.pane_count == 1) "pane" else "panes" }) catch unreachable, dim);
     }
 
     var entries: Entries = .init(v, list, true);
@@ -333,9 +391,9 @@ fn drawCollapsed(f: *Frame, v: View) void {
     }
 }
 
-fn tabWidth(index: usize, name_cols: usize) usize {
+fn tabWidth(index: usize, name_cols: usize, activity: Activity) usize {
     // " {index} {name} "
-    return 3 + digits(index) + name_cols;
+    return 3 + digits(index) + name_cols + @as(usize, if (activity == .none) 0 else 2);
 }
 
 const plus = " + ";
@@ -364,13 +422,13 @@ const TabSlots = struct {
         var cap = widest;
         while (cap > 1) : (cap -= 1) {
             var total: usize = plus.len;
-            for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap));
+            for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap), t.activity);
             if (total <= cols) break;
         }
         var first: usize = 0;
         while (first < active) : (first += 1) {
             var used: usize = plus.len;
-            for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap));
+            for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap), t.activity);
             if (used <= cols) break;
         }
         return .{ .tabs = tabs, .cols = cols, .cap = cap, .index = first };
@@ -381,7 +439,7 @@ const TabSlots = struct {
             s.all_fit = true;
             return null;
         }
-        const w = tabWidth(s.index + 1, @min(textCols(s.tabs[s.index].name), s.cap));
+        const w = tabWidth(s.index + 1, @min(textCols(s.tabs[s.index].name), s.cap), s.tabs[s.index].activity);
         if (s.x + w > s.cols) return null;
         defer {
             s.index += 1;
@@ -405,7 +463,13 @@ fn drawTabs(row: []Cell, tabs: []const Tab) void {
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
         const after = put(cell, 1, std.fmt.bufPrint(&num, "{d} ", .{slot.index + 1}) catch unreachable, style);
-        fit(cell[0 .. slot.cols - 1], after, t.name, style);
+        const end = slot.cols - 1 - @as(usize, if (t.activity == .none) 0 else 2);
+        fit(cell[0..end], after, t.name, style);
+        if (markerCp(t.activity)) |cp| {
+            var ms = style;
+            ms.fg_color = marker_fg;
+            cell[slot.cols - 2] = .{ .cp = cp, .style = ms };
+        }
     }
     if (slots.plusX()) |x| _ = put(row, x, plus, plain);
 }
@@ -616,7 +680,7 @@ test "one workspace, expanded at 120 columns" {
         \\                         │
         \\                         │
         \\                         │
-        \\ + new                  «│ ctrl+b ? help
+        \\ + new          menu    «│
         \\
     );
     for (0..25) |x| try testing.expect(isHighlight(s.at(x, 1)));
@@ -635,7 +699,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
         \\ 2 a-very-long-worksp…   │
         \\ 3 notes               ! │
         \\                         │
-        \\ + new                  «│ ctrl+b ? help
+        \\ + new          menu    «│
         \\
     );
     try testing.expect(isHighlight(wide.at(0, 2)) and isHighlight(wide.at(24, 2)));
@@ -651,7 +715,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
         \\ 3!│
         \\   │
         \\   │
-        \\  »│ ctrl+b ? help
+        \\  »│
         \\
     );
     try testing.expect(isHighlight(narrow.at(0, 1)) and isHighlight(narrow.at(2, 1)));
@@ -664,7 +728,7 @@ test "the toggle collapses a wide sidebar" {
     try s.expect(
         \\ 1 │ 1 sh  2 vim  +
         \\   │
-        \\  »│ ctrl+b ? help
+        \\  »│
         \\
     );
 }
@@ -679,7 +743,7 @@ test "a branch line follows the name when a branch is known" {
         \\   main                  │
         \\ 2 other                 │
         \\   dev                   │
-        \\ + new                  «│ ctrl+b ? help
+        \\ + new          menu    «│
         \\
     );
     try testing.expect(isHighlight(s.at(3, 2)));
@@ -699,7 +763,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
         \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\   feature/a-very-long-b…│
-        \\ + new                  «│ ctrl+b ? help
+        \\ + new          menu    «│
         \\
     );
     var narrow = try render(40, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
@@ -708,7 +772,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
         \\ 1 │ 1 sh  2 vim  +
         \\   │
         \\   │
-        \\  »│ ctrl+b ? help
+        \\  »│
         \\
     );
 }
@@ -725,14 +789,14 @@ test "workspaces that overflow scroll to keep the active one visible" {
         \\ 5 e                     │
         \\ 6 f                     │
         \\ 7 g                     │
-        \\ + new                  «│ ctrl+b ? help
+        \\ + new          menu    «│
         \\
     );
 }
 
 test "mode bars occupy the footer and keep tabs visible" {
     const cases = [_]struct { Mode, []const u8 }{
-        .{ .prefix, " PREFIX   c tab  | split  - split  x close  w navigate  [ copy  ? help" },
+        .{ .prefix, " PREFIX   c tab  \\ vsplit  - hsplit  [ copy mode  ? help" },
         .{ .resize, " RESIZE   h j k l resize  esc done" },
         .{ .{ .navigate = 0 }, " NAVIGATE   j k move  1-9 jump  enter switch  esc back" },
     };
@@ -950,4 +1014,51 @@ test "resized sidebar draws and hits the same divider and preserves terminal spa
     try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 22 }, Geometry.sized(100, 24, false, 38).area);
     try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500).sidebar);
     try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38).sidebar);
+}
+
+test "tab activity markers survive truncation and share their tab hit target" {
+    const tabs = [_]Tab{
+        .{ .name = "long-worker-name", .activity = .output },
+        .{ .name = "another-long-name", .activity = .bell },
+        .{ .name = "shell", .active = true },
+    };
+    const v: View = .{ .workspaces = &one, .tabs = &tabs, .collapsed = true };
+    var s = try render(34, 4, v);
+    defer s.deinit();
+    try expectHit(v, &s, "•", .{ .tab = 0 });
+    try expectHit(v, &s, "!", .{ .tab = 1 });
+    try expectHit(v, &s, "3", .{ .tab = 2 });
+    const got = try s.text();
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "…") != null);
+}
+
+test "sidebar details use spare space and directory and menu clicks match their labels" {
+    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .username = "alice", .hostname = "devbox", .home = "/home/alice", .directory = "/home/alice/code/kiwa", .pane_count = 3 };
+    var s = try render(80, 24, v);
+    defer s.deinit();
+    try expectHit(v, &s, "menu", .application_menu);
+    try expectHit(v, &s, "~/code/kiwa", .workspace_directory);
+    const text = try s.text();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "alice@devbox") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "2 tabs · 3 panes") != null);
+    try testing.expectEqual(null, infoTop(v, 10));
+    var many: [20]Workspace = undefined;
+    for (&many) |*ws| ws.* = .{ .name = "workspace" };
+    var crowded = v;
+    crowded.workspaces = &many;
+    try testing.expectEqual(null, infoTop(crowded, 24));
+}
+
+test "the tab separator uses the sidebar divider color without consuming a pane row" {
+    var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2 });
+    defer s.deinit();
+    for (s.f.row(0)[26..]) |cell| {
+        try testing.expectEqual(.single, cell.style.flags.underline);
+        try testing.expectEqualDeep(divider.fg_color, cell.style.underline_color);
+    }
+    const geometry = Geometry.of(80, 24, false);
+    try testing.expectEqual(1, geometry.area.y);
+    try testing.expectEqual(22, geometry.area.rows);
 }

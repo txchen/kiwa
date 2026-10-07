@@ -274,7 +274,7 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | Key | Action |
 | --- | --- |
 | `c` | New tab in the workspace directory |
-| `\|` / `v` | Split the focused pane right |
+| `\` / `\|` / `v` | Split the focused pane right |
 | `-` | Split the focused pane down |
 | `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
 | `z` | Zoom or unzoom the focused pane |
@@ -313,16 +313,28 @@ Kiwa remembers it across restarts and collapse/expand. The default is 26
 columns, with at least 12 for the sidebar and 20 for the panes when expanded.
 A narrow client temporarily clamps the width without changing the saved choice.
 
+The sidebar's **menu** opens **Show keybindings**, **Reload config**, and
+**Detach**. Keybindings reflect the live configuration. Reload success appears
+briefly in the footer; a failed reload shows an error and keeps the old settings.
+Detach leaves the session and its programs running.
+
+When the expanded sidebar has spare room, its lower section shows
+`user@hostname`, the current workspace directory, and its tab and pane counts.
+Click the directory to change it. Details hide in short or crowded sidebars and
+never displace workspace entries. Host information is read at startup; counts
+and directories update on changes without polling.
+
 The tab row above the panes always lists the current workspace's tabs.
+A colored underline separates it from the panes without taking another row.
 A one-line status bar below the panes shows help for prefix, resize,
-navigate, and copy modes. It stays reserved in normal mode, so pressing
+navigate, and copy modes. It stays blank and reserved in normal mode, so pressing
 prefix never resizes a pane. Split panes share a single divider row or
 column, with no outer frame. The outer window
 title is `{hostname}: {workspace}`, and the outer terminal's own title is
 restored on detach.
 
 A workspace is named after its chosen directory. An idle tab shows the focused
-pane's directory name, such as `interview` or `src`. While a foreground program
+pane's directory name, such as `interview` or `src`, and `~` in the home directory. While a foreground program
 runs, it shows `program · directory`, such as `vim · src` or `codex · interview`.
 Switching pane focus updates the tab to describe that pane. Long names are
 clipped with an ellipsis while the tab number remains visible.
@@ -333,6 +345,10 @@ polled. A manual name always takes priority. The rename dialog supports typing,
 paste, `backspace`, `ctrl+u` to clear, `left`/`right`/`home`/`end` to move,
 `enter` to save, and `esc` or a click outside to cancel. Saving an empty name
 restores automatic naming for a tab or the directory name for a workspace.
+
+Unseen tabs show an activity dot after output, or `!` after a bell. Viewing a
+tab clears its marker. Returning to a workspace clears only the visible tab;
+markers on its other tabs remain until those tabs are viewed.
 
 A pane closes when its program exits. The last pane of a tab closes the
 tab, the last tab closes the workspace, and the last workspace stops the

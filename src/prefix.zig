@@ -37,6 +37,7 @@ pub const Action = union(enum) {
     prev_pane,
     rotate_panes,
     copy_mode,
+    reload_config,
     navigate,
     toggle_sidebar,
     help,
@@ -165,10 +166,11 @@ const direct_bindings = [_]Binding{
 /// In key help order.
 const bindings: []const Binding = &[_]Binding{
     .doc(.char('c'), .new_tab, "new tab"),
-    .{ .trigger = .char('|'), .action = .{ .split = .right }, .help = .{ .keys = "| / v", .text = "split right" } },
+    .{ .trigger = .char('|'), .action = .{ .split = .right }, .help = .{ .keys = "\\ / | / v", .text = "vsplit (left/right)" } },
     .{ .trigger = .char('v'), .action = .{ .split = .right } },
+    .{ .trigger = .char('\\'), .action = .{ .split = .right } },
     .{ .trigger = .shifted('\\'), .action = .{ .split = .right } },
-    .doc(.char('-'), .{ .split = .down }, "split down"),
+    .doc(.char('-'), .{ .split = .down }, "hsplit (top/bottom)"),
 } ++ focusBindings() ++ &[_]Binding{
     .doc(.char('z'), .zoom, "zoom the pane"),
     .doc(.char('x'), .close_pane, "close the pane"),
@@ -507,6 +509,7 @@ test "digits pick tabs and shifted digits no longer pick workspaces" {
 }
 
 test "direct shortcuts work in legacy and kitty encodings" {
+    try expectRun("\x02\\\x02\x1b[92u", &.{}, &.{ .{ .split = .right }, .{ .split = .right } });
     try expectRun("\x1bh\x1bl\x1bj\x1bk\x1bz\x1bo\x1b\x0a\x1b\x0b", &.{}, &.{ .prev_tab, .next_tab, .next_pane, .prev_pane, .zoom, .rotate_panes, .next_workspace, .prev_workspace });
     try expectRun("\x1b[106;7u\x1b[107;7u\x1b[106;3u", &.{}, &.{ .next_workspace, .prev_workspace, .next_pane });
     try expectRun("\x02|\x02\x1b[92;2u\x02d", &.{}, &.{ .{ .split = .right }, .{ .split = .right }, .detach });
@@ -594,7 +597,7 @@ test "the sidebar toggle and resize mode are prefix keys" {
 
 test "key help describes every action" {
     for (std.meta.tags(std.meta.Tag(Action))) |tag| {
-        if (tag == .resize) continue;
+        if (tag == .resize or tag == .reload_config) continue;
         for (bindings ++ direct_bindings) |b| {
             if (b.action == tag) break;
         } else {

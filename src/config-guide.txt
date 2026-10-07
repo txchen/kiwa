@@ -55,7 +55,7 @@ split_right, split_down, focus_left, focus_right, focus_up, focus_down,
 next_pane, prev_pane, close_pane, rotate_panes, zoom, resize_mode,
 new_workspace, close_workspace, rename_workspace, next_workspace,
 prev_workspace, change_workspace_directory, navigate, toggle_sidebar,
-copy_mode, help, detach.
+copy_mode, help, reload_config, detach.
 "none" disables the chord. Closing actions retain their usual confirmation.
 
 [ui]

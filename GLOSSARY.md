@@ -81,7 +81,7 @@ program added while it runs. A renamed tab has a fixed name.
 _Avoid_: auto title, default name
 
 **Activity marker**:
-A sidebar mark on a workspace that produced output or a bell while the user
+A mark on a workspace or tab that produced output or a bell while the user
 was not viewing it.
 _Avoid_: badge, notification, agent state
 

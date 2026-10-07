@@ -35,6 +35,7 @@ pub const Tab = struct {
     layout: layout.Layout,
     focused: PaneId,
     zoomed: bool = false,
+    activity: Activity = .none,
     /// When the dynamic name was last checked, and whether a check waits.
     name_check: names.Limiter = .{},
 };
@@ -276,6 +277,7 @@ pub const Session = struct {
         const id = ws.tabs.items[index].id;
         if (id == ws.active) return false;
         ws.active = id;
+        ws.activeTab().activity = .none;
         return true;
     }
 
@@ -328,6 +330,7 @@ pub const Session = struct {
         if (ws.id == s.active) return false;
         s.active = ws.id;
         ws.activity = .none;
+        ws.activeTab().activity = .none;
         return true;
     }
 
@@ -375,15 +378,21 @@ pub const Session = struct {
         return s.dropWorkspace(ws);
     }
 
-    /// Records output in `pane`. Marks its workspace unless the user is
-    /// viewing it. Returns whether the marker changed.
+    /// Records output in an unseen tab and, if hidden, its workspace.
+    /// Returns whether either activity marker changed.
     pub fn noteOutput(s: *Session, pane: PaneId, bell: bool) bool {
         const ws = s.workspaceOf(pane) orelse return false;
-        if (ws.id == s.active) return false;
-        const next: Activity = if (bell) .bell else if (ws.activity == .bell) .bell else .output;
-        if (next == ws.activity) return false;
-        ws.activity = next;
-        return true;
+        const t = s.tabOf(pane) orelse return false;
+        if (ws.id == s.active and ws.active == t.id) return false;
+        const next: Activity = if (bell or t.activity == .bell) .bell else .output;
+        var changed = next != t.activity;
+        t.activity = next;
+        if (ws.id != s.active) {
+            const ws_next: Activity = if (bell or ws.activity == .bell) .bell else .output;
+            changed = changed or ws_next != ws.activity;
+            ws.activity = ws_next;
+        }
+        return changed;
     }
 
     fn workspaceOf(s: *const Session, pane: PaneId) ?*Workspace {
@@ -421,6 +430,7 @@ pub const Session = struct {
         const i = std.mem.indexOfScalar(*Tab, ws.tabs.items, t).?;
         _ = ws.tabs.orderedRemove(i);
         if (ws.active == t.id) ws.active = ws.tabs.items[@min(i, ws.tabs.items.len - 1)].id;
+        if (ws.id == s.active) ws.activeTab().activity = .none;
         s.destroyTab(t);
         return .tab;
     }
@@ -435,6 +445,7 @@ pub const Session = struct {
             const next = s.workspaces.items[@min(i, s.workspaces.items.len - 1)];
             s.active = next.id;
             next.activity = .none;
+            next.activeTab().activity = .none;
         }
         return .workspace;
     }
@@ -650,7 +661,7 @@ test "only the visible tab is placed, and a zoomed pane fills the area" {
     try testing.expectEqualSlices(Placement, &.{.{ .pane = lone, .box = screen, .inner = screen }}, placed.items);
 }
 
-test "output marks only other workspaces, a bell outranks output, and viewing clears it" {
+test "output marks unseen tabs and workspaces, bells outrank output, and viewing clears each tab" {
     var s: Session = .init(testing.allocator, "sh");
     defer s.deinit();
     const a = try s.newWorkspace("/one");
@@ -658,7 +669,7 @@ test "output marks only other workspaces, a bell outranks output, and viewing cl
     const b = try s.newWorkspace("/two");
     try testing.expect(!s.noteOutput(b, false));
     try testing.expect(s.noteOutput(a, false));
-    try testing.expect(!s.noteOutput(hidden_tab, false));
+    try testing.expect(s.noteOutput(hidden_tab, false));
     try testing.expect(s.noteOutput(hidden_tab, true));
     try testing.expect(!s.noteOutput(a, false));
     try expectList(&s,
@@ -671,6 +682,13 @@ test "output marks only other workspaces, a bell outranks output, and viewing cl
     );
     try testing.expect(s.selectWorkspace(0));
     try testing.expectEqual(.none, s.activeWorkspace().activity);
+    try testing.expectEqual(.none, s.activeTab().activity);
+    try testing.expectEqual(.output, s.tabOf(a).?.activity);
+    try testing.expect(s.noteOutput(a, true));
+    try testing.expectEqual(.bell, s.tabOf(a).?.activity);
+    try testing.expectEqual(.none, s.activeWorkspace().activity);
+    try testing.expect(s.selectTab(0));
+    try testing.expectEqual(.none, s.activeTab().activity);
     try testing.expect(!s.noteOutput(a, true));
 }
 

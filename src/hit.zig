@@ -15,6 +15,8 @@ pub const Target = union(enum) {
     /// An index into the sidebar's workspaces.
     sidebar_workspace: usize,
     sidebar_new,
+    application_menu,
+    workspace_directory,
     sidebar_toggle,
     sidebar_resize,
     /// An index into the tab row's tabs.
@@ -54,6 +56,8 @@ pub fn at(s: Scene, x: u16, y: u16) Target {
         .none => .none,
         .workspace => |i| .{ .sidebar_workspace = i },
         .new_workspace => .sidebar_new,
+        .application_menu => .application_menu,
+        .workspace_directory => .workspace_directory,
         .toggle_sidebar => .sidebar_toggle,
         .resize_sidebar => .sidebar_resize,
         .tab => |i| .{ .tab = i },

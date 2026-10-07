@@ -17,6 +17,7 @@ pub const Dialog = union(enum) {
     rename: Rename,
     confirm: Confirm,
     directory: Directory,
+    message: Message,
 
     /// What an input event did to the dialog.
     pub const Outcome = enum {
@@ -33,6 +34,10 @@ pub const Dialog = union(enum) {
 
     pub fn feed(d: *Dialog, ev: input.Event) Outcome {
         return switch (d.*) {
+            .message => switch (ev) {
+                .key => |k| if (k.action != .release and (k.code == .named and (k.code.named == .enter or k.code.named == .escape))) .cancel else .none,
+                else => .none,
+            },
             .rename => |*r| r.feed(ev),
             .directory => |*d_| d_.feed(ev),
             .confirm => switch (ev) {
@@ -44,6 +49,7 @@ pub const Dialog = union(enum) {
 
     pub fn box(d: *const Dialog, area: Rect) Rect {
         return switch (d.*) {
+            .message => centered(area, 72, 7),
             .rename => centered(area, rename_cols, 4),
             .directory => centered(area, 72, 6),
             .confirm => |*c| blk: {
@@ -64,6 +70,22 @@ pub const Dialog = union(enum) {
         const top = f.rowMut(b.y)[b.x..][0..b.cols];
         const inner = b.cols - 4;
         switch (d.*) {
+            .message => |*m| {
+                _ = chrome.put(top[0 .. top.len - 1], 2, " Reload config failed ", chrome.box_border);
+                var offset: usize = 0;
+                var y = b.y + 1;
+                while (offset < m.len and y < b.y + b.rows - 2) : (y += 1) {
+                    var end = @min(m.len, offset + inner);
+                    if (end < m.len) if (std.mem.lastIndexOfScalar(u8, m.text[offset..end], ' ')) |space| {
+                        if (space > 0) end = offset + space;
+                    };
+                    _ = chrome.put(f.rowMut(y)[b.x + 2 ..][0..inner], 0, m.text[offset..end], .{});
+                    offset = end;
+                    while (offset < m.len and m.text[offset] == ' ') offset += 1;
+                }
+                _ = chrome.put(f.rowMut(b.y + b.rows - 2)[b.x + 2 ..][0..inner], 0, "enter / esc close", hint);
+                return hidden;
+            },
             .rename => |*r| {
                 _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), chrome.box_border);
                 _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
@@ -345,3 +367,5 @@ test "a close confirmation names what runs; y confirms, and n or esc cancels" {
     const long: Confirm = .init(.{ .workspace = @enumFromInt(1) }, "a-very-long-command-name");
     try testing.expectEqualStrings("close workspace? a-very-long-comm is running", long.message(&buf));
 }
+
+pub const Message = struct { text: [256]u8 = undefined, len: usize = 0 };

@@ -14,6 +14,7 @@ const Rect = frame_mod.Rect;
 
 /// What a menu acts on. Indexes are positions in the sidebar and the tab row.
 pub const Subject = union(enum) {
+    application,
     workspace: usize,
     tab: usize,
     pane: PaneId,
@@ -32,6 +33,11 @@ pub const Item = struct {
 };
 
 pub const tables = std.EnumArray(std.meta.Tag(Subject), []const Item).init(.{
+    .application = &.{
+        .{ .label = "Show keybindings", .action = .help },
+        .{ .label = "Reload config", .action = .reload_config },
+        .{ .label = "Detach", .action = .detach },
+    },
     .workspace = &.{
         .{ .label = "Rename", .action = .rename_workspace },
         .{ .label = "Change directory", .action = .change_workspace_directory },
@@ -139,6 +145,7 @@ test "every subject has a table: rename and close a workspace or tab; rename, sp
         }
     };
     for ([_]struct { Subject, []const u8 }{
+        .{ .application, "Show keybindings,Reload config,Detach," },
         .{ .{ .workspace = 0 }, "Rename,Change directory,Close," },
         .{ .{ .tab = 0 }, "New tab,Rename,Close," },
         .{ pane(1), "Rename tab,Split right,Split down,Zoom,Close pane," },
