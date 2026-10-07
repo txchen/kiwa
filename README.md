@@ -94,6 +94,7 @@ The default prefix is `Ctrl+b`. Release it, then press the next key. Press `Ctrl
 | `prefix v` / `prefix -` | Split right / down |
 | `prefix h/j/k/l` or arrows | Focus a pane by direction |
 | `prefix z` | Zoom or unzoom a pane |
+| `prefix f` | Toggle between compact and framed pane styles |
 | `prefix x` | Close a pane |
 | `prefix Shift+n` | New workspace |
 | `prefix w` | Navigate the workspace sidebar |

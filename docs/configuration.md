@@ -119,14 +119,11 @@ Dragging still works with an explicit width, but the next reload or startup reap
 ```toml
 [ui]
 pane_style = "framed"
-
-[bindings]
-"prefix+f" = "toggle_pane_style"
 ```
 
 Compact is the default and uses single internal dividers. Framed draws an independent one-cell border around each pane, with a one-cell blank gutter between frames. Only the focused pane's frame is highlighted. Single panes and zoomed panes have no border or gutter. A zoomed tab shows `[Z]` after its name, even when the name is truncated.
 
-The style applies to all tabs in the server. Toggling keeps panes, running programs, focus, and split ratios intact, while resizing pane content. `toggle_pane_style` has no default binding.
+The style applies to all tabs in the server. Toggling keeps panes, running programs, focus, and split ratios intact, while resizing pane content. `prefix+f` toggles the pane style by default. Override or disable it under `[bindings]`.
 
 The runtime toggle survives detach and attach. It does not modify the configuration file or survive a server restart. A successful reload reasserts the file's style, or compact when omitted. A failed reload leaves the live style unchanged.
 

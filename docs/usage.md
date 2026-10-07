@@ -25,6 +25,7 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `-` | Split the focused pane down |
 | `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
 | `z` | Zoom or unzoom the focused pane |
+| `f` | Toggle between compact and framed pane styles |
 | `x` | Close the focused pane |
 | `r` | Resize mode: `h/j/k/l` or arrows move the divider, `esc` or `enter` leaves |
 | `n` / `p`, `1..9` | Next / previous tab, tab by number |

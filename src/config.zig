@@ -138,14 +138,24 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
     return out;
 }
 
-test "pane styles are typed, optional, unique, and bindable without a default key" {
+test "pane styles are typed, optional, unique, and the default toggle can be overridden or disabled" {
     var line: usize = 0;
-    try std.testing.expectEqual(.compact, (try parse("", &line)).pane_style);
+    const defaults = try parse("", &line);
+    try std.testing.expectEqual(.compact, defaults.pane_style);
+    try std.testing.expectEqualDeep(prefix.Action.toggle_pane_style, defaults.keys.lookup(.typed('f'), true).?);
     try std.testing.expectEqual(.compact, (try parse("[ui]\npane_style = 'compact'", &line)).pane_style);
-    const c = try parse("[ui]\npane_style = 'framed'\n[bindings]\n'prefix+f' = 'toggle_pane_style'", &line);
+    const c = try parse("[ui]\npane_style = 'framed'\n[bindings]\n'prefix+f' = 'new_tab'", &line);
     try std.testing.expectEqual(.framed, c.pane_style);
-    try std.testing.expectEqualDeep(prefix.Action.toggle_pane_style, c.keys.lookup(.typed('f'), true).?);
-    try std.testing.expect((Config{}).keys.lookup(.typed('f'), true) == null);
+    try std.testing.expectEqualDeep(prefix.Action.new_tab, c.keys.lookup(.typed('f'), true).?);
+    const prefix_key: @import("input.zig").Event = .{ .key = .{ .code = .{ .char = 'b' }, .mods = .{ .ctrl = true } } };
+    var overridden: prefix.Prefix = .{ .keymap = c.keys };
+    _ = overridden.feed(prefix_key);
+    try std.testing.expectEqualDeep(prefix.Outcome{ .action = .new_tab }, overridden.feed(.{ .key = .typed('f') }));
+    const disabled = try parse("[bindings]\n'prefix+f' = 'none'", &line);
+    try std.testing.expect(disabled.keys.lookup(.typed('f'), true) == null);
+    var unbound: prefix.Prefix = .{ .keymap = disabled.keys };
+    _ = unbound.feed(prefix_key);
+    try std.testing.expectEqualDeep(prefix.Outcome.none, unbound.feed(.{ .key = .typed('f') }));
     try std.testing.expectError(error.InvalidPaneStyle, parse("[ui]\npane_style = 'Frame'", &line));
     try std.testing.expectError(error.ExpectedQuotedString, parse("[ui]\npane_style = 1", &line));
     try std.testing.expectError(error.DuplicateSetting, parse("[ui]\npane_style = 'framed'\npane_style = 'compact'", &line));

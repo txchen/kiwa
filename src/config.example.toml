@@ -12,7 +12,7 @@
 [bindings]
 # Bindings override individual keys; other default bindings remain available.
 # "prefix+v" = "split_right"
-# "prefix+f" = "toggle_pane_style" # No default key.
+# "prefix+f" = "none" # Disable the default pane-style toggle.
 # "prefix+-" = "split_down"
 # "alt+h" = "prev_tab"
 # "ctrl+alt+j" = "next_workspace"

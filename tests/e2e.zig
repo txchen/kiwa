@@ -2274,8 +2274,7 @@ fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = text });
 }
 
-const style_binding = "[bindings]\n'prefix+f' = 'toggle_pane_style'\n";
-const framed_config = style_binding ++ "[ui]\npane_style = 'framed'\n";
+const framed_config = "[ui]\npane_style = 'framed'\n";
 const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 22 };
 const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 22 };
 const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 10 };
@@ -2308,8 +2307,6 @@ fn waitFrames(o: *Outer, boxes: []const Box) !void {
 
 fn paneStyleLifecycle(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    try paneStyleConfig(ctx, style_binding);
-    try expect(try ctx.run("reload-config") == 0, "style binding reloads");
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("echo $$ > pane.pid; export PANE_TOKEN=kept; printf '\\033[41m\\033[2J\\033[H'; echo PAINT-$((40+2))\r");
@@ -2329,7 +2326,7 @@ fn paneStyleLifecycle(ctx: *Ctx) !void {
     try paneStyleConfig(ctx, "[ui]\npane_style = 'compact'\n[bindings]\n'prefix+f' = 'invalid'\n");
     try expect(try ctx.run("reload-config") == 2, "invalid reload fails atomically");
     try waitFrames(o, &.{ framed_left, framed_right });
-    try paneStyleConfig(ctx, style_binding);
+    try paneStyleConfig(ctx, "");
     try prefixed(o, "d");
     try expect(try o.waitExit() == 0, "detach succeeds");
     const again = try ctx.attach();
@@ -2430,8 +2427,6 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
 
 fn paneStyleZoomMarker(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    try paneStyleConfig(ctx, style_binding);
-    try expect(try ctx.run("reload-config") == 0, "style binding reloads");
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try prefixed(o, "T");

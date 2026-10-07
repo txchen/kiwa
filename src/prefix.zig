@@ -174,6 +174,7 @@ const bindings: []const Binding = &[_]Binding{
     .doc(.char('-'), .{ .split = .down }, "hsplit (top/bottom)"),
 } ++ focusBindings() ++ &[_]Binding{
     .doc(.char('z'), .zoom, "zoom the pane"),
+    .doc(.char('f'), .toggle_pane_style, "toggle pane style"),
     .doc(.char('x'), .close_pane, "close the pane"),
     .doc(.char('r'), .resize_mode, "resize mode"),
     .doc(.char('n'), .next_tab, "next tab"),
@@ -516,6 +517,10 @@ test "direct shortcuts work in legacy and kitty encodings" {
     try expectRun("\x02|\x02\x1b[92;2u\x02d", &.{}, &.{ .{ .split = .right }, .{ .split = .right }, .detach });
 }
 
+test "prefix f toggles pane style by default" {
+    try expectRun("\x02f\x02\x1b[102u", &.{}, &.{ .toggle_pane_style, .toggle_pane_style });
+}
+
 test "resize mode repeats resize keys until esc or enter, and drops other keys" {
     try expectRun("\x02rhl\x1b[Aaj\rx", &.{typed('x')}, &.{ .resize_mode, .{ .resize = .left }, .{ .resize = .right }, .{ .resize = .up }, .{ .resize = .down } });
     try expectRun("\x02rh\rh\x02rk\x02q", &.{typed('h')}, &.{ .resize_mode, .{ .resize = .left }, .resize_mode, .{ .resize = .up }, .detach });
@@ -598,7 +603,7 @@ test "the sidebar toggle and resize mode are prefix keys" {
 
 test "key help describes every action" {
     for (std.meta.tags(std.meta.Tag(Action))) |tag| {
-        if (tag == .resize or tag == .reload_config or tag == .toggle_pane_style) continue;
+        if (tag == .resize or tag == .reload_config) continue;
         for (bindings ++ direct_bindings) |b| {
             if (b.action == tag) break;
         } else {
@@ -609,8 +614,10 @@ test "key help describes every action" {
     try testing.expectEqualStrings("c", help[0].keys);
     try testing.expectEqualStrings("new tab", help[0].text);
     for (help) |h| try testing.expect(!std.mem.eql(u8, h.keys, "j"));
-    try testing.expectEqualStrings("shift+t", help[10].keys);
-    try testing.expectEqualStrings("shift+x", help[11].keys);
+    try testing.expectEqualStrings("f", help[5].keys);
+    try testing.expectEqualStrings("toggle pane style", help[5].text);
+    try testing.expectEqualStrings("shift+t", help[11].keys);
+    try testing.expectEqualStrings("shift+x", help[12].keys);
     try testing.expectEqualStrings("ctrl+b", help[help.len - 1].keys);
 }
 
