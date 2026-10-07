@@ -57,6 +57,7 @@ pub const Pane = struct {
 
     pub const SpawnOptions = struct {
         id: PaneId,
+        scrollback: u32 = scrollback_lines,
         size: protocol.Size,
         shell: [:0]const u8,
         cwd: [:0]const u8,
@@ -75,7 +76,7 @@ pub const Pane = struct {
                 .cols = opts.size.cols,
                 .rows = opts.size.rows,
                 .max_scrollback_bytes = null,
-                .max_scrollback_lines = scrollback_lines,
+                .max_scrollback_lines = opts.scrollback,
             }),
             .stream = undefined,
             .start_dir = &.{},

@@ -1,0 +1,73 @@
+Kiwa configuration
+
+Location: $XDG_CONFIG_HOME/kiwa/config.toml, or ~/.config/kiwa/config.toml.
+An empty or relative XDG_CONFIG_HOME is ignored; HOME must be absolute.
+Run `kiwa config path` for the resolved path. The first interactive startup
+creates a commented example if absent. Existing files are never overwritten.
+Missing files and omitted settings use built-in defaults; there is no need
+to copy all defaults. Removing an override restores its default on reload.
+
+Workflow for humans and agents:
+1. Read the existing file and preserve unrelated settings and comments.
+2. Edit only the requested settings using the reference below.
+3. Run `kiwa config check`. Fix any reported error before continuing.
+4. Run `kiwa reload-config`. It applies the server's own config file without
+   restarting panes. A missing server is an error, not a request to start one.
+   The command reports the path it loaded. With KIWA_SOCKET, check that this
+   is the intended server and config path.
+
+Reload is explicit; saving alone does not apply changes. Parsing and validation
+finish before any settings change. Invalid configuration returns a nonzero exit
+status and keeps the previous live settings. No config-file polling is used.
+
+Syntax: a small TOML subset. Use the tables below, one assignment per line,
+single- or double-quoted single-line strings without escapes, and unsigned
+plain decimal integers. Blank lines and # comments outside strings are allowed.
+Arrays, inline tables, multiline/escaped strings, dotted keys, and additional
+settings are not supported. Unknown tables, keys, actions, duplicate settings,
+and duplicate bindings are errors. Files are limited to 64 KiB and 96 bindings.
+
+[keys]
+prefix = "ctrl+b"
+Changes the prefix immediately. Press it twice to send it to the pane.
+
+[bindings]
+"prefix+v" = "split_right"
+"alt+h" = "prev_tab"
+"prefix+x" = "none"
+Each entry overrides just that chord. Other default keys still work. To move
+an action, disable its old keys with "none" and bind the new key. Prefix means
+the configured prefix followed by a key; without it the shortcut is direct.
+Mode-specific selection, resize, navigation, and dialog keys stay unchanged.
+Use `kiwa config bindings` to see effective shortcuts from the file.
+
+Keys: printable ASCII characters, space, plus, or named keys such as escape,
+enter, tab, backspace, arrow_left/right/up/down, page_up/down, home, end, f1..f12.
+Modifiers: ctrl+, alt+, shift+ (combinable). Uppercase letters mean shift plus
+the lowercase letter. Some combinations require the outer terminal's extended
+keyboard protocol; choose keys your terminal can distinguish. The prefix key
+is reserved and cannot also trigger an action. Use a modified key as prefix
+so ordinary typing remains available.
+
+Actions:
+new_tab, close_tab, rename_tab, next_tab, prev_tab, tab_1 through tab_9,
+split_right, split_down, focus_left, focus_right, focus_up, focus_down,
+next_pane, prev_pane, close_pane, rotate_panes, zoom, resize_mode,
+new_workspace, close_workspace, rename_workspace, next_workspace,
+prev_workspace, navigate, toggle_sidebar, copy_mode, help, detach.
+"none" disables the chord. Closing actions retain their usual confirmation.
+
+[ui]
+sidebar_width = 26
+Range: 12..200 columns. An explicit value applies on startup and reload.
+When omitted, the saved width from mouse dragging is preserved (26 initially).
+Dragging still works with an override, until the next reload/startup reapplies
+it. Narrow terminals clamp or collapse the sidebar to leave room for panes.
+
+[terminal]
+scrollback_lines = 50000
+Range: 0..1000000. Applies to panes created after loading, including restored
+panes after restart. Existing pane histories and limits remain unchanged.
+
+Upgrading the executable itself still requires restarting the old server.
+Config reload cannot replace running program code.

@@ -10,9 +10,9 @@
 const std = @import("std");
 
 /// `protocol_skew` is nonzero only in the e2e step's skewed build.
-pub const version: u16 = 3 + @import("build_options").protocol_skew;
+pub const version: u16 = 4 + @import("build_options").protocol_skew;
 /// Wyhash of `sample`'s encoding.
-const encoding_hash: u64 = 0x146e0354abd18a15;
+const encoding_hash: u64 = 0xbb762eb5436ebb27;
 
 /// A frame larger than this is a protocol error, not a big message.
 pub const max_frame_len: u32 = 16 * 1024 * 1024;
@@ -20,7 +20,7 @@ pub const header_len = 5;
 
 /// Values are never reused, so that an old peer cannot mistake a new
 /// message for another one. 4 was `kill`.
-pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, list = 5, stats = 6, text = 7, _ };
+pub const Tag = enum(u8) { hello = 1, resize = 2, detach = 3, list = 5, stats = 6, text = 7, reload_config = 8, _ };
 
 /// How the reason of a server's detach for a hello of another version
 /// starts. Frozen with the handshake.
@@ -41,6 +41,7 @@ pub const Message = union(enum) {
     list,
     /// Asks for the server's debug counters, answered like `list`.
     stats,
+    reload_config,
     text: []const u8,
 };
 
@@ -49,7 +50,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .hello => |h| 6 + h.cwd.len,
         .detach, .text => |b| b.len,
         .resize => 4,
-        .list, .stats => 0,
+        .list, .stats, .reload_config => 0,
     };
     try w.writeInt(u32, @intCast(1 + payload_len), .little);
     try w.writeByte(@intFromEnum(@as(Tag, switch (msg) {
@@ -58,6 +59,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .detach => .detach,
         .list => .list,
         .stats => .stats,
+        .reload_config => .reload_config,
         .text => .text,
     })));
     switch (msg) {
@@ -68,7 +70,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         },
         .detach, .text => |b| try w.writeAll(b),
         .resize => |s| try writeSize(w, s),
-        .list, .stats => {},
+        .list, .stats, .reload_config => {},
     }
 }
 
@@ -115,6 +117,7 @@ pub fn parse(frame: []const u8) DecodeError!Message {
         .detach => .{ .detach = payload },
         .list => .list,
         .stats => .stats,
+        .reload_config => .reload_config,
         .text => .{ .text = payload },
         _ => error.UnknownTag,
     };
@@ -175,7 +178,7 @@ fn expectMessage(expected: Message, actual: Message) !void {
         .detach => |b| try testing.expectEqualStrings(b, actual.detach),
         .text => |b| try testing.expectEqualStrings(b, actual.text),
         .resize => |s| try testing.expectEqual(s, actual.resize),
-        .list, .stats => {},
+        .list, .stats, .reload_config => {},
     }
 }
 
@@ -187,6 +190,7 @@ const sample = [_]Message{
     .{ .detach = "attached elsewhere" },
     .list,
     .stats,
+    .reload_config,
     .{ .text = "main\n  1 sh\n" },
     .{ .detach = "" },
 };

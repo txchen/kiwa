@@ -19,6 +19,47 @@ the release's `SHA256SUMS`, and installs `kiwa` to `~/.local/bin`. Set
 `0.1.0`) to pin a release. After an upgrade, run `kiwa kill-server` to
 move the running server onto the new version; the layout is restored.
 
+## Configuration
+
+No configuration is required. On first startup Kiwa creates a commented
+example at `$XDG_CONFIG_HOME/kiwa/config.toml`, falling back to
+`~/.config/kiwa/config.toml`. Existing files are never overwritten; omitted
+settings continue to use the built-in defaults of the installed version.
+
+```sh
+kiwa config path       # locate the configuration file
+kiwa config guide      # bundled reference, examples, and agent workflow
+kiwa config bindings   # effective bindings computed from the file
+kiwa config check      # validate without applying
+kiwa reload-config     # apply to the running server without restarting panes
+```
+
+Configuration supports the prefix key, individual action bindings, sidebar
+width, and scrollback limits for new panes. For example:
+
+```toml
+[keys]
+prefix = "ctrl+a"
+
+[bindings]
+"prefix+v" = "split_right"
+"alt+h" = "none" # let the pane receive this shortcut
+
+[ui]
+sidebar_width = 30
+```
+
+Save, check, then reload. Invalid configuration reports a line number and
+leaves all live settings unchanged. Reload does not restart pane programs.
+An explicit sidebar width applies on startup and reload; without one, the
+saved width from dragging is preserved. Scrollback changes affect new panes
+only. Saving alone does not trigger reload or background polling.
+
+The generated file points humans and agents to the version-matched CLI
+reference. No agent plugin, skill installation, or network access is needed.
+The parser accepts a documented TOML subset; run `kiwa config guide` for
+supported syntax and the complete action list.
+
 ## Build
 
 Zig is pinned in `mise.toml`. Run every command through mise:

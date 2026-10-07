@@ -246,15 +246,29 @@ pub fn print(gpa: std.mem.Allocator, paths: paths_mod.Paths, request: protocol.M
     var decoder: protocol.Decoder = .{};
     defer decoder.deinit(gpa);
     var buf: [64 * 1024]u8 = undefined;
+    var answered = false;
     while (true) {
         const n = sys.read(sock, &buf) catch |e| switch (e) {
             error.ConnectionReset => 0,
             else => return e,
         };
-        if (n == 0) return 0;
+        if (n == 0) {
+            if (request == .reload_config and !answered) {
+                try printErr("kiwa: server did not answer reload-config; it may need upgrading\n");
+                return 1;
+            }
+            return 0;
+        }
         try decoder.feed(gpa, buf[0..n]);
         while (try decoder.next()) |m| switch (m) {
-            .text => |text| try sys.writeAll(1, text),
+            .text => |text| {
+                answered = true;
+                if (request == .reload_config and std.mem.startsWith(u8, text, "error:")) {
+                    try sys.writeAll(2, text);
+                    return 2;
+                }
+                try sys.writeAll(1, text);
+            },
             else => return error.UnexpectedMessage,
         };
     }

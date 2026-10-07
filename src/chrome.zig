@@ -50,6 +50,7 @@ pub const View = struct {
     /// The active workspace's tabs.
     tabs: []const Tab,
     mode: Mode = .normal,
+    custom_keys: bool = false,
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
     sidebar_width: u16 = sidebar_cols,
@@ -119,10 +120,10 @@ pub fn draw(f: *Frame, v: View) void {
     @memset(footer, .blank);
     switch (v.mode) {
         .normal, .help => {
-            _ = put(footer, 0, " ctrl+b ? help", dim);
+            _ = put(footer, 0, if (v.custom_keys) " keys: kiwa config bindings" else " ctrl+b ? help", dim);
         },
         .copy => |failed| drawModeBar(footer, " COPY ", if (failed) "copy failed: shorten selection or retry" else "h j k l move  v select  y copy  esc back"),
-        .prefix => drawModeBar(footer, " PREFIX ", "c tab  | split  - split  x close  w navigate  [ copy  ? help"),
+        .prefix => drawModeBar(footer, " PREFIX ", if (v.custom_keys) "custom keys: kiwa config bindings" else "c tab  | split  - split  x close  w navigate  [ copy  ? help"),
         .resize => drawModeBar(footer, " RESIZE ", "h j k l resize  esc done"),
         .navigate => drawModeBar(footer, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back"),
     }
@@ -408,18 +409,22 @@ fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8) void {
 
 /// The key help box, centered over `area`. It lists `prefix.help`.
 pub fn drawHelp(f: *Frame, area: Rect, offset: usize) void {
-    const keys_cols = comptime blk: {
+    drawHelpRows(f, area, offset, prefix.help);
+}
+
+pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const prefix.Help) void {
+    const keys_cols = blk: {
         var w: usize = 0;
-        for (prefix.help) |h| w = @max(w, h.keys.len);
+        for (help_rows) |h| w = @max(w, h.keys.len);
         break :blk w;
     };
-    const text_cols = comptime blk: {
+    const text_cols = blk: {
         var w: usize = 0;
-        for (prefix.help) |h| w = @max(w, h.text.len);
+        for (help_rows) |h| w = @max(w, h.text.len);
         break :blk w;
     };
     const want_cols = 2 + keys_cols + 2 + text_cols + 2;
-    const want_rows = prefix.help.len + 2;
+    const want_rows = help_rows.len + 2;
     const cols: u16 = @intCast(@min(want_cols, area.cols));
     const rows: u16 = @intCast(@min(want_rows, area.rows));
     const box: Rect = .{ .x = area.x + (area.cols - cols) / 2, .y = area.y + (area.rows - rows) / 2, .cols = cols, .rows = rows };
@@ -431,8 +436,8 @@ pub fn drawHelp(f: *Frame, area: Rect, offset: usize) void {
     const bottom = f.rowMut(box.y + box.rows - 1)[box.x..][0..box.cols];
     const close = " j/k scroll  esc close ";
     if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, box_border);
-    const start = @min(offset, prefix.help.len -| (box.rows - 2));
-    for (prefix.help[start..@min(prefix.help.len, start + box.rows - 2)], box.y + 1..) |h, y| {
+    const start = @min(offset, help_rows.len -| (box.rows - 2));
+    for (help_rows[start..@min(help_rows.len, start + box.rows - 2)], box.y + 1..) |h, y| {
         const line = f.rowMut(y)[box.x + 1 ..][0 .. box.cols - 2];
         _ = put(line, 1, h.keys, .{ .flags = .{ .bold = true } });
         _ = put(line, 1 + keys_cols + 2, h.text, plain);

@@ -51,12 +51,30 @@ pub const Nav = union(enum) {
 };
 
 /// A key as a binding names it: its code and its binding modifiers.
-const Trigger = struct {
+pub const Trigger = struct {
     code: input.Key.Code,
     mods: input.Mods = .{},
 
-    fn matches(t: Trigger, k: input.Key) bool {
-        return std.meta.eql(t.code, k.code) and t.mods.eql(k.mods.binding());
+    pub fn matches(t: Trigger, k: input.Key) bool {
+        return t.eql(.{ .code = k.code, .mods = k.mods.binding() });
+    }
+
+    pub fn canonical(t: Trigger) Trigger {
+        var result = t;
+        if (t.mods.shift and t.code == .char) {
+            const base = "`1234567890-=[]\\;',./";
+            const shifted_keys = "~!@#$%^&*()_+{}|:\"<>?";
+            for (base, shifted_keys) |b, shifted_key| if (t.code.char == b) {
+                result.code = .{ .char = shifted_key };
+                result.mods.shift = false;
+                break;
+            };
+        }
+        return result;
+    }
+
+    pub fn eql(a: Trigger, b: Trigger) bool {
+        return std.meta.eql(a.canonical(), b.canonical());
     }
 
     fn char(c: u21) Trigger {
@@ -84,7 +102,7 @@ const Trigger = struct {
     }
 };
 
-const prefix_key: Trigger = .{ .code = .{ .char = 'b' }, .mods = .{ .ctrl = true } };
+const default_prefix_key: Trigger = .{ .code = .{ .char = 'b' }, .mods = .{ .ctrl = true } };
 
 /// One line of key help.
 pub const Help = struct { keys: []const u8, text: []const u8 };
@@ -188,6 +206,107 @@ pub const help: []const Help = blk: {
     break :blk list ++ &[_]Help{.{ .keys = "ctrl+b", .text = "send ctrl+b to the pane" }};
 };
 
+pub const Override = struct {
+    trigger: Trigger,
+    prefixed: bool,
+    action: ?Action,
+};
+
+pub const Keymap = struct {
+    prefix_key: Trigger = default_prefix_key,
+    overrides: [96]Override = undefined,
+    len: usize = 0,
+
+    pub fn lookup(m: *const Keymap, k: input.Key, prefixed: bool) ?Action {
+        for (m.overrides[0..m.len]) |b| {
+            if (b.prefixed == prefixed and b.trigger.matches(k)) return b.action;
+        }
+        const defaults: []const Binding = if (prefixed) bindings else &direct_bindings;
+        for (defaults) |b| if (b.trigger.matches(k)) return b.action;
+        return null;
+    }
+};
+
+pub const HelpList = struct {
+    rows: [160]Help = undefined,
+    labels: [160][80]u8 = undefined,
+    texts: [160][64]u8 = undefined,
+    len: usize = 0,
+
+    pub fn build(h: *HelpList, m: *const Keymap) void {
+        h.len = 0;
+        h.add(m.prefix_key, false, .help);
+        h.rows[0].text = "prefix (press twice to send)";
+        for (m.overrides[0..m.len]) |b| if (b.action) |a| h.add(b.trigger, b.prefixed, a);
+        for (bindings) |b| h.addDefault(m, b, true);
+        for (direct_bindings) |b| h.addDefault(m, b, false);
+    }
+
+    fn addDefault(h: *HelpList, m: *const Keymap, b: Binding, prefixed: bool) void {
+        for (m.overrides[0..m.len]) |o| if (o.prefixed == prefixed and o.trigger.eql(b.trigger)) return;
+        if (m.prefix_key.eql(b.trigger)) return;
+        h.add(b.trigger, prefixed, b.action);
+    }
+
+    fn add(h: *HelpList, t: Trigger, prefixed: bool, a: Action) void {
+        if (h.len == h.rows.len) return;
+        const i = h.len;
+        var keybuf: [16]u8 = undefined;
+        const key = switch (t.code) {
+            .char => |c| if (c == ' ') "space" else std.fmt.bufPrint(&keybuf, "{u}", .{c}) catch unreachable,
+            .named => |n| @tagName(n),
+        };
+        const label = std.fmt.bufPrint(&h.labels[i], "{s}{s}{s}{s}{s}", .{
+            if (prefixed) "prefix+" else "", if (t.mods.ctrl) "ctrl+" else "",
+            if (t.mods.alt) "alt+" else "",  if (t.mods.shift) "shift+" else "",
+            key,
+        }) catch unreachable;
+        const text = switch (a) {
+            .split => |d| std.fmt.bufPrint(&h.texts[i], "split_{t}", .{d}) catch unreachable,
+            .focus => |d| std.fmt.bufPrint(&h.texts[i], "focus_{t}", .{d}) catch unreachable,
+            .resize => |d| std.fmt.bufPrint(&h.texts[i], "resize_{t}", .{d}) catch unreachable,
+            .tab => |n| std.fmt.bufPrint(&h.texts[i], "tab_{d}", .{n + 1}) catch unreachable,
+            else => @tagName(a),
+        };
+        h.rows[i] = .{ .keys = label, .text = text };
+        h.len += 1;
+    }
+};
+
+pub fn actionNamed(name: []const u8) ?Action {
+    inline for (@typeInfo(Action).@"union".fields) |f| {
+        if (f.type == void and std.mem.eql(u8, name, f.name)) return @unionInit(Action, f.name, {});
+    }
+    if (std.mem.eql(u8, name, "split_right")) return .{ .split = .right };
+    if (std.mem.eql(u8, name, "split_down")) return .{ .split = .down };
+    inline for (.{ "left", "right", "up", "down" }) |dir| {
+        if (std.mem.eql(u8, name, "focus_" ++ dir)) return .{ .focus = @field(layout.Dir, dir) };
+    }
+    for (0..9) |i| {
+        if (name.len == 5 and std.mem.startsWith(u8, name, "tab_") and name[4] == '1' + i) return .{ .tab = @intCast(i) };
+    }
+    return null;
+}
+
+pub fn parseTrigger(raw: []const u8) !Trigger {
+    var rest = raw;
+    var mods: input.Mods = .{};
+    while (std.mem.indexOfScalar(u8, rest, '+')) |i| {
+        const mod = rest[0..i];
+        if (std.mem.eql(u8, mod, "ctrl") and !mods.ctrl) mods.ctrl = true else if (std.mem.eql(u8, mod, "alt") and !mods.alt) mods.alt = true else if (std.mem.eql(u8, mod, "shift") and !mods.shift) mods.shift = true else return error.InvalidKey;
+        rest = rest[i + 1 ..];
+    }
+    var code: input.Key.Code = undefined;
+    if (rest.len == 1 and rest[0] >= 33 and rest[0] <= 126) {
+        const ch = rest[0];
+        if (std.ascii.isUpper(ch)) {
+            mods.shift = true;
+        }
+        code = .{ .char = std.ascii.toLower(ch) };
+    } else if (std.mem.eql(u8, rest, "space")) code = .{ .char = ' ' } else if (std.mem.eql(u8, rest, "plus")) code = .{ .char = '+' } else if (std.meta.stringToEnum(input.Named, rest)) |n| code = .{ .named = n } else return error.InvalidKey;
+    return .{ .code = code, .mods = mods };
+}
+
 const resize_mode_exits = [_]Trigger{ .named(.escape), .named(.enter) };
 const navigate_exits = [_]Trigger{ .named(.escape), .char('q') };
 const help_exits = [_]Trigger{ .named(.escape), .char('q'), .char('?'), .shifted('/') };
@@ -207,6 +326,7 @@ pub const Outcome = union(enum) {
 pub const Prefix = struct {
     mode: Mode = .normal,
     help_offset: usize = 0,
+    keymap: Keymap = .{},
 
     pub const Mode = union(enum) { normal, armed, resize, navigate, help, copy, dialog: Dialog };
 
@@ -222,22 +342,27 @@ pub const Prefix = struct {
             .key => |k| {
                 if (k.action == .release) {
                     if (p.mode != .normal) return .none;
-                    for (direct_bindings) |b| if (b.trigger.matches(k)) return .none;
+                    if (p.keymap.lookup(k, false) != null or p.keymap.prefix_key.matches(k)) return .none;
                     return .{ .pane = ev };
                 }
                 return switch (p.mode) {
                     .normal => {
-                        for (direct_bindings) |b| if (b.trigger.matches(k)) return .{ .action = b.action };
-                        if (!prefix_key.matches(k)) return .{ .pane = ev };
-                        p.mode = .armed;
-                        return .none;
+                        if (p.keymap.prefix_key.matches(k)) {
+                            p.mode = .armed;
+                            return .none;
+                        }
+                        if (p.keymap.lookup(k, false)) |a| return p.activate(a);
+                        return .{ .pane = ev };
                     },
                     .armed => p.afterPrefix(ev, k),
                     .resize => p.inResize(k),
                     .navigate => p.inNavigate(k),
                     .help => blk: {
                         if (Trigger.anyOf(&.{ .char('j'), .named(.arrow_down), .named(.page_down) }, k)) {
-                            p.help_offset = @min(p.help_offset + 1, help.len - 1);
+                            var rows: HelpList = .{};
+                            rows.build(&p.keymap);
+                            const count = if (p.keymap.len == 0 and p.keymap.prefix_key.eql(default_prefix_key)) help.len else rows.len;
+                            p.help_offset = @min(p.help_offset + 1, count -| 1);
                             break :blk .none;
                         }
                         if (Trigger.anyOf(&.{ .char('k'), .named(.arrow_up), .named(.page_up) }, k)) {
@@ -246,7 +371,7 @@ pub const Prefix = struct {
                         }
                         break :blk p.inMode(k, &help_exits);
                     },
-                    .copy => if (prefix_key.matches(k)) blk: {
+                    .copy => if (p.keymap.prefix_key.matches(k)) blk: {
                         p.mode = .armed;
                         break :blk .none;
                     } else .{ .copy_key = k },
@@ -264,26 +389,28 @@ pub const Prefix = struct {
 
     fn afterPrefix(p: *Prefix, ev: input.Event, k: input.Key) Outcome {
         p.mode = .normal;
-        if (prefix_key.matches(k)) return .{ .pane = ev };
-        for (bindings) |b| if (b.trigger.matches(k)) {
-            if (b.action == .help) p.help_offset = 0;
-            p.mode = switch (b.action) {
-                .resize_mode => .resize,
-                .navigate => .navigate,
-                .help => .help,
-                .copy_mode => .copy,
-                else => .normal,
-            };
-            return .{ .action = b.action };
-        };
+        if (p.keymap.prefix_key.matches(k)) return .{ .pane = ev };
+        if (p.keymap.lookup(k, true)) |action| return p.activate(action);
         return .none;
+    }
+
+    fn activate(p: *Prefix, action: Action) Outcome {
+        if (action == .help) p.help_offset = 0;
+        p.mode = switch (action) {
+            .resize_mode => .resize,
+            .navigate => .navigate,
+            .help => .help,
+            .copy_mode => .copy,
+            else => .normal,
+        };
+        return .{ .action = action };
     }
 
     /// Modes drop keys they do not bind, so a mistyped key cannot reach
     /// the pane. The prefix key leaves the mode and arms the prefix.
     fn inMode(p: *Prefix, k: input.Key, exits: []const Trigger) Outcome {
         if (Trigger.anyOf(exits, k)) p.mode = .normal;
-        if (prefix_key.matches(k)) p.mode = .armed;
+        if (p.keymap.prefix_key.matches(k)) p.mode = .armed;
         return .none;
     }
 
@@ -493,4 +620,24 @@ test "direct shortcut releases are consumed and copy mode owns keys and pastes" 
     _ = p.feed(ctrl_b);
     try testing.expect(p.mode == .armed);
     try testing.expectEqualDeep(Outcome{ .action = .new_tab }, p.feed(typed('c')));
+}
+
+test "custom bindings enter modes, unbind defaults, and send the custom prefix" {
+    var p: Prefix = .{};
+    p.keymap.prefix_key = try parseTrigger("ctrl+a");
+    p.keymap.overrides[0] = .{ .trigger = try parseTrigger("alt+h"), .prefixed = false, .action = null };
+    p.keymap.overrides[1] = .{ .trigger = try parseTrigger("alt+c"), .prefixed = false, .action = .copy_mode };
+    p.keymap.len = 2;
+    const alt_h: input.Event = .{ .key = .{ .code = .{ .char = 'h' }, .mods = .{ .alt = true } } };
+    try testing.expect(p.feed(alt_h) == .pane);
+    try testing.expect(p.feed(.{ .key = .{ .code = .{ .char = 'c' }, .mods = .{ .alt = true } } }) == .action);
+    try testing.expect(p.mode == .copy);
+    const ctrl_a: input.Event = .{ .key = .{ .code = .{ .char = 'a' }, .mods = .{ .ctrl = true } } };
+    try testing.expect(p.feed(ctrl_a) == .none);
+    try testing.expect(p.mode == .armed);
+    try testing.expect(p.feed(ctrl_a) == .pane);
+    try testing.expect(p.mode == .normal);
+    var rows: HelpList = .{};
+    rows.build(&p.keymap);
+    for (rows.rows[0..rows.len]) |row| try testing.expect(!std.mem.eql(u8, row.keys, "alt+h"));
 }

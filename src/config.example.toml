@@ -1,0 +1,24 @@
+# Kiwa uses built-in defaults for omitted settings.
+# Configuration reference: kiwa config guide
+# Show this file's path:   kiwa config path
+# Validate changes:        kiwa config check
+# Apply changes:           kiwa reload-config
+# Save, check, then reload. Invalid configurations leave live settings unchanged.
+# Examples are commented out so upgrades can improve the built-in defaults.
+
+[keys]
+# prefix = "ctrl+b"
+
+[bindings]
+# Bindings override individual keys; other default bindings remain available.
+# "prefix+v" = "split_right"
+# "prefix+-" = "split_down"
+# "alt+h" = "prev_tab"
+# "ctrl+alt+j" = "next_workspace"
+# "prefix+x" = "none" # Disable a default binding.
+
+[ui]
+# sidebar_width = 26 # Columns, 12..200. Omit to preserve the saved drag width.
+
+[terminal]
+# scrollback_lines = 50000 # 0..1000000; applies to newly created panes.

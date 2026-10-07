@@ -56,7 +56,11 @@ const Ctx = struct {
 
     /// Runs `kiwa <arg>` to completion without a terminal and returns its exit code.
     fn run(ctx: *Ctx, arg: [:0]const u8) !u8 {
-        const argv = [_:null]?[*:0]const u8{ ctx.kiwa.ptr, arg.ptr, null };
+        return ctx.runWith(arg, null);
+    }
+
+    fn runWith(ctx: *Ctx, arg: [:0]const u8, sub: ?[:0]const u8) !u8 {
+        const argv = [_:null]?[*:0]const u8{ ctx.kiwa.ptr, arg.ptr, if (sub) |v| v.ptr else null, null };
         const pid = sys.fork();
         if (pid == 0) {
             const devnull = sys.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch sys._exit(126);
@@ -2077,6 +2081,76 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     try expect(try o.waitExit() == 0, "prefix d detaches");
 }
 
+fn configStartupAndRestore(ctx: *Ctx) !void {
+    const dir = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa", .{ctx.dir});
+    defer ctx.gpa.free(dir);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/config.toml", .{dir});
+    defer ctx.gpa.free(path);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[keys]\nprefix = 'ctrl+a'\n[ui]\nsidebar_width = 30\n[terminal]\nscrollback_lines = 1000\n" });
+    try expect(try ctx.runWith("config", "guide") == 0, "guide needs no server");
+    try expect(try ctx.runWith("config", "path") == 0, "path needs no server");
+    try expect(try ctx.run("reload-config") != 0, "reload does not create a server");
+    const o = try attachedWithPrompt(ctx);
+    try waitSidebar(o, 30);
+    try o.drag(.{ 29, 10 }, .{ 37, 10 });
+    try waitSidebar(o, 38);
+    try expect(try ctx.run("kill-server") == 0, "stop saves the dragged width");
+    _ = try o.waitExit();
+    const restored = try attachedWithPrompt(ctx);
+    try waitSidebar(restored, 30);
+    try restored.send("\x01d");
+    try expect(try restored.waitExit() == 0, "startup applies the custom prefix");
+}
+
+fn configReloadPreservesPanes(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    defer ctx.gpa.free(path);
+    const initial = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
+    defer ctx.gpa.free(initial);
+    try expect(std.mem.indexOf(u8, initial, "kiwa config guide") != null, "startup creates discoverable configuration");
+    try o.send("export KIWA_TEST_TOKEN=alive; clear; echo READY-$((50+2))\r");
+    try o.waitText("READY-52");
+    const settings = "[keys]\nprefix = 'ctrl+a'\n[ui]\nsidebar_width = 34\n[bindings]\n'prefix+v' = 'new_tab'\n'prefix+c' = 'none'\n";
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = settings });
+    try expect(try ctx.runWith("config", "check") == 0, "config check accepts valid settings");
+    try expect(try ctx.runWith("config", "bindings") == 0, "effective bindings are available");
+    try expect(try ctx.run("reload-config") == 0, "valid reload succeeds");
+    try waitSidebar(o, 34);
+    try o.send("clear; echo STILL-$KIWA_TEST_TOKEN\r");
+    try o.waitText("STILL-alive");
+    try o.send("\x01?");
+    try o.waitText("prefix+v");
+    try o.press(named(.escape, .{}));
+    try o.waitGone("prefix+v");
+    try o.send("\x01v");
+    try o.waitText("2 sh");
+    try waitNoBorders(o);
+    // A valid first section must not apply if a later section is invalid.
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[ui]\nsidebar_width = 50\n[bindings]\n'alt+h' = 'typo'\n" });
+    try expect(try ctx.runWith("config", "check") == 2, "config check rejects invalid settings");
+    try expect(try ctx.run("reload-config") == 2, "invalid reload returns a failure");
+    try waitSidebar(o, 34);
+    try o.send("\x01p");
+    try o.send("clear; echo KEPT-$KIWA_TEST_TOKEN\r");
+    try o.waitText("KEPT-alive");
+    // Reattaching never overwrites a user's configuration.
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = settings });
+    try o.send("\x01d");
+    try expect(try o.waitExit() == 0, "custom prefix detaches");
+    const again = try ctx.attach();
+    try again.waitText("KEPT-alive");
+    const preserved = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
+    defer ctx.gpa.free(preserved);
+    try expect(std.mem.eql(u8, settings, preserved), "attach preserves existing config");
+    // Removing settings restores defaults, without changing pane processes.
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "" });
+    try expect(try ctx.run("reload-config") == 0, "empty configuration restores defaults");
+    try prefixed(again, "d");
+    try expect(try again.waitExit() == 0, "default prefix restored");
+}
+
 fn keyboardCopyWritesClipboard(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitKitty();
@@ -2875,6 +2949,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "clicks switch workspaces and tabs, add them, and toggle the sidebar", .run = clicksSwitchWorkspacesAndTabs },
     .{ .name = "a click focuses a pane", .run = clickFocusesPanes },
     .{ .name = "default shortcuts and the bottom prefix bar", .run = defaultShortcutsAndFooter },
+    .{ .name = "configuration startup overrides saved width and keeps the custom prefix", .run = configStartupAndRestore },
+    .{ .name = "configuration reload validates atomically and preserves panes", .run = configReloadPreservesPanes },
     .{ .name = "keyboard copy writes Unicode to the clipboard", .run = keyboardCopyWritesClipboard },
     .{ .name = "sidebar dragging changes pane size and survives restart", .run = sidebarDragPersists },
     .{ .name = "horizontal splits use a single divider row", .run = horizontalSplitUsesOneRow },

@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const sys = @import("sys.zig");
 const paths_mod = @import("paths.zig");
 const protocol = @import("protocol.zig");
@@ -222,6 +223,8 @@ const Server = struct {
     /// The user's sidebar toggle; narrow clients collapse it regardless.
     collapsed: bool = false,
     sidebar_width: u16 = chrome.sidebar_cols,
+    configuration: config.Config = .{},
+    config_path: []const u8 = "",
     hostname: []const u8,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
@@ -440,9 +443,31 @@ const Server = struct {
             },
             .list => try s.list(c),
             .stats => try s.printStats(c),
+            .reload_config => try s.reloadConfig(c),
             .detach => |reason| if (s.client == c) try s.detach(c, reason) else s.dropConn(c),
             .text => s.dropConn(c),
         }
+    }
+
+    fn reloadConfig(s: *Server, c: *Conn) !void {
+        if (c.state != .open) return s.dropConn(c);
+        var line: usize = 0;
+        s.scratch.clearRetainingCapacity();
+        const cfg = config.load(s.gpa, s.io, s.config_path, &line) catch |e| {
+            try s.scratch.print(s.gpa, "error: {s}:{d}: {t}; live configuration unchanged\n", .{ s.config_path, line, e });
+            return s.answer(c);
+        };
+        s.configuration = cfg;
+        if (cfg.sidebar_width) |width| s.sidebar_width = width;
+        for (s.conns.items) |conn| {
+            conn.prefix.keymap = cfg.keys;
+            conn.prefix.help_offset = 0;
+            if (conn.prefix.mode == .armed) conn.prefix.mode = .normal;
+        }
+        try s.relayout();
+        try s.markStale();
+        try s.scratch.print(s.gpa, "Reloaded {s}. Scrollback limits apply to new panes.\n", .{s.config_path});
+        try s.answer(c);
     }
 
     /// Answers `kiwa ls` and closes the connection.
@@ -481,6 +506,7 @@ const Server = struct {
             const reason = std.fmt.bufPrint(&buf, "{s} (server {d}, client {d})", .{ protocol.version_mismatch, protocol.version, h.version }) catch unreachable;
             return s.detach(c, reason);
         }
+        c.prefix.keymap = s.configuration.keys;
         const passed = c.passed orelse return s.detach(c, msg.not_a_terminal);
         c.passed = null;
         // Its own open file description, so that O_NONBLOCK never reaches the shell's.
@@ -574,7 +600,7 @@ const Server = struct {
         s.session.deinit();
         s.session = built;
         s.collapsed = r.doc.sidebar_collapsed;
-        s.sidebar_width = r.doc.sidebar_width;
+        s.sidebar_width = s.configuration.sidebar_width orelse r.doc.sidebar_width;
         for (s.session.workspaces.items) |ws| ws.git = try s.git.watch(s.gpa, ws.root_dir);
 
         const area = s.tabArea(s.size.?);
@@ -723,7 +749,7 @@ const Server = struct {
 
         try s.panes.ensureUnusedCapacity(s.gpa, 1);
         try s.pane_fds.ensureUnusedCapacity(s.gpa, 1);
-        const p = try Pane.spawn(s.gpa, s.io, .{ .id = id, .size = size, .shell = shell, .cwd = cwd_z, .env = block.slice });
+        const p = try Pane.spawn(s.gpa, s.io, .{ .id = id, .size = size, .shell = shell, .cwd = cwd_z, .env = block.slice, .scrollback = s.configuration.scrollback_lines });
         errdefer {
             p.hangup();
             p.destroy();
@@ -1296,7 +1322,15 @@ const Server = struct {
         const uncover_panes = (c.drawn_help and !help) or (c.drawn_dialog and dialog == null);
         try s.compose(c, compose_all or uncover or uncover_panes);
         try s.drawChrome(c, compose_all or uncover);
-        if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset);
+        if (help) {
+            if (s.configuration.keys.len == 0 and std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key)) {
+                chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset);
+            } else {
+                var key_help: prefix.HelpList = .{};
+                key_help.build(&s.configuration.keys);
+                chrome.drawHelpRows(&c.frame, s.tabArea(c.size), c.prefix.help_offset, key_help.rows[0..key_help.len]);
+            }
+        }
         c.drawn_help = help;
         if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size));
         c.drawn_dialog = dialog != null;
@@ -1423,6 +1457,7 @@ const Server = struct {
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,
             .sidebar_width = s.sidebar_width,
+            .custom_keys = s.configuration.keys.len != 0 or !std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key),
             .mode = switch (c.prefix.mode) {
                 .normal => .normal,
                 .armed => .prefix,
@@ -1577,6 +1612,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     _ = env.swapRemove(ready_fd_env);
     defer if (ready_fd) |fd| sys.close(fd);
 
+    const config_path = try config.path(gpa, env);
+    defer gpa.free(config_path);
+    var config_line: usize = 0;
+    const configuration = try config.load(gpa, io, config_path, &config_line);
+
     if (paths.socket_dir) |dir| try paths_mod.ensurePrivateDir(dir, sys.getuid());
     try removeStaleSocket(paths.socket);
 
@@ -1593,6 +1633,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     _ = libc.uname(&uts);
 
     var s: Server = .{
+        .config_path = config_path,
+        .configuration = configuration,
         .gpa = gpa,
         .io = io,
         .env = env,
@@ -1607,6 +1649,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
             break :blk null;
         },
     };
+    if (s.configuration.sidebar_width) |width| s.sidebar_width = width;
     if (s.state) |dir| s.restore = try loadSaved(gpa, io, dir);
     s.loop() catch |e| {
         std.log.err("server loop: {t}", .{e});
