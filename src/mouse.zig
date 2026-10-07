@@ -208,6 +208,17 @@ fn expectSteps(start: State, steps: []const Step) !void {
     }
 }
 
+test "compact capture retains motion and release over borders but ignores decoration wheels" {
+    const border: Target = .{ .border = .{ .pane = pid(2), .divider = null } };
+    try expectSteps(.idle, &.{
+        .{ report(.left, .press, 5, 5), local(1, 1, 1), true, .{ .focus = .{ .pane = pid(1), .deliver = true } }, .passing_through },
+        .{ report(.left, .motion, 9, 5), border, false, .{ .deliver = pid(1) }, .passing_through },
+        .{ report(.wheel_up, .press, 9, 5), border, false, .none, .passing_through },
+        .{ report(.left, .release, 9, 5), border, false, .{ .deliver = pid(1) }, .idle },
+        .{ report(.right, .press, 9, 5), border, false, .open_menu, .menu_open },
+    });
+}
+
 test "chrome clicks act on press and swallow the drag and release" {
     try expectSteps(.idle, &.{
         .{ report(.left, .press, 1, 2), .{ .sidebar_workspace = 1 }, false, .{ .select_workspace = 1 }, .pressed_on },

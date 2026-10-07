@@ -12,12 +12,14 @@
 [bindings]
 # Bindings override individual keys; other default bindings remain available.
 # "prefix+v" = "split_right"
+# "prefix+f" = "toggle_pane_style" # No default key.
 # "prefix+-" = "split_down"
 # "alt+h" = "prev_tab"
 # "ctrl+alt+j" = "next_workspace"
 # "prefix+x" = "none" # Disable a default binding.
 
 [ui]
+# pane_style = "compact" # "framed" adds independent borders and blank gutters.
 # sidebar_width = 26 # Columns, 12..200. Omit to preserve the saved drag width.
 
 [terminal]

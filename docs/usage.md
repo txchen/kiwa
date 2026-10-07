@@ -50,7 +50,9 @@ These shortcuts work directly, without the prefix:
 
 The pane shortcuts behave the same in every program, including Neovim.
 Directional pane focus remains available with `prefix h/j/k/l` or arrows.
-Cycling panes while zoomed keeps the newly focused pane zoomed.
+Cycling panes while zoomed keeps the newly focused pane zoomed. The tab row shows `[Z]` after a zoomed tab's name.
+
+Pane borders default to compact internal dividers. The optional [framed pane style](configuration.md#pane-style) gives each pane its own border and a blank gutter.
 
 ## Workspaces and panes
 

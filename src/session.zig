@@ -399,10 +399,9 @@ pub const Session = struct {
 
     /// The visible panes of the current tab inside `area`. A zoomed pane
     /// fills the area without a border.
-    pub fn view(s: *const Session, area: Rect, out: *std.ArrayList(Placement)) !void {
+    pub fn view(s: *const Session, area: Rect, style: layout.PaneStyle, out: *layout.Geometry) !void {
         const t = s.activeTab();
-        if (t.zoomed) return out.append(s.gpa, .{ .pane = t.focused, .box = area, .inner = area });
-        try t.layout.place(s.gpa, area, out);
+        try t.layout.resolve(s.gpa, area, style, if (t.zoomed) t.focused else null, out);
     }
 
     /// One line per workspace and tab, for `kiwa ls`.
@@ -640,20 +639,18 @@ test "a pane is focused directly only when the active tab shows it" {
 test "only the visible tab is placed, and a zoomed pane fills the area" {
     var s: Session = .init(testing.allocator, "sh");
     defer s.deinit();
-    var placed: std.ArrayList(Placement) = .empty;
+    var placed: layout.Geometry = .{};
     defer placed.deinit(testing.allocator);
     _ = try s.newWorkspace("/w");
     _ = try s.split(screen, .right);
-    try s.view(screen, &placed);
-    try testing.expectEqual(2, placed.items.len);
+    try s.view(screen, .framed, &placed);
+    try testing.expectEqual(2, placed.panes.items.len);
     try testing.expect(s.toggleZoom());
-    placed.clearRetainingCapacity();
-    try s.view(screen, &placed);
-    try testing.expectEqualSlices(Placement, &.{.{ .pane = s.focused(), .box = screen, .inner = screen }}, placed.items);
+    try s.view(screen, .framed, &placed);
+    try testing.expectEqualSlices(Placement, &.{.{ .pane = s.focused(), .box = screen, .inner = screen }}, placed.panes.items);
     const lone = try s.newTab();
-    placed.clearRetainingCapacity();
-    try s.view(screen, &placed);
-    try testing.expectEqualSlices(Placement, &.{.{ .pane = lone, .box = screen, .inner = screen }}, placed.items);
+    try s.view(screen, .framed, &placed);
+    try testing.expectEqualSlices(Placement, &.{.{ .pane = lone, .box = screen, .inner = screen }}, placed.panes.items);
 }
 
 test "output marks unseen tabs and workspaces, bells outrank output, and viewing clears each tab" {

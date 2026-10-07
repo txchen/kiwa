@@ -4,6 +4,8 @@
 const std = @import("std");
 
 pub const PaneId = enum(u32) { _ };
+pub const PaneStyle = enum { compact, framed };
+pub const Effective = enum { bare, compact, framed };
 
 /// A cell rectangle in the frame.
 pub const Rect = struct {
@@ -60,9 +62,52 @@ pub const Node = union(enum) {
     pub const Split = struct { axis: Axis, ratio: u16 = ratio_full / 2, a: *Node, b: *Node };
 };
 
-/// A visible pane: `box` is its share of the tab area, `inner` the cells
-/// its terminal draws in. They differ only when borders are drawn.
+/// A visible pane. `box` excludes gutters; `inner` is terminal content.
 pub const Placement = struct { pane: PaneId, box: Rect, inner: Rect };
+
+pub const Local = struct { pane: PaneId, x: u16, y: u16 };
+pub const PaneHit = union(enum) {
+    none,
+    content: Local,
+    decoration: struct { pane: PaneId, divider: ?Divider },
+};
+
+pub const Geometry = struct {
+    area: Rect = .{ .cols = 0, .rows = 0 },
+    effective: Effective = .bare,
+    panes: std.ArrayList(Placement) = .empty,
+    boundaries: std.ArrayList(Boundary) = .empty,
+
+    const Boundary = struct { divider: Divider, band: Rect };
+
+    pub fn deinit(g: *Geometry, gpa: std.mem.Allocator) void {
+        g.panes.deinit(gpa);
+        g.boundaries.deinit(gpa);
+    }
+
+    pub fn at(g: *const Geometry, x: u16, y: u16) PaneHit {
+        if (!containsCell(g.area, x, y)) return .none;
+        var subject: ?Placement = null;
+        var distance: u32 = std.math.maxInt(u32);
+        for (g.panes.items) |p| {
+            if (containsCell(p.inner, x, y)) return .{ .content = .{ .pane = p.pane, .x = x - p.inner.x, .y = y - p.inner.y } };
+            const dx = @as(u32, p.box.x) -| x + (@as(u32, x) + 1 -| p.box.right());
+            const dy = @as(u32, p.box.y) -| y + (@as(u32, y) + 1 -| p.box.bottom());
+            const d = dx + dy;
+            if (subject == null or d < distance or (d == distance and (p.box.y < subject.?.box.y or (p.box.y == subject.?.box.y and p.box.x < subject.?.box.x)))) {
+                subject = p;
+                distance = d;
+            }
+        }
+        const p = subject orelse return .none;
+        for (g.boundaries.items) |b| if (containsCell(b.band, x, y)) return .{ .decoration = .{ .pane = p.pane, .divider = b.divider } };
+        return .{ .decoration = .{ .pane = p.pane, .divider = null } };
+    }
+};
+
+fn containsCell(r: Rect, x: u16, y: u16) bool {
+    return x >= r.x and x < r.right() and y >= r.y and y < r.bottom();
+}
 
 pub const Layout = struct {
     root: *Node,
@@ -138,6 +183,19 @@ pub const Layout = struct {
     /// multiple panes, only internal divider cells are excluded from content.
     pub fn place(l: *const Layout, gpa: std.mem.Allocator, area: Rect, out: *std.ArrayList(Placement)) !void {
         try placeNode(gpa, l.root, area, area, out);
+    }
+
+    pub fn resolve(l: *const Layout, gpa: std.mem.Allocator, area: Rect, style: PaneStyle, zoom: ?PaneId, out: *Geometry) !void {
+        const visible = if (zoom != null) 1 else l.count();
+        try out.panes.ensureTotalCapacity(gpa, visible);
+        try out.boundaries.ensureTotalCapacity(gpa, visible - 1);
+        out.panes.clearRetainingCapacity();
+        out.boundaries.clearRetainingCapacity();
+        out.area = area;
+        out.effective = if (visible == 1) .bare else if (style == .framed and fitsFramed(l.root, area, area)) .framed else .compact;
+        if (zoom) |pane| {
+            out.panes.appendAssumeCapacity(.{ .pane = pane, .box = area, .inner = area });
+        } else resolveNode(l.root, area, SplitPath{}, out);
     }
 
     /// Moves the divider of the innermost split around `pane` that `dir`
@@ -416,6 +474,54 @@ fn placeNode(gpa: std.mem.Allocator, n: *const Node, box: Rect, area: Rect, out:
     }
 }
 
+fn fitsFramed(n: *const Node, box: Rect, area: Rect) bool {
+    return switch (n.*) {
+        .pane => blk: {
+            const frame = content(box, area);
+            break :blk frame.cols >= min_cols + 2 and frame.rows >= min_rows + 2;
+        },
+        .split => |s| blk: {
+            const parts = divide(box, s.axis, s.ratio);
+            break :blk fitsFramed(s.a, parts[0], area) and fitsFramed(s.b, parts[1], area);
+        },
+    };
+}
+
+fn resolveNode(n: *const Node, allocation: Rect, path: ?SplitPath, out: *Geometry) void {
+    switch (n.*) {
+        .pane => |id| {
+            const box = if (out.effective == .framed) content(allocation, out.area) else allocation;
+            const inner = if (out.effective == .framed) box.shrink() else content(box, out.area);
+            out.panes.appendAssumeCapacity(.{ .pane = id, .box = box, .inner = inner });
+        },
+        .split => |s| {
+            const parts = divide(allocation, s.axis, s.ratio);
+            const at = if (s.axis == .right) parts[1].x else parts[1].y;
+            const start = at -| @as(u16, if (out.effective == .framed) 2 else 1);
+            const end = @as(u32, at) + @as(u16, if (out.effective == .framed) 1 else 0);
+            var band = allocation;
+            if (s.axis == .right) {
+                band.x = @max(allocation.x, start);
+                band.cols = @intCast(@min(allocation.right(), end) -| band.x);
+            } else {
+                band.y = @max(allocation.y, start);
+                band.rows = @intCast(@min(allocation.bottom(), end) -| band.y);
+            }
+            var a_path: ?SplitPath = null;
+            var b_path: ?SplitPath = null;
+            if (path) |p| {
+                out.boundaries.appendAssumeCapacity(.{ .divider = .{ .split = p, .axis = s.axis, .at = at }, .band = band });
+                if (p.len < std.math.maxInt(u5)) {
+                    a_path = .{ .bits = p.bits, .len = p.len + 1 };
+                    b_path = .{ .bits = p.bits | (@as(u32, 1) << p.len), .len = p.len + 1 };
+                }
+            }
+            resolveNode(s.a, parts[0], a_path, out);
+            resolveNode(s.b, parts[1], b_path, out);
+        },
+    }
+}
+
 const testing = std.testing;
 const alloc = testing.allocator;
 
@@ -458,6 +564,111 @@ const Fixture = struct {
         return f;
     }
 };
+
+test "framed nested allocations preserve exact cuts, offset rectangles, and whole-tab fallback" {
+    var f: Fixture = try .three();
+    defer f.deinit();
+    var g: Geometry = .{};
+    defer g.deinit(alloc);
+    const area: Rect = .{ .x = 3, .y = 2, .cols = 19, .rows = 9 };
+    try f.l.resolve(alloc, area, .framed, null, &g);
+    try testing.expectEqual(.framed, g.effective);
+    try testing.expectEqualDeep(&[_]Placement{
+        .{ .pane = pid(1), .box = .{ .x = 3, .y = 2, .cols = 9, .rows = 9 }, .inner = .{ .x = 4, .y = 3, .cols = 7, .rows = 7 } },
+        .{ .pane = pid(2), .box = .{ .x = 13, .y = 2, .cols = 9, .rows = 4 }, .inner = .{ .x = 14, .y = 3, .cols = 7, .rows = 2 } },
+        .{ .pane = pid(3), .box = .{ .x = 13, .y = 7, .cols = 9, .rows = 4 }, .inner = .{ .x = 14, .y = 8, .cols = 7, .rows = 2 } },
+    }, g.panes.items);
+    try testing.expectEqual(@as(u16, 13), g.boundaries.items[0].divider.at);
+    try testing.expectEqual(@as(u16, 7), g.boundaries.items[1].divider.at);
+    for (2..11) |y| for (3..22) |x| {
+        const h = g.at(@intCast(x), @intCast(y));
+        try testing.expect(h != .none);
+        var contents: usize = 0;
+        var frames: usize = 0;
+        for (g.panes.items) |p| {
+            contents += @intFromBool(containsCell(p.inner, @intCast(x), @intCast(y)));
+            frames += @intFromBool(containsCell(p.box, @intCast(x), @intCast(y)));
+        }
+        try testing.expectEqual(contents == 1, h == .content);
+        try testing.expect(frames <= 1);
+    };
+    try testing.expect(g.at(2, 2) == .none);
+    try testing.expectEqual(pid(2), g.at(13, 4).decoration.pane);
+    try testing.expectEqual(pid(1), g.at(12, 4).decoration.pane);
+    try testing.expectEqual(@as(u16, 13), g.at(12, 6).decoration.divider.?.at);
+    try testing.expect(g.at(3, 2).decoration.divider == null);
+    for ([_]Rect{ .{ .cols = 9, .rows = 7 }, .{ .cols = 9, .rows = 6 }, .{ .cols = 9, .rows = 7 } }, 0..) |r, i| {
+        try f.l.resolve(alloc, r, .framed, null, &g);
+        try testing.expectEqual(if (i == 1) Effective.compact else .framed, g.effective);
+        try testing.expectEqual(@as(u16, 5), g.boundaries.items[0].divider.at);
+        if (i == 1) try testing.expectEqualDeep(try f.place(r), g.panes.items);
+    }
+    try testing.expectEqual(@as(u16, 500), f.l.root.split.ratio);
+    try testing.expectEqual(@as(u16, 500), f.l.root.split.b.split.ratio);
+    try f.l.resolve(alloc, area, .framed, pid(3), &g);
+    try testing.expectEqual(.bare, g.effective);
+    try testing.expectEqual(area, g.panes.items[0].inner);
+    try testing.expectEqual(@as(usize, 0), g.boundaries.items.len);
+}
+
+test "same-axis nested framing keeps compact cuts and mutations allow fallback" {
+    var f: Fixture = try .init();
+    defer f.deinit();
+    try f.l.split(alloc, screen, pid(1), .right, pid(2));
+    try f.l.split(alloc, screen, pid(2), .right, pid(3));
+    var g: Geometry = .{};
+    defer g.deinit(alloc);
+    const area: Rect = .{ .x = 7, .y = 3, .cols = 21, .rows = 5 };
+    try f.l.resolve(alloc, area, .framed, null, &g);
+    try testing.expectEqual(.framed, g.effective);
+    try testing.expectEqual(@as(u16, 18), g.boundaries.items[0].divider.at);
+    try testing.expectEqual(@as(u16, 23), g.boundaries.items[1].divider.at);
+    try testing.expectEqual(Rect{ .x = 18, .y = 3, .cols = 4, .rows = 5 }, g.panes.items[1].box);
+    const nested: SplitPath = .{ .bits = 1, .len = 1 };
+    try testing.expect(f.l.moveDivider(area, nested, 25));
+    try f.l.resolve(alloc, area, .framed, null, &g);
+    try testing.expectEqual(.compact, g.effective);
+    try testing.expectEqual(@as(u16, 25), g.boundaries.items[1].divider.at);
+    try testing.expect(f.l.moveDivider(area, nested, 23));
+    try f.l.resolve(alloc, area, .framed, null, &g);
+    try testing.expectEqual(.framed, g.effective);
+    for ([_]Rect{ .{ .cols = 1, .rows = 1 }, .{ .cols = 0, .rows = 0 } }) |r| {
+        try f.l.resolve(alloc, r, .framed, null, &g);
+        try testing.expectEqual(.compact, g.effective);
+        try testing.expectEqualDeep(try f.place(r), g.panes.items);
+    }
+    var pair: Fixture = try .init();
+    defer pair.deinit();
+    try pair.l.split(alloc, .{ .cols = 5, .rows = 1 }, pid(1), .right, pid(2));
+    for ([_]u16{ 9, 8, 9 }) |cols| {
+        try pair.l.resolve(alloc, .{ .cols = cols, .rows = 3 }, .framed, null, &g);
+        try testing.expectEqual(if (cols == 9) Effective.framed else .compact, g.effective);
+    }
+}
+
+test "resolved compact geometry matches existing placement and every hit" {
+    var f: Fixture = try .three();
+    defer f.deinit();
+    var g: Geometry = .{};
+    defer g.deinit(alloc);
+    const area: Rect = .{ .x = 3, .y = 2, .cols = 19, .rows = 9 };
+    try f.l.resolve(alloc, area, .compact, null, &g);
+    try testing.expectEqualDeep(try f.place(area), g.panes.items);
+    for (2..11) |y| for (3..22) |x| {
+        const ux: u16 = @intCast(x);
+        const uy: u16 = @intCast(y);
+        const hit = g.at(ux, uy);
+        for (g.panes.items) |p| {
+            if (!containsCell(p.box, ux, uy)) continue;
+            if (containsCell(p.inner, ux, uy)) {
+                try testing.expectEqualDeep(PaneHit{ .content = .{ .pane = p.pane, .x = ux - p.inner.x, .y = uy - p.inner.y } }, hit);
+            } else {
+                try testing.expectEqual(p.pane, hit.decoration.pane);
+                try testing.expectEqualDeep(f.l.dividerAt(area, ux, uy), hit.decoration.divider);
+            }
+        }
+    };
+}
 
 test "one pane fills the area without a border" {
     var f: Fixture = try .init();

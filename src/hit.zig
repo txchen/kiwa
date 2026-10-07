@@ -8,7 +8,6 @@ const layout = @import("layout.zig");
 const Menu = @import("menu.zig").Menu;
 
 const PaneId = layout.PaneId;
-const Placement = layout.Placement;
 
 pub const Target = union(enum) {
     none,
@@ -22,25 +21,21 @@ pub const Target = union(enum) {
     /// An index into the tab row's tabs.
     tab: usize,
     tab_new,
-    /// A cell of a pane's border. `divider` is set next to a divider that
-    /// a drag can move.
+    /// A frame or gutter cell. `divider` identifies a draggable boundary.
     border: struct { pane: PaneId, divider: ?layout.Divider },
     /// A cell of a pane's content, in pane-local coordinates.
     pane: Local,
     menu_item: usize,
 };
 
-pub const Local = struct { pane: PaneId, x: u16, y: u16 };
+pub const Local = layout.Local;
 
 /// Everything a frame shows that a click can land on.
 pub const Scene = struct {
     cols: u16,
     rows: u16,
     chrome: chrome.View,
-    /// The visible panes, as `Session.view` placed them.
-    panes: []const Placement,
-    /// The active tab's layout; null when the tab is zoomed.
-    layout: ?*const layout.Layout,
+    geometry: *const layout.Geometry,
     menu: ?Menu = null,
 };
 
@@ -63,18 +58,11 @@ pub fn at(s: Scene, x: u16, y: u16) Target {
         .tab => |i| .{ .tab = i },
         .new_tab => .tab_new,
     };
-    for (s.panes) |p| {
-        if (!contains(p.box, x, y)) continue;
-        if (contains(p.inner, x, y)) return .{ .pane = .{ .pane = p.pane, .x = x - p.inner.x, .y = y - p.inner.y } };
-        const area = chrome.Geometry.sized(s.cols, s.rows, s.chrome.collapsed, s.chrome.sidebar_width).area;
-        const divider = if (s.layout) |l| l.dividerAt(area, x, y) else null;
-        return .{ .border = .{ .pane = p.pane, .divider = divider } };
-    }
-    return .none;
-}
-
-fn contains(r: layout.Rect, x: u16, y: u16) bool {
-    return x >= r.x and x - r.x < r.cols and y >= r.y and y - r.y < r.rows;
+    return switch (s.geometry.at(x, y)) {
+        .none => .none,
+        .content => |local| .{ .pane = local },
+        .decoration => |d| .{ .border = .{ .pane = d.pane, .divider = d.divider } },
+    };
 }
 
 const testing = std.testing;
@@ -90,7 +78,7 @@ const tabs = [_]chrome.Tab{ .{ .name = "sh", .active = true }, .{ .name = "vim" 
 /// Two panes side by side in a `cols x rows` frame.
 const Fixture = struct {
     l: layout.Layout,
-    placed: std.ArrayList(Placement) = .empty,
+    geometry: layout.Geometry = .{},
     scene: Scene,
     area: layout.Rect,
 
@@ -106,23 +94,20 @@ const Fixture = struct {
                 .cols = cols,
                 .rows = rows,
                 .chrome = .{ .workspaces = &workspaces, .tabs = &tabs, .collapsed = collapsed },
-                .panes = &.{},
-                .layout = null,
+                .geometry = undefined,
             },
         };
     }
 
     fn deinit(f: *Fixture) void {
-        f.placed.deinit(alloc);
+        f.geometry.deinit(alloc);
         f.l.deinit(alloc);
     }
 
     fn place(f: *Fixture) !Scene {
-        f.placed.clearRetainingCapacity();
-        try f.l.place(alloc, f.area, &f.placed);
+        try f.l.resolve(alloc, f.area, .compact, null, &f.geometry);
         var s = f.scene;
-        s.panes = f.placed.items;
-        s.layout = &f.l;
+        s.geometry = &f.geometry;
         return s;
     }
 };
@@ -134,8 +119,8 @@ test "every target, at several sizes, expanded and collapsed" {
         var f: Fixture = try .init(cols, rows, collapsed);
         defer f.deinit();
         const s = try f.place();
-        const a = s.panes[0];
-        const b = s.panes[1];
+        const a = s.geometry.panes.items[0];
+        const b = s.geometry.panes.items[1];
         const sidebar = f.area.x;
 
         try testing.expectEqualDeep(Target{ .sidebar_workspace = 1 }, at(s, 1, if (sidebar == chrome.sidebar_cols) 2 else 1));
@@ -163,8 +148,8 @@ test "a zoomed pane has no border, and an open menu covers what is under it" {
     var f: Fixture = try .init(80, 24, false);
     defer f.deinit();
     var s = f.scene;
-    const zoomed = [_]Placement{.{ .pane = pid(2), .box = f.area, .inner = f.area }};
-    s.panes = &zoomed;
+    try f.l.resolve(alloc, f.area, .framed, pid(2), &f.geometry);
+    s.geometry = &f.geometry;
     try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 0, .y = 0 } }, at(s, f.area.x, f.area.y));
     try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 53, .y = 21 } }, at(s, 79, 22));
 

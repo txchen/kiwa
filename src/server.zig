@@ -8,6 +8,7 @@ const prefix = @import("prefix.zig");
 const frame_mod = @import("frame.zig");
 const diff = @import("diff.zig");
 const session_mod = @import("session.zig");
+const layout = @import("layout.zig");
 const names = @import("names.zig");
 const git = @import("git.zig");
 const chrome = @import("chrome.zig");
@@ -217,7 +218,8 @@ const Server = struct {
     /// The last client's size; panes are laid out for it, attached or not.
     size: ?protocol.Size = null,
     /// The visible panes and their rects, as `relayout` last computed them.
-    view: std.ArrayList(Placement) = .empty,
+    geometry: layout.Geometry = .{},
+    pane_style: layout.PaneStyle = .compact,
     closed: std.ArrayList(PaneId) = .empty,
     conns: std.ArrayList(*Conn) = .empty,
     client: ?*Conn = null,
@@ -380,7 +382,7 @@ const Server = struct {
     }
 
     fn isVisible(s: *const Server, pane: PaneId) bool {
-        for (s.view.items) |pl| if (pl.pane == pane) return true;
+        for (s.geometry.panes.items) |pl| if (pl.pane == pane) return true;
         return false;
     }
 
@@ -441,7 +443,7 @@ const Server = struct {
                 if (s.client != c) return;
                 c.size = sanitize(size);
                 s.size = c.size;
-                try s.relayout();
+                try s.relayout(false);
                 try s.render();
             },
             .list => try s.list(c),
@@ -472,13 +474,14 @@ const Server = struct {
             return s.answer(c);
         };
         s.configuration = cfg;
+        s.pane_style = cfg.pane_style;
         if (cfg.sidebar_width) |width| s.sidebar_width = width;
         for (s.conns.items) |conn| {
             conn.prefix.keymap = cfg.keys;
             conn.prefix.help_offset = 0;
             if (conn.prefix.mode == .armed) conn.prefix.mode = .normal;
         }
-        try s.relayout();
+        try s.relayout(false);
         try s.markStale();
         if (attached) {
             c.notice = true;
@@ -554,7 +557,7 @@ const Server = struct {
             }
             if (s.exit != null) return;
         } else {
-            try s.relayout();
+            try s.relayout(false);
         }
         // Sends the probes, then the first frame once they are out.
         try s.flush(c);
@@ -574,12 +577,14 @@ const Server = struct {
 
     /// Lays out the current tab for the last client size and resizes its
     /// panes to fit. Hidden panes keep their size until they show.
-    fn relayout(s: *Server) !void {
-        s.view.clearRetainingCapacity();
+    fn relayout(s: *Server, preserve_drag: bool) !void {
+        if (!preserve_drag) for (s.conns.items) |c| {
+            if (c.mouse == .dragging_border) c.mouse = .idle;
+        };
         const size = s.size orelse return;
         if (s.session.isEmpty()) return;
-        try s.session.view(s.tabArea(size), &s.view);
-        for (s.view.items) |pl| {
+        try s.session.view(s.tabArea(size), s.pane_style, &s.geometry);
+        for (s.geometry.panes.items) |pl| {
             const p = s.panes.get(pl.pane) orelse continue;
             p.shown = true;
             p.resize(paneSize(pl.inner)) catch |e| std.log.err("pane resize: {t}", .{e});
@@ -594,8 +599,8 @@ const Server = struct {
     /// Starts the child for a pane the session just created. If it cannot
     /// start, the pane closes again as if its child had exited.
     fn openPane(s: *Server, id: PaneId, cwd: []const u8) !void {
-        try s.relayout();
-        const size = for (s.view.items) |pl| {
+        try s.relayout(false);
+        const size = for (s.geometry.panes.items) |pl| {
             if (pl.pane == id) break paneSize(pl.inner);
         } else s.size orelse protocol.Size{ .cols = 80, .rows = 24 };
         s.spawnPane(id, size, cwd) catch |e| {
@@ -652,7 +657,7 @@ const Server = struct {
             try s.closePanes(&.{}, s.session.closePane(id));
             if (s.exit != null) return;
         }
-        try s.relayout();
+        try s.relayout(false);
         try s.markStale();
     }
 
@@ -742,7 +747,7 @@ const Server = struct {
             return;
         }
         if (closed == .workspace) s.git.prune(s.gpa, s.session.workspaces.items);
-        try s.relayout();
+        try s.relayout(false);
         try s.markStale();
         try s.markSave();
     }
@@ -917,6 +922,11 @@ const Server = struct {
                 const ws = ss.activeWorkspace();
                 return s.openDialog(c, .{ .rename = .{ .target = .{ .workspace = ws.id }, .field = .init(ws.name.text()) } });
             },
+            .toggle_pane_style => {
+                s.pane_style = if (s.pane_style == .compact) .framed else .compact;
+                try s.relayout(false);
+                return s.markStale();
+            },
             .toggle_sidebar => blk: {
                 s.collapsed = !s.collapsed;
                 break :blk true;
@@ -937,7 +947,7 @@ const Server = struct {
             },
         };
         if (!changed) return;
-        try s.relayout();
+        try s.relayout(false);
         try s.markStale();
         try s.markSave();
     }
@@ -1039,7 +1049,7 @@ const Server = struct {
             ws.git = watch;
             s.git.prune(s.gpa, s.session.workspaces.items);
             c.prefix.mode = .normal;
-            try s.relayout();
+            try s.relayout(false);
             try s.markSave();
         } else {
             c.prefix.mode = .normal;
@@ -1085,7 +1095,7 @@ const Server = struct {
                 c.nav = i;
             },
             .pick => if (s.session.selectWorkspace(c.nav)) {
-                try s.relayout();
+                try s.relayout(false);
                 try s.markSave();
             },
         }
@@ -1100,10 +1110,11 @@ const Server = struct {
             .cols = c.size.cols,
             .rows = c.size.rows,
             .chrome = try s.chromeView(c),
-            .panes = s.view.items,
-            .layout = if (t.zoomed) null else &t.layout,
+            .geometry = &s.geometry,
             .menu = if (c.mouse == .menu_open) c.mouse.menu_open else null,
         }, ev.x, ev.y);
+        if (s.geometry.effective == .framed and target == .border and
+            c.mouse == .passing_through and ev.action != .release) return;
         // Wheel input in copy mode moves its cursor, never the child program.
         if (c.prefix.mode == .copy and ev.action == .press and
             (ev.button == .wheel_up or ev.button == .wheel_down))
@@ -1176,7 +1187,11 @@ const Server = struct {
             .copy_selection => |pane| {
                 _ = try s.copySelection(c, pane);
             },
-            .move_divider => |d| if (!t.zoomed and t.layout.moveDivider(s.tabArea(c.size), d.split, d.at)) try s.showChanges(),
+            .move_divider => |d| if (!t.zoomed and t.layout.moveDivider(s.tabArea(c.size), d.split, d.at)) {
+                try s.relayout(true);
+                try s.markStale();
+                try s.markSave();
+            },
             .open_menu, .close_menu => try s.markStale(),
             .run_menu_item => |r| try s.runMenuItem(c, r.menu, r.item),
         }
@@ -1184,13 +1199,13 @@ const Server = struct {
 
     /// Relays out, redraws, and saves after the session changed what is visible.
     fn showChanges(s: *Server) !void {
-        try s.relayout();
+        try s.relayout(false);
         try s.markStale();
         try s.markSave();
     }
 
     fn placementOf(s: *const Server, pane: PaneId) ?Placement {
-        for (s.view.items) |pl| if (pl.pane == pane) return pl;
+        for (s.geometry.panes.items) |pl| if (pl.pane == pane) return pl;
         return null;
     }
 
@@ -1472,25 +1487,31 @@ const Server = struct {
     }
 
     /// Brings `c.frame` up to date with the visible panes. Panes copy only
-    /// their dirty rows unless they moved; borders redraw when anything moved
-    /// or focus changed. The boxes tile the tab area, so nothing stale is left.
+    /// their dirty rows unless geometry changed. Clear decorations before any
+    /// pane composition so old content cannot survive in new gutters.
     fn compose(s: *Server, c: *Conn, all: bool) !void {
         const focus = s.session.focused();
-        var moved = all or c.drawn.items.len != s.view.items.len;
+        var moved = all or c.drawn.items.len != s.geometry.panes.items.len;
+        for (s.geometry.panes.items) |pl| {
+            if (!c.drewAt(pl)) moved = true;
+        }
+        if (moved) {
+            const area = s.geometry.area;
+            for (area.y..@as(usize, area.y) + area.rows) |y| {
+                @memset(c.frame.rowMut(y)[area.x..][0..area.cols], .{});
+            }
+        }
         c.frame.cursor = .{ .visible = false };
         c.scrolls.clearRetainingCapacity();
-        for (s.view.items) |pl| {
+        for (s.geometry.panes.items) |pl| {
             const p = s.panes.get(pl.pane) orelse continue;
-            const same = !all and c.drewAt(pl);
-            if (!same) moved = true;
+            const same = !moved;
             const shift = try p.drawn_rows.update(s.gpa, &p.terminal, &p.render);
             var which: frame_mod.Frame.Which = if (same) .changed else .all;
-            if (shift) |n| if (c.drewAt(pl) and p.render.rows == pl.inner.rows) {
+            if (shift) |n| if (same and p.render.rows == pl.inner.rows) {
                 try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n });
-                if (same) {
-                    c.frame.scrollRows(pl.inner, n);
-                    which = .{ .except = &p.drawn_rows.carried };
-                }
+                c.frame.scrollRows(pl.inner, n);
+                which = .{ .except = &p.drawn_rows.carried };
             };
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, which);
             if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);
@@ -1510,9 +1531,25 @@ const Server = struct {
         }
         if (moved or c.drawn_focus != focus) {
             const focused = s.placementOf(focus);
-            for (s.view.items) |pl| {
+            for (s.geometry.panes.items) |pl| {
                 const right = pl.box.x + pl.box.cols;
                 const bottom = pl.box.y + pl.box.rows;
+                if (s.geometry.effective == .framed) {
+                    const style = if (pl.pane == focus) focused_border_style else border_style;
+                    for (pl.box.x..right) |x| {
+                        c.frame.rowMut(pl.box.y)[x] = .{ .cp = 0x2500, .style = style };
+                        c.frame.rowMut(bottom - 1)[x] = .{ .cp = 0x2500, .style = style };
+                    }
+                    for (pl.box.y..bottom) |y| {
+                        c.frame.rowMut(y)[pl.box.x] = .{ .cp = 0x2502, .style = style };
+                        c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = style };
+                    }
+                    c.frame.rowMut(pl.box.y)[pl.box.x] = .{ .cp = 0x250c, .style = style };
+                    c.frame.rowMut(pl.box.y)[right - 1] = .{ .cp = 0x2510, .style = style };
+                    c.frame.rowMut(bottom - 1)[pl.box.x] = .{ .cp = 0x2514, .style = style };
+                    c.frame.rowMut(bottom - 1)[right - 1] = .{ .cp = 0x2518, .style = style };
+                    continue;
+                }
                 if (pl.inner.cols < pl.box.cols) for (pl.box.y..bottom) |y| {
                     const active = pl.pane == focus or if (focused) |f| f.box.x == right and y >= f.box.y and y < f.box.y + f.box.rows else false;
                     c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = if (active) focused_border_style else border_style };
@@ -1524,7 +1561,7 @@ const Server = struct {
             }
         }
         c.drawn.clearRetainingCapacity();
-        try c.drawn.appendSlice(s.gpa, s.view.items);
+        try c.drawn.appendSlice(s.gpa, s.geometry.panes.items);
         c.drawn_focus = focus;
     }
 
@@ -1553,7 +1590,7 @@ const Server = struct {
         });
         const current = ss.activeWorkspace();
         s.chrome_tabs.clearRetainingCapacity();
-        for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .activity = t.activity, .active = t.id == current.active });
+        for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .activity = t.activity, .active = t.id == current.active, .zoomed = t.zoomed });
         var pane_count: usize = 0;
         for (current.tabs.items) |t| pane_count += t.layout.count();
         return .{
@@ -1698,7 +1735,7 @@ const Server = struct {
         while (it.next()) |p| p.*.destroy();
         s.panes.deinit(s.gpa);
         s.pane_fds.deinit(s.gpa);
-        s.view.deinit(s.gpa);
+        s.geometry.deinit(s.gpa);
         s.closed.deinit(s.gpa);
         s.chrome_workspaces.deinit(s.gpa);
         s.chrome_tabs.deinit(s.gpa);
@@ -1744,6 +1781,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     var s: Server = .{
         .config_path = config_path,
         .configuration = configuration,
+        .pane_style = configuration.pane_style,
         .gpa = gpa,
         .io = io,
         .env = env,

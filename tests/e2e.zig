@@ -2268,6 +2268,273 @@ fn configStartupAndRestore(ctx: *Ctx) !void {
     try expect(try restored.waitExit() == 0, "startup applies the custom prefix");
 }
 
+fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    defer ctx.gpa.free(path);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = text });
+}
+
+const style_binding = "[bindings]\n'prefix+f' = 'toggle_pane_style'\n";
+const framed_config = style_binding ++ "[ui]\npane_style = 'framed'\n";
+const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 22 };
+const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 22 };
+const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 10 };
+const framed_bottom: Box = .{ .x = 53, .y = 12, .cols = 27, .rows = 11 };
+
+fn framesDrawn(o: *Outer, boxes: []const Box) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    for (boxes) |b| {
+        const right = b.x + b.cols - 1;
+        const bottom = b.y + b.rows - 1;
+        if (g.cp(b.x, b.y) != 0x250c or g.cp(right, b.y) != 0x2510 or
+            g.cp(b.x, bottom) != 0x2514 or g.cp(right, bottom) != 0x2518) return false;
+        for (b.x + 1..right) |x| if (g.cp(x, b.y) != 0x2500 or g.cp(x, bottom) != 0x2500) return false;
+        for (b.y + 1..bottom) |y| if (g.cp(b.x, y) != 0x2502 or g.cp(right, y) != 0x2502) return false;
+    }
+    for (1..g.rs.rows - 1) |y| for (g.sidebarCols()..g.rs.cols) |x| {
+        for (boxes) |b| {
+            if (b.contains(x, y)) break;
+        } else {
+            if (g.cp(x, y) != ' ' or g.style(x, y).bg_color != .none) return false;
+        }
+    };
+    return true;
+}
+
+fn waitFrames(o: *Outer, boxes: []const Box) !void {
+    try o.waitFor("independent frames and neutral blank gutters", boxes, framesDrawn);
+}
+
+fn paneStyleLifecycle(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try paneStyleConfig(ctx, style_binding);
+    try expect(try ctx.run("reload-config") == 0, "style binding reloads");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("echo $$ > pane.pid; export PANE_TOKEN=kept; printf '\\033[41m\\033[2J\\033[H'; echo PAINT-$((40+2))\r");
+    try o.waitText("PAINT-42");
+    try prefixed(o, "f");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try o.send("printf '\\033[0m'; stty size; test \"$$\" = \"$(cat pane.pid)\" && echo ID-$PANE_TOKEN\r");
+    try o.waitText("20 25");
+    try o.waitText("ID-kept");
+    try prefixed(o, "c");
+    try waitNoBorders(o);
+    try prefixed(o, "v");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try prefixed(o, "1");
+    try o.waitText("ID-kept");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try paneStyleConfig(ctx, "[ui]\npane_style = 'compact'\n[bindings]\n'prefix+f' = 'invalid'\n");
+    try expect(try ctx.run("reload-config") == 2, "invalid reload fails atomically");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try paneStyleConfig(ctx, style_binding);
+    try prefixed(o, "d");
+    try expect(try o.waitExit() == 0, "detach succeeds");
+    const again = try ctx.attach();
+    try waitFrames(again, &.{ framed_left, framed_right });
+    try expect(try ctx.run("reload-config") == 0, "omitted style restores compact");
+    try waitBoxes(again, &.{ left_half, right_half });
+    try paneStyleConfig(ctx, framed_config);
+    try expect(try ctx.run("reload-config") == 0, "framed file overrides compact runtime");
+    try waitFrames(again, &.{ framed_left, framed_right });
+    try prefixed(again, "f");
+    try waitBoxes(again, &.{ left_half, right_half });
+    const pid = (try ctx.serverPid()).?;
+    try expect(try ctx.run("kill-server") == 0, "isolated server stops");
+    try ctx.waitServerGone(pid);
+    _ = try again.waitExit();
+    const restarted = try ctx.attach();
+    try waitFrames(restarted, &.{ framed_left, framed_right });
+    try restarted.send("echo NEW-${PANE_TOKEN-unset}\r");
+    try restarted.waitText("NEW-unset");
+}
+
+fn paneStyleNestedDrag(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try paneStyleConfig(ctx, framed_config);
+    try expect(try ctx.run("reload-config") == 0, "framed configuration reloads");
+    try waitNoBorders(o);
+    try prefixed(o, "v");
+    try prefixed(o, "-");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 65, 11, 'M');
+    try o.mouseReport(32, 65, 2, 'M');
+    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 2 }, .{ .x = 53, .y = 3, .cols = 27, .rows = 20 } });
+    try o.mouseReport(32, 65, 11, 'M');
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 65, 11, 'm');
+    try o.mouseReport(0, 53, 5, 'M');
+    try o.mouseReport(32, 77, 5, 'M');
+    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 51, .rows = 22 }, .{ .x = 77, .y = 1, .cols = 3, .rows = 11 }, .{ .x = 77, .y = 12, .cols = 3, .rows = 11 } });
+    try o.mouseReport(32, 53, 5, 'M');
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 53, 5, 'm');
+    try o.mouseReport(0, 52, 5, 'M');
+    try prefixed(o, "f");
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    try o.mouseReport(32, 65, 5, 'M');
+    try o.mouseReport(0, 65, 5, 'm');
+    try o.send("echo STYLE-$((40+2))\r");
+    try o.waitText("STYLE-42");
+    try waitBoxes(o, &.{ left_half, right_top, right_bottom });
+    try prefixed(o, "f");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 52, 5, 'M');
+    try o.resize(100, 24);
+    const wider = [_]Box{
+        .{ .x = 26, .y = 1, .cols = 35, .rows = 22 },
+        .{ .x = 62, .y = 1, .cols = 38, .rows = 10 },
+        .{ .x = 62, .y = 12, .cols = 38, .rows = 11 },
+    };
+    try waitFrames(o, &wider);
+    try o.mouseReport(32, 70, 5, 'M');
+    try o.mouseReport(0, 70, 5, 'm');
+    try o.send("echo SIZE-$((40+2))\r");
+    try o.waitText("SIZE-42");
+    try waitFrames(o, &wider);
+    try o.resize(80, 24);
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 52, 5, 'M');
+    try prefixed(o, "c");
+    try prefixed(o, "v");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try o.mouseReport(32, 65, 5, 'M');
+    try o.mouseReport(0, 65, 5, 'm');
+    try o.send("echo TAB-$((40+2))\r");
+    try o.waitText("TAB-42");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try prefixed(o, "1");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.click(79, 15);
+    try o.send("echo LOWER-$((40+2))\r");
+    try waitTextIn(o, "LOWER-42", framed_bottom);
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    try expect(g.fg(79, 15) == .palette and g.fg(79, 15).palette == 6, "focused frame owns its accent");
+    try expect(g.fg(51, 15) == .palette and g.fg(51, 15).palette == 8, "neighbor frame is not accented");
+    try o.rightClick(52, 5);
+    try o.waitText("Close pane");
+    try o.press(named(.escape, .{}));
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.mouseReport(0, 52, 5, 'M');
+    try o.send("exit\r");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try o.mouseReport(32, 65, 5, 'M');
+    try o.mouseReport(0, 65, 5, 'm');
+    try o.send("echo EXIT-$((40+2))\r");
+    try o.waitText("EXIT-42");
+    try waitFrames(o, &.{ framed_left, framed_right });
+}
+
+fn paneStyleZoomMarker(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try paneStyleConfig(ctx, style_binding);
+    try expect(try ctx.run("reload-config") == 0, "style binding reloads");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try prefixed(o, "T");
+    try o.waitText(" rename tab ");
+    try o.send("\x15very-long-界界界-tab-title-that-must-be-truncated-at-the-edge\r");
+    try o.waitGone(" rename tab ");
+    try o.waitText("very-long-界");
+    for (0..2) |_| {
+        try prefixed(o, "z");
+        try waitNoBorders(o);
+        try o.waitText("[Z]");
+        try prefixed(o, "f");
+        try o.waitText("[Z]");
+        try waitNoBorders(o);
+        try prefixed(o, "z");
+        try o.waitGone("[Z]");
+    }
+    try prefixed(o, "z");
+    try o.waitText("[Z]");
+    try prefixed(o, "-");
+    try o.waitGone("[Z]");
+}
+
+fn paneStyleMouseCapture(ctx: *Ctx) !void {
+    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/framed-mouse.py", .{ctx.dir});
+    defer ctx.gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data =
+        \\import os, tty
+        \\tty.setraw(0)
+        \\log = open('mouse-input', 'wb', buffering=0)
+        \\os.write(1, b'\x1b[?1002h\x1b[?1006hready\r\n')
+        \\while True:
+        \\    data = os.read(0, 64)
+        \\    log.write(data)
+        \\    if b'!' in data: os.write(1, b'received-end\r\n')
+    });
+    const o = try attachedWithPrompt(ctx);
+    try paneStyleConfig(ctx, framed_config);
+    try expect(try ctx.run("reload-config") == 0, "framed configuration reloads");
+    try prefixed(o, "v");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    try o.send("clear; python3 framed-mouse.py\r");
+    try o.waitText("ready");
+    try o.mouseReport(0, 56, 5, 'M');
+    try o.mouseReport(32, 52, 5, 'M');
+    try o.wheel(true, 52, 5);
+    try o.mouseReport(0, 52, 5, 'm');
+    try o.mouseReport(32, 53, 5, 'M');
+    try o.wheel(false, 53, 5);
+    try o.send("!");
+    try o.waitText("received-end");
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/mouse-input", .{ctx.dir});
+    defer ctx.gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(4096));
+    defer ctx.gpa.free(bytes);
+    try expect(std.mem.eql(u8, bytes, "\x1b[<0;3;4M\x1b[<0;1;4m!"), "only the content press and captured release reach the program");
+    try o.rightClick(79, 6);
+    try o.waitText("Close pane");
+    try o.press(named(.escape, .{}));
+    try waitFrames(o, &.{ framed_left, framed_right });
+}
+
+fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
+    const o = try ctx.attachWith(.{ .margins = margins });
+    try o.waitLine("$");
+    try paneStyleConfig(ctx, framed_config);
+    try expect(try ctx.run("reload-config") == 0, "framed configuration reloads");
+    try prefixed(o, "v");
+    try prefixed(o, "-");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.send("i=0; while [ $i -lt 80 ]; do printf 'scroll-%03d\\n' $i; i=$((i+1)); sleep 0.01; done\r");
+    try o.waitText("scroll-079");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.wheel(true, 60, 16);
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try o.send("clear; echo SCROLL-$((40+2))\r");
+    try o.waitText("SCROLL-42");
+    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+}
+
+fn paneStyleScrollMargins(ctx: *Ctx) !void {
+    try paneStyleScroll(ctx, true);
+}
+
+fn paneStyleScrollNoMargins(ctx: *Ctx) !void {
+    try paneStyleScroll(ctx, false);
+}
+
+fn paneStyleQuiet(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try paneStyleConfig(ctx, framed_config);
+    try expect(try ctx.run("reload-config") == 0, "framed configuration reloads");
+    try prefixed(o, "v");
+    try waitFrames(o, &.{ framed_left, framed_right });
+    _ = try o.pump(1500);
+    const pid = (try ctx.serverPid()).?;
+    const before = try sample(ctx, pid);
+    const bytes = try o.pump(10_000);
+    const after = try sample(ctx, pid);
+    try expect(after.switches - before.switches <= 2, "framed idle has at most two context switches in ten seconds");
+    try expect(bytes == 0, "framed idle writes no outer bytes");
+}
+
 fn configReloadPreservesPanes(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
@@ -3140,6 +3407,13 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "default shortcuts and the bottom prefix bar", .run = defaultShortcutsAndFooter },
     .{ .name = "configuration startup overrides saved width and keeps the custom prefix", .run = configStartupAndRestore },
     .{ .name = "configuration reload validates atomically and preserves panes", .run = configReloadPreservesPanes },
+    .{ .name = "pane style lifecycle preserves identity and resets only on valid reload or restart", .run = paneStyleLifecycle },
+    .{ .name = "pane style nested drags cross fallback without losing capture", .run = paneStyleNestedDrag },
+    .{ .name = "pane style zoom marker survives name truncation and style changes", .run = paneStyleZoomMarker },
+    .{ .name = "pane style decorations block input but complete captured releases", .run = paneStyleMouseCapture },
+    .{ .name = "pane style scrolling preserves frames and gutters with margins", .run = paneStyleScrollMargins },
+    .{ .name = "pane style scrolling preserves frames and gutters without margins", .run = paneStyleScrollNoMargins },
+    .{ .name = "pane style quiet server makes no wakes", .run = paneStyleQuiet, .kind = .perf },
     .{ .name = "keyboard copy writes Unicode to the clipboard", .run = keyboardCopyWritesClipboard },
     .{ .name = "sidebar dragging changes pane size and survives restart", .run = sidebarDragPersists },
     .{ .name = "horizontal splits use a single divider row", .run = horizontalSplitUsesOneRow },

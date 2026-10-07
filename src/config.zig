@@ -8,6 +8,7 @@ pub const guide = @embedFile("config-guide.txt");
 pub const Config = struct {
     keys: prefix.Keymap = .{},
     sidebar_width: ?u16 = null,
+    pane_style: @import("layout.zig").PaneStyle = .compact,
     scrollback_lines: u32 = 50_000,
 };
 
@@ -106,11 +107,12 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
             out.keys.overrides[out.keys.len] = .{ .trigger = trigger, .prefixed = prefixed, .action = action };
             out.keys.len += 1;
         } else {
-            const bit: u8 = if (section == .keys and std.mem.eql(u8, key, "prefix")) 1 else if (section == .ui and std.mem.eql(u8, key, "sidebar_width")) 2 else if (section == .terminal and std.mem.eql(u8, key, "scrollback_lines")) 4 else return error.UnknownSetting;
+            const bit: u8 = if (section == .keys and std.mem.eql(u8, key, "prefix")) 1 else if (section == .ui and std.mem.eql(u8, key, "sidebar_width")) 2 else if (section == .terminal and std.mem.eql(u8, key, "scrollback_lines")) 4 else if (section == .ui and std.mem.eql(u8, key, "pane_style")) 8 else return error.UnknownSetting;
             if (seen & bit != 0) return error.DuplicateSetting;
             seen |= bit;
             switch (bit) {
                 1 => out.keys.prefix_key = try prefix.parseTrigger(try quoted(value)),
+                8 => out.pane_style = std.meta.stringToEnum(@import("layout.zig").PaneStyle, try quoted(value)) orelse return error.InvalidPaneStyle,
                 2, 4 => {
                     if (value.len == 0) return error.ExpectedInteger;
                     for (value) |c| if (!std.ascii.isDigit(c)) return error.ExpectedInteger;
@@ -134,6 +136,19 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
     const k: @import("input.zig").Key = .{ .code = out.keys.prefix_key.code, .mods = out.keys.prefix_key.mods };
     if (out.keys.lookup(k, false) != null) return error.BindingConflictsWithPrefix;
     return out;
+}
+
+test "pane styles are typed, optional, unique, and bindable without a default key" {
+    var line: usize = 0;
+    try std.testing.expectEqual(.compact, (try parse("", &line)).pane_style);
+    try std.testing.expectEqual(.compact, (try parse("[ui]\npane_style = 'compact'", &line)).pane_style);
+    const c = try parse("[ui]\npane_style = 'framed'\n[bindings]\n'prefix+f' = 'toggle_pane_style'", &line);
+    try std.testing.expectEqual(.framed, c.pane_style);
+    try std.testing.expectEqualDeep(prefix.Action.toggle_pane_style, c.keys.lookup(.typed('f'), true).?);
+    try std.testing.expect((Config{}).keys.lookup(.typed('f'), true) == null);
+    try std.testing.expectError(error.InvalidPaneStyle, parse("[ui]\npane_style = 'Frame'", &line));
+    try std.testing.expectError(error.ExpectedQuotedString, parse("[ui]\npane_style = 1", &line));
+    try std.testing.expectError(error.DuplicateSetting, parse("[ui]\npane_style = 'framed'\npane_style = 'compact'", &line));
 }
 
 test "template keeps built-in defaults" {

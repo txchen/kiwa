@@ -43,6 +43,7 @@ pub const Tab = struct {
     name: []const u8,
     activity: Activity = .none,
     active: bool = false,
+    zoomed: bool = false,
 };
 
 /// What the chrome shows. Indexes are positions in the lists, from 1.
@@ -423,16 +424,15 @@ fn drawCollapsed(f: *Frame, v: View) void {
     }
 }
 
-fn tabWidth(index: usize, name_cols: usize, activity: Activity) usize {
-    // " {index} {name} "
-    return 3 + digits(index) + name_cols + @as(usize, if (activity == .none) 0 else 2);
+fn tabWidth(index: usize, name_cols: usize, tab: Tab) usize {
+    return 3 + digits(index) + name_cols + @as(usize, if (tab.activity == .none) 0 else 2) + @as(usize, if (tab.zoomed) 4 else 0);
 }
 
 const plus = " + ";
 
-/// Where each tab and the `+` sit in a tab row `cols` wide. Names are
-/// shortened, longest first, until every tab fits, down to one column per
-/// name; then the row scrolls to keep the active tab visible.
+/// Shared slots for tab drawing and hits. Names shrink before the row
+/// scrolls to the active tab. Zoom reserves the number and marker even
+/// when no name fits.
 const TabSlots = struct {
     tabs: []const Tab,
     cols: usize,
@@ -442,7 +442,7 @@ const TabSlots = struct {
     /// Set once every tab from the first shown one fit.
     all_fit: bool = false,
 
-    const Slot = struct { index: usize, x: usize, cols: usize };
+    const Slot = struct { index: usize, x: usize, cols: usize, minimal: bool = false };
 
     fn init(tabs: []const Tab, cols: usize) TabSlots {
         var active: usize = 0;
@@ -452,15 +452,16 @@ const TabSlots = struct {
             widest = @max(widest, textCols(t.name));
         }
         var cap = widest;
-        while (cap > 1) : (cap -= 1) {
+        const min_name: usize = if (tabs.len > 0 and tabs[active].zoomed) 0 else 1;
+        while (cap > min_name) : (cap -= 1) {
             var total: usize = plus.len;
-            for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap), t.activity);
+            for (tabs, 1..) |t, i| total += tabWidth(i, @min(textCols(t.name), cap), t);
             if (total <= cols) break;
         }
         var first: usize = 0;
         while (first < active) : (first += 1) {
             var used: usize = plus.len;
-            for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap), t.activity);
+            for (tabs[first .. active + 1], first + 1..) |t, i| used += tabWidth(i, @min(textCols(t.name), cap), t);
             if (used <= cols) break;
         }
         return .{ .tabs = tabs, .cols = cols, .cap = cap, .index = first };
@@ -471,13 +472,19 @@ const TabSlots = struct {
             s.all_fit = true;
             return null;
         }
-        const w = tabWidth(s.index + 1, @min(textCols(s.tabs[s.index].name), s.cap), s.tabs[s.index].activity);
-        if (s.x + w > s.cols) return null;
+        const tab = s.tabs[s.index];
+        var w = tabWidth(s.index + 1, @min(textCols(tab.name), s.cap), tab);
+        var minimal = false;
+        if (s.x + w > s.cols) {
+            w = digits(s.index + 1) + 3;
+            if (!tab.active or !tab.zoomed or s.x + w > s.cols) return null;
+            minimal = true;
+        }
         defer {
             s.index += 1;
             s.x += w;
         }
-        return .{ .index = s.index, .x = s.x, .cols = w };
+        return .{ .index = s.index, .x = s.x, .cols = w, .minimal = minimal };
     }
 
     /// Where the `+` goes once `next` returned null; null when it does not fit.
@@ -494,9 +501,15 @@ fn drawTabs(row: []Cell, tabs: []const Tab) void {
         const cell = row[slot.x..][0..slot.cols];
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
+        if (slot.minimal) {
+            _ = put(cell, 0, std.fmt.bufPrint(&num, "{d}[Z]", .{slot.index + 1}) catch unreachable, style);
+            continue;
+        }
         const after = put(cell, 1, std.fmt.bufPrint(&num, "{d} ", .{slot.index + 1}) catch unreachable, style);
         const end = slot.cols - 1 - @as(usize, if (t.activity == .none) 0 else 2);
-        fit(cell[0..end], after, t.name, style);
+        const name_end = end - @as(usize, if (t.zoomed) 4 else 0);
+        fit(cell[0..name_end], after, t.name, style);
+        if (t.zoomed) _ = put(cell, name_end, " [Z]", style);
         if (markerCp(t.activity)) |cp| {
             var ms = style;
             ms.fg_color = marker_fg;
@@ -1046,6 +1059,32 @@ test "resized sidebar draws and hits the same divider and preserves terminal spa
     try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 22 }, Geometry.sized(100, 24, false, 38).area);
     try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500).sidebar);
     try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38).sidebar);
+}
+
+test "zoom markers reserve the number and all marker cells before long or wide names" {
+    var tabs: [12]Tab = undefined;
+    for (&tabs) |*t| t.* = .{ .name = "wide-界界界-long-title" };
+    tabs[11].active = true;
+    tabs[11].zoomed = true;
+    tabs[11].activity = .bell;
+    for ([_]u16{ 9, 14, 24, 40, 120 }) |cols| {
+        const v: View = .{ .workspaces = &one, .tabs = &tabs, .collapsed = true };
+        var s = try render(cols, 4, v);
+        defer s.deinit();
+        try expectHit(v, &s, "12", .{ .tab = 11 });
+        try expectHit(v, &s, "[Z]", .{ .tab = 11 });
+        for (s.f.row(0), 0..) |c, x| {
+            if (c.cp == '[') {
+                for (x..x + 3) |mx| try testing.expectEqualDeep(Hit{ .tab = 11 }, hit(v, cols, 4, @intCast(mx), 0).?);
+            }
+        }
+    }
+    tabs[11].zoomed = false;
+    var s = try render(40, 4, .{ .workspaces = &one, .tabs = &tabs, .collapsed = true });
+    defer s.deinit();
+    const text = try s.text();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "[Z]") == null);
 }
 
 test "tab activity markers survive truncation and share their tab hit target" {

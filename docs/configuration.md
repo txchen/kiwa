@@ -48,6 +48,7 @@ Arrays, inline tables, multiline strings, escaped strings, and dotted keys are n
 | `[keys]` | `prefix` | `"ctrl+b"` | A key chord | Startup and reload |
 | `[bindings]` | A quoted key chord | Built-in action for that chord | An action below or `"none"` | Startup and reload |
 | `[ui]` | `sidebar_width` | Saved dragged width, initially `26` | `12` through `200` columns | Startup and reload |
+| `[ui]` | `pane_style` | `"compact"` | `"compact"` or `"framed"` | Startup and reload |
 | `[terminal]` | `scrollback_lines` | `50000` | `0` through `1000000` | New panes only |
 
 ### Prefix
@@ -94,7 +95,7 @@ Some combinations require the outer terminal's extended keyboard protocol. Choos
 | Tabs | `new_tab`, `close_tab`, `rename_tab`, `next_tab`, `prev_tab`, `tab_1` through `tab_9` |
 | Splits | `split_right`, `split_down` |
 | Directional pane focus | `focus_left`, `focus_right`, `focus_up`, `focus_down` |
-| Pane operations | `next_pane`, `prev_pane`, `close_pane`, `rotate_panes`, `zoom`, `resize_mode` |
+| Pane operations | `next_pane`, `prev_pane`, `close_pane`, `rotate_panes`, `zoom`, `resize_mode`, `toggle_pane_style` |
 | Workspaces | `new_workspace`, `close_workspace`, `rename_workspace`, `next_workspace`, `prev_workspace`, `change_workspace_directory` |
 | Sidebar | `navigate`, `toggle_sidebar` |
 | Other | `copy_mode`, `help`, `reload_config`, `detach` |
@@ -112,6 +113,26 @@ sidebar_width = 30
 An explicit value applies at startup and on every reload. Without one, Kiwa preserves the width saved by mouse dragging, initially 26 columns.
 
 Dragging still works with an explicit width, but the next reload or startup reapplies that width. Narrow terminals temporarily clamp or collapse the sidebar to leave room for panes without changing the saved width.
+
+### Pane style
+
+```toml
+[ui]
+pane_style = "framed"
+
+[bindings]
+"prefix+f" = "toggle_pane_style"
+```
+
+Compact is the default and uses single internal dividers. Framed draws an independent one-cell border around each pane, with a one-cell blank gutter between frames. Only the focused pane's frame is highlighted. Single panes and zoomed panes have no border or gutter. A zoomed tab shows `[Z]` after its name, even when the name is truncated.
+
+The style applies to all tabs in the server. Toggling keeps panes, running programs, focus, and split ratios intact, while resizing pane content. `toggle_pane_style` has no default binding.
+
+The runtime toggle survives detach and attach. It does not modify the configuration file or survive a server restart. A successful reload reasserts the file's style, or compact when omitted. A failed reload leaves the live style unchanged.
+
+If any pane cannot fit a framed content area of two columns and one row, the whole tab temporarily uses compact. Framing returns when space permits. This fallback does not change the requested style or split ratios. Split and resize limits remain the compact limits.
+
+In framed style, frame cells and gutters do not send clicks, motion, or wheel events to programs. A release still completes a program's earlier content press. The facing borders and their gutter support divider dragging. Right-clicking a frame opens that pane's menu. A gutter opens the nearest pane's menu, with ties going to the topmost, then leftmost pane.
 
 ### Scrollback
 
