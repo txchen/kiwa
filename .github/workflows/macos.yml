@@ -23,4 +23,17 @@ jobs:
       - name: Build and run unit and end-to-end tests (Debug)
         run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Doptimize=Debug
       - name: Build and run unit and end-to-end tests (ReleaseFast)
-        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Doptimize=ReleaseFast
+        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=ReleaseFast
+      - name: Build release binary
+        run: mise exec -- zig build -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=ReleaseFast
+      - name: Package release binary
+        run: |
+          zig-out/bin/kiwa --version
+          mkdir -p dist
+          tar -czf dist/kiwa-aarch64-macos.tar.gz -C zig-out/bin kiwa
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kiwa-aarch64-macos
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

@@ -38,12 +38,20 @@ jobs:
     needs: version
     uses: ./.github/workflows/linux.yml
 
+  macos:
+    needs: version
+    uses: ./.github/workflows/macos.yml
+
   publish:
-    needs: linux
+    needs: [linux, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: src
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: kiwa-*
@@ -58,10 +66,12 @@ jobs:
           cd dist
           test -f kiwa-x86_64-linux-musl.tar.gz
           test -f kiwa-aarch64-linux-musl.tar.gz
-          sha256sum ./*.tar.gz > SHA256SUMS
+          test -f kiwa-aarch64-macos.tar.gz
+          cp ../src/install.sh .
+          sha256sum ./*.tar.gz install.sh > SHA256SUMS
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$RELEASE_TAG" ./*.tar.gz SHA256SUMS \
+          gh release create "$RELEASE_TAG" ./*.tar.gz install.sh SHA256SUMS \
             --verify-tag --generate-notes --title "$RELEASE_TAG" "${flags[@]}"

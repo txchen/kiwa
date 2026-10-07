@@ -5,6 +5,20 @@ written in Zig 0.16 and uses Ghostty's `ghostty-vt` module as the terminal
 engine for each pane. See `GLOSSARY.md` for vocabulary and `docs/adr/` for
 the main decisions.
 
+## Install
+
+On Linux (x86_64 or ARM64) or an Apple silicon Mac:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/txchen/kiwa/master/install.sh | sh
+```
+
+The script downloads the latest release for the machine, checks it against
+the release's `SHA256SUMS`, and installs `kiwa` to `~/.local/bin`. Set
+`KIWA_INSTALL_DIR` to install elsewhere and `KIWA_VERSION` (for example,
+`0.1.0`) to pin a release. After an upgrade, run `kiwa kill-server` to
+move the running server onto the new version; the layout is restored.
+
 ## Build
 
 Zig is pinned in `mise.toml`. Run every command through mise:
@@ -23,7 +37,7 @@ this project.
 
 GitHub Actions runs formatting checks, unit tests, and PTY end-to-end tests
 in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners and
-a `macos-15` ARM64 runner. Each successful Linux ReleaseFast job uploads a
+a `macos-15` ARM64 runner. Each successful ReleaseFast job uploads a
 downloadable archive. The same
 workflow builds and tests release artifacts, so release tests use the same
 CPU target and optimization mode as the shipped binary. Zig is installed
@@ -44,9 +58,10 @@ To publish a release:
 
 3. The Release workflow rejects a tag that differs from the package
    version, runs all CI checks, and publishes a GitHub Release containing
-   `kiwa-x86_64-linux-musl.tar.gz`, `kiwa-aarch64-linux-musl.tar.gz`, and
-   `SHA256SUMS`. Tags containing a hyphen are marked as prereleases.
-   Publishing requires both architectures and both test modes to pass.
+   `kiwa-x86_64-linux-musl.tar.gz`, `kiwa-aarch64-linux-musl.tar.gz`,
+   `kiwa-aarch64-macos.tar.gz`, `install.sh`, and `SHA256SUMS`. Tags
+   containing a hyphen are marked as prereleases. Publishing requires every
+   platform and both test modes to pass.
 
 Download the archive for your architecture and `SHA256SUMS` from the same
 release. Verify it with `sha256sum --ignore-missing -c SHA256SUMS`, then
@@ -83,7 +98,10 @@ mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0
 ```
 
 The binary links the system libraries, so it is not a static executable.
-No release publishes it yet, and it is neither signed nor notarized.
+Releases publish it as `kiwa-aarch64-macos.tar.gz`. It carries the ad-hoc
+signature Zig's linker adds and is not notarized. `install.sh` downloads it
+with curl, which sets no quarantine flag, so Gatekeeper does not block it. An
+archive downloaded with a browser needs `xattr -d com.apple.quarantine kiwa`.
 
 OS-specific code lives in `src/os/linux.zig` and `src/os/darwin.zig`, and
 the test harness's in `tests/os/` (ADR 0005). On Linux,
