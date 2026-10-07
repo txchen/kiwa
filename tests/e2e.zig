@@ -2506,7 +2506,7 @@ fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     defer seen.deinit(ctx.gpa);
     o.capture = &seen;
     defer o.capture = null;
-    try o.send("i=0; while [ $i -lt 80 ]; do printf 'scroll-%03d\\n' $i; i=$((i+1)); sleep 0.01; done\r");
+    try o.send("python3 -c 'import time; [(print(\"scroll-%03d\" % i, flush=True), time.sleep(0.01)) for i in range(80)]'\r");
     try o.waitText("scroll-079");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.wheel(true, 60, 16);
