@@ -218,7 +218,8 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | Key | Action |
 | --- | --- |
 | `c` | New tab in the focused pane's directory |
-| `v` / `-` | Split the focused pane right / down |
+| `\|` / `v` | Split the focused pane right |
+| `-` | Split the focused pane down |
 | `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
 | `z` | Zoom or unzoom the focused pane |
 | `x` | Close the focused pane |
@@ -226,19 +227,41 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `n` / `p`, `1..9` | Next / previous tab, tab by number |
 | `shift+t` / `shift+x` | Rename / close the tab |
 | `shift+n` / `shift+w` / `shift+d` | New workspace in the focused pane's directory / rename / close the workspace |
-| `shift+1..9` | Workspace by number |
 | `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
 | `b` | Collapse or expand the sidebar |
-| `q` | Detach |
-| `?` | Key help; `esc`, `q`, or `?` closes it |
+| `d` / `q` | Detach |
+| `[` / `ctrl+k` | Keyboard copy mode |
+| `tab` / `shift+tab` | Next / previous pane |
+| `?` | Key help; `j/k` or arrows scroll; `esc`, `q`, or `?` closes it |
 | `ctrl+b` | Send `ctrl+b` to the pane |
+
+These shortcuts work directly, without the prefix:
+
+| Key | Action |
+| --- | --- |
+| `alt+h` / `alt+l` | Previous / next tab |
+| `alt+j` / `alt+k` | Next / previous pane, wrapping in layout order |
+| `alt+z` | Zoom or unzoom |
+| `alt+o` | Rotate pane contents to the preceding layout slot, keeping focus on the same slot |
+| `ctrl+alt+j` / `ctrl+alt+k` | Next / previous workspace, wrapping around |
+
+The pane shortcuts behave the same in every program, including Neovim.
+Directional pane focus remains available with `prefix h/j/k/l` or arrows.
+Cycling panes while zoomed keeps the newly focused pane zoomed.
 
 The sidebar on the left lists the workspaces and highlights the current
 one. A workspace you are not viewing shows `•` after output and `!` after a
 bell, until you view it. Below 64 columns the sidebar collapses to the
-workspace numbers. The tab row above the panes lists the current
-workspace's tabs; while the prefix, resize mode, or navigate mode is
-active, a mode bar with the main keys takes its place. The outer window
+workspace numbers. Drag the sidebar's right edge to change its width;
+Kiwa remembers it across restarts and collapse/expand. The default is 26
+columns, with at least 12 for the sidebar and 20 for the panes when expanded.
+A narrow client temporarily clamps the width without changing the saved choice.
+
+The tab row above the panes always lists the current workspace's tabs.
+A one-line status bar below the panes shows help for prefix, resize,
+navigate, and copy modes. It stays reserved in normal mode, so pressing
+prefix never resizes a pane. Split panes share a single divider row or
+column, with no outer frame. The outer window
 title is `{hostname}: {workspace}`, and the outer terminal's own title is
 restored on detach.
 
@@ -261,7 +284,7 @@ then the leftmost.
 
 Kiwa saves the session's shape to `session.json` in the state directory:
 the workspaces and tabs in order, fixed names, layouts and divider
-positions, focus, zoom, the sidebar toggle, and each pane's working
+positions, focus, zoom, the sidebar toggle and width, and each pane's working
 directory. It writes the file 1 s after a change to any of these, and at
 once when `kiwa kill-server` or `SIGTERM`/`SIGHUP` stops the server. Typing
 and output alone never write it; a shell that reports a new directory with
@@ -285,6 +308,23 @@ run kiwa kill-server to restart the server on this version; the layout is restor
 `kiwa kill-server` works across versions: it sends the server `SIGTERM`,
 which saves the session, and waits up to 5 s for it to exit. The next
 `kiwa` starts a server on the new code and restores the layout.
+
+Keyboard copy mode uses the pane's existing 50,000-line scrollback:
+
+- Enter with `prefix [` or `prefix ctrl+k`.
+- Move with `h/j/k/l` or arrows; `page up/down` move a page,
+  and `ctrl+u/d` move half a page. The mouse wheel moves three rows. `gg` goes to the oldest text and `G` to
+  the bottom. `0` / `ctrl+a` / `home` and `$` / `ctrl+e` / `end` move to
+  the start and end of a line.
+- Press `v` to start or cancel a selection. `y` or `enter` copies a
+  selection and exits; `esc` or `q` cancels. Leaving copy mode returns to
+  live output. Clicking also leaves copy mode.
+- Copies go directly to the system clipboard through OSC 52, as mouse
+  selections do. The outer terminal must allow clipboard writes. Paste
+  with the outer terminal's usual paste shortcut; Kiwa keeps no separate
+  paste buffer and does not read the clipboard. Pastes during copy mode
+  are ignored. A copy is limited to 384 KiB of text; if it cannot be sent,
+  copy mode keeps the selection and shows a retry message.
 
 Kiwa works with the mouse:
 

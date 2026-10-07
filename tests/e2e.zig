@@ -724,7 +724,7 @@ fn resizeReachesPane(ctx: *Ctx) !void {
     _ = try o.pump(300);
     try o.send("tput cols; tput lines\r");
     try o.waitLine("64");
-    try o.waitLine("29");
+    try o.waitLine("28");
 }
 
 fn takeover(ctx: *Ctx) !void {
@@ -811,7 +811,7 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
 fn fullScreenPrograms(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("22");
+    try o.waitLine("21");
     try expect(!try o.hasLine("200"), "less shows only the first screen");
     try o.send("G");
     try o.waitLine("200");
@@ -911,11 +911,11 @@ fn pasteIntoVimIsBracketed(ctx: *Ctx) !void {
 
 fn lessPages(o: *Outer) !void {
     try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("22");
+    try o.waitLine("21");
     try o.press(named(.page_down, .{}));
-    try o.waitLine("44");
+    try o.waitLine("42");
     try o.press(named(.arrow_down, .{}));
-    try o.waitLine("45");
+    try o.waitLine("43");
     try o.press(named(.end, .{}));
     try o.waitLine("200");
     try o.press(named(.home, .{}));
@@ -1095,8 +1095,8 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
     // On a large screen, each line scrolls every row of the region, so even
     // diffed frames pass the 1 MiB limit quickly. The region keeps lines out
     // of the scrollback, which a Debug ghostty-vt makes slow to grow.
-    // A 250x80 pane, beside the sidebar and under the tab row.
-    const o = try ctx.attachSized(276, 81);
+    // A 250x80 pane, beside the sidebar and between the tab and status rows.
+    const o = try ctx.attachSized(276, 82);
     try o.waitLine("$");
     // The loop ends on a file, not on ctrl+c: under load, the shell
     // sometimes kept looping after a ctrl+c.
@@ -1154,7 +1154,7 @@ fn scrollingCostsBytesPerLine(ctx: *Ctx, margins: bool) !void {
     o.capture = &seen;
     try o.waitLine("line 40 scrolls by");
     o.capture = null;
-    for (19..41) |i| {
+    for (20..41) |i| {
         var buf: [32]u8 = undefined;
         try o.waitLine(try std.fmt.bufPrint(&buf, "line {d} scrolls by", .{i}));
     }
@@ -1189,11 +1189,6 @@ const Box = struct {
 
     fn contains(b: Box, x: usize, y: usize) bool {
         return x >= b.x and x < b.x + b.cols and y >= b.y and y < b.y + b.rows;
-    }
-
-    /// The cells inside the border.
-    fn inner(b: Box) Box {
-        return .{ .x = b.x + 1, .y = b.y + 1, .cols = b.cols - 2, .rows = b.rows - 2 };
     }
 };
 
@@ -1234,7 +1229,7 @@ const Grid = struct {
     /// when the screen shows none.
     fn sidebarCols(g: *const Grid) usize {
         if (g.rs.rows == 0) return 0;
-        for ([_]usize{ 26, 4 }) |w| {
+        for (1..g.rs.cols + 1) |w| {
             if (g.rs.cols >= w and g.cp(w - 1, 0) == 0x2502) return w;
         }
         return 0;
@@ -1272,17 +1267,6 @@ const Grid = struct {
         return null;
     }
 
-    /// Whether `b` is drawn as a single-line box.
-    fn isBox(g: *const Grid, b: Box) bool {
-        const r = b.x + b.cols - 1;
-        const bot = b.y + b.rows - 1;
-        if (g.cp(b.x, b.y) != 0x250c or g.cp(r, b.y) != 0x2510) return false;
-        if (g.cp(b.x, bot) != 0x2514 or g.cp(r, bot) != 0x2518) return false;
-        for (b.x + 1..r) |x| if (g.cp(x, b.y) != 0x2500 or g.cp(x, bot) != 0x2500) return false;
-        for (b.y + 1..bot) |y| if (g.cp(b.x, y) != 0x2502 or g.cp(r, y) != 0x2502) return false;
-        return true;
-    }
-
     /// Whether the screen right of the sidebar has line-drawing characters.
     fn hasBoxChars(g: *const Grid) bool {
         for (0..g.rs.rows) |y| for (g.sidebarCols()..g.rs.cols) |x| switch (g.cp(x, y)) {
@@ -1309,7 +1293,22 @@ fn waitTextIn(o: *Outer, text: []const u8, box: Box) !void {
 fn boxesDrawn(o: *Outer, boxes: []const Box) !bool {
     var g: Grid = try .load(o);
     defer g.deinit();
-    for (boxes) |b| if (!g.isBox(b)) return false;
+    var right: u16 = 0;
+    var bottom: u16 = 0;
+    for (boxes) |b| {
+        right = @max(right, b.x + b.cols);
+        bottom = @max(bottom, b.y + b.rows);
+    }
+    for (boxes) |b| {
+        if (b.x + b.cols < right) for (b.y..b.y + b.rows) |y| {
+            const cp = g.cp(b.x + b.cols - 1, y);
+            if (cp != 0x2502 and cp != 0x253c) return false;
+        };
+        if (b.y + b.rows < bottom) for (b.x..b.x + b.cols) |x| {
+            const cp = g.cp(x, b.y + b.rows - 1);
+            if (cp != 0x2500 and cp != 0x253c) return false;
+        };
+    }
     return true;
 }
 
@@ -1327,19 +1326,33 @@ fn waitNoBorders(o: *Outer) !void {
     return o.waitFor("no pane borders", {}, noBorders);
 }
 
-/// Whether the box's corners use the accent color, and only those boxes.
+/// Whether focus is inside the first pane and an adjacent divider has the accent.
 fn accentIs(o: *Outer, boxes: []const Box) !bool {
     var g: Grid = try .load(o);
     defer g.deinit();
-    for (boxes, 0..) |b, i| {
-        const fg = g.fg(b.x, b.y);
-        const accent = fg == .palette and fg.palette == 6;
-        if (accent != (i == 0)) return false;
+    const cursor = o.term.screens.active.cursor;
+    if (!boxes[0].contains(cursor.x, cursor.y)) return false;
+    const b = boxes[0];
+    var found = false;
+    for (b.y..b.y + b.rows) |y| {
+        for ([_]usize{ b.x -| 1, b.x + b.cols - 1 }) |x| {
+            if (x < g.sidebarCols() or x >= g.rs.cols or g.cp(x, y) != 0x2502) continue;
+            const fg = g.fg(x, y);
+            if (fg == .palette and fg.palette == 6) found = true;
+        }
     }
+    for (b.x..b.x + b.cols) |x| {
+        for ([_]usize{ b.y -| 1, b.y + b.rows - 1 }) |y| {
+            if (y >= g.rs.rows or g.cp(x, y) != 0x2500) continue;
+            const fg = g.fg(x, y);
+            if (fg == .palette and fg.palette == 6) found = true;
+        }
+    }
+    if (!found) return false;
     return true;
 }
 
-/// Waits until `boxes[0]` alone has the accent border.
+/// Waits until `boxes[0]` has focus and an accented shared divider.
 fn waitAccent(o: *Outer, boxes: []const Box) !void {
     return o.waitFor("the accent border", boxes, accentIs);
 }
@@ -1361,11 +1374,11 @@ fn caseName(ctx: *Ctx) []const u8 {
 
 /// The tab area of an 80x24 outer terminal: right of the 26-column sidebar
 /// and below the tab row.
-const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
-const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
-const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
-const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
-const right_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
+const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 22 };
+const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 22 };
+const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 22 };
+const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 11 };
+const right_bottom: Box = .{ .x = 53, .y = 12, .cols = 27, .rows = 11 };
 
 fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
@@ -1378,15 +1391,15 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try prefixed(o, "h");
     try waitAccent(o, &.{ left_half, right_top, right_bottom });
     try o.send("echo left$((10+1))\r");
-    try waitTextIn(o, "left11", left_half.inner());
+    try waitTextIn(o, "left11", left_half);
     try prefixed(o, "l");
     try waitAccent(o, &.{ right_top, left_half, right_bottom });
     try o.send("echo top$((10+2))\r");
-    try waitTextIn(o, "top12", right_top.inner());
+    try waitTextIn(o, "top12", right_top);
     try prefixed(o, "j");
     try waitAccent(o, &.{ right_bottom, left_half, right_top });
     try o.send("echo bottom$((10+3))\r");
-    try waitTextIn(o, "bottom13", right_bottom.inner());
+    try waitTextIn(o, "bottom13", right_bottom);
     try prefixed(o, "k");
     try waitAccent(o, &.{ right_top, left_half, right_bottom });
     try o.send("\x02\x1b[B");
@@ -1412,24 +1425,24 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try want.print(ctx.gpa, "1: {s}\n  1: sh, 3 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
 
-    try prefixed(o, "!");
+    try prefixed(o, "w1\r");
     try prefixed(o, "1");
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
-    try waitTextIn(o, "left11", left_half.inner());
-    try waitTextIn(o, "top12", right_top.inner());
-    try waitTextIn(o, "bottom13", right_bottom.inner());
+    try waitTextIn(o, "left11", left_half);
+    try waitTextIn(o, "top12", right_top);
+    try waitTextIn(o, "bottom13", right_bottom);
     try waitAccent(o, &.{ right_bottom, left_half, right_top });
 
     try prefixed(o, "x");
     try waitBoxes(o, &.{ left_half, right_half });
     try waitAccent(o, &.{ right_half, left_half });
-    try waitTextIn(o, "top12", right_half.inner());
+    try waitTextIn(o, "top12", right_half);
     try prefixed(o, "x");
     try waitNoBorders(o);
     try o.waitText("left11");
     try o.send("clear; tput cols; tput lines\r");
     try o.waitLine("54");
-    try o.waitLine("23");
+    try o.waitLine("22");
     want.clearRetainingCapacity();
     try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: two\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
@@ -1440,7 +1453,7 @@ fn zoomAndUnzoom(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "25", right_half.inner());
+    try waitTextIn(o, "27", right_half);
     try prefixed(o, "z");
     try waitNoBorders(o);
     try o.send("clear; tput cols\r");
@@ -1448,7 +1461,7 @@ fn zoomAndUnzoom(ctx: *Ctx) !void {
     try prefixed(o, "z");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "25", right_half.inner());
+    try waitTextIn(o, "27", right_half);
 }
 
 fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
@@ -1459,14 +1472,14 @@ fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
     // An unambiguous escape: a raw ESC followed at once by typing would read as alt+c.
     try o.waitKitty();
     try o.press(named(.escape, .{}));
-    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 23 };
-    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 23 };
+    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 22 };
+    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 22 };
     try waitBoxes(o, &.{ resized_left, resized_right });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "30", resized_right.inner());
+    try waitTextIn(o, "32", resized_right);
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "20", resized_left.inner());
+    try waitTextIn(o, "21", resized_left);
 }
 
 fn exitCascadesToTheServer(ctx: *Ctx) !void {
@@ -1506,13 +1519,13 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     try o.send("mkdir sub && cd sub && echo in-$(basename $PWD)\r");
     try o.waitLine("in-sub");
     try prefixed(o, "v");
-    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 23 };
-    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 23 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 22 };
+    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 22 };
     try waitBoxes(o, &.{ left, right });
     try o.send("clear; pwd\r");
     const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
     defer ctx.gpa.free(sub);
-    try waitTextIn(o, sub, right.inner());
+    try waitTextIn(o, sub, right);
     // A reported OSC 7 directory wins over the shell's actual one.
     try o.send("clear; mkdir '../o d'; printf '\\033]7;file://localhost%s/o%%20d\\007' \"$(dirname \"$PWD\")\"\r");
     _ = try o.pump(200);
@@ -1650,8 +1663,8 @@ fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
     try o.resize(80, 24);
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
     try o.send("clear; tput cols; tput lines\r");
-    try waitTextIn(o, "25", right_bottom.inner());
-    try waitTextIn(o, "9", right_bottom.inner());
+    try waitTextIn(o, "27", right_bottom);
+    try waitTextIn(o, "11", right_bottom);
 }
 
 /// The highest counter each producer `N:` shows on screen.
@@ -1811,7 +1824,7 @@ fn activityMarksOtherWorkspaces(ctx: *Ctx) !void {
         try expect(g.cp(23, 2) == ' ', "the viewed workspace has no marker");
     }
     try waitCell(o, "the bell marker on workspace 1", 23, 1, '!');
-    try prefixed(o, "!");
+    try prefixed(o, "w1\r");
     try waitHighlighted(o, 1);
     try waitCell(o, "no marker on the viewed workspace", 23, 1, ' ');
 }
@@ -1849,7 +1862,7 @@ fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
     try waitHighlighted(o, 2);
     // The new shell's late prompt would otherwise mark the hidden workspace.
     try o.waitLine("$");
-    try prefixed(o, "!");
+    try prefixed(o, "w1\r");
     try waitHighlighted(o, 1);
     const name = caseName(ctx);
     var first: std.ArrayList(u8) = .empty;
@@ -1923,7 +1936,7 @@ fn outerTitleNamesTheWorkspace(ctx: *Ctx) !void {
     defer two.deinit(ctx.gpa);
     try two.print(ctx.gpa, "{s}: two", .{hostname()});
     try o.waitFor("the new workspace's title", two.items, titleIs);
-    try prefixed(o, "!");
+    try prefixed(o, "w1\r");
     try o.waitFor("the first workspace's title", want.items, titleIs);
     try prefixed(o, "q");
     try expect(try o.waitExit() == 0, "the client detaches");
@@ -1941,12 +1954,12 @@ fn cursorFollowsTheFocusedPane(ctx: *Ctx) !void {
     try waitCursor(o, area.x + 2, area.y);
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
-    try waitCursor(o, right_half.x + 1 + 2, right_half.y + 1);
+    try waitCursor(o, right_half.x + 2, right_half.y);
     try o.send("echo hi\r");
-    try waitCursor(o, right_half.x + 1 + 2, right_half.y + 3);
+    try waitCursor(o, right_half.x + 2, right_half.y + 2);
     try prefixed(o, "h");
     try waitAccent(o, &.{ left_half, right_half });
-    try waitCursor(o, left_half.x + 1 + 2, left_half.y + 1);
+    try waitCursor(o, left_half.x + 2, left_half.y);
 }
 
 fn listWith(ctx: *Ctx, comptime fmt: []const u8, args: anytype) !void {
@@ -1991,11 +2004,11 @@ fn clickFocusesPanes(ctx: *Ctx) !void {
     try o.click(left_half.x + 5, left_half.y + 5);
     try waitAccent(o, &.{ left_half, right_half });
     try o.send("echo left$((1+1))\r");
-    try waitTextIn(o, "left2", left_half.inner());
+    try waitTextIn(o, "left2", left_half);
     try o.click(right_half.x + 5, right_half.y + 5);
     try waitAccent(o, &.{ right_half, left_half });
     try o.send("echo right$((1+2))\r");
-    try waitTextIn(o, "right3", right_half.inner());
+    try waitTextIn(o, "right3", right_half);
 }
 
 fn dragMovesTheBorder(ctx: *Ctx) !void {
@@ -2003,33 +2016,143 @@ fn dragMovesTheBorder(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.drag(.{ left_half.x + left_half.cols - 1, 10 }, .{ 42, 12 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 23 };
-    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 23 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 22 };
+    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 22 };
     try waitBoxes(o, &.{ left, right });
     try waitAccent(o, &.{ right, left });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "35", right.inner());
-    // A drag from the other border cell, far past the minimum size, stops there.
-    try o.drag(.{ right.x, 3 }, .{ 2, 3 });
-    const narrow: Box = .{ .x = 26, .y = 1, .cols = 4, .rows = 23 };
-    try waitBoxes(o, &.{ narrow, .{ .x = 30, .y = 1, .cols = 50, .rows = 23 } });
+    try waitTextIn(o, "37", right);
+    // A second drag on the shared divider stops at the minimum content size.
+    try o.drag(.{ right.x - 1, 3 }, .{ 2, 3 });
+    const narrow: Box = .{ .x = 26, .y = 1, .cols = 3, .rows = 22 };
+    try waitBoxes(o, &.{ narrow, .{ .x = 29, .y = 1, .cols = 51, .rows = 22 } });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "48", .{ .x = 31, .y = 2, .cols = 48, .rows = 21 });
+    try waitTextIn(o, "51", .{ .x = 29, .y = 1, .cols = 51, .rows = 22 });
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "2", narrow.inner());
+    try waitTextIn(o, "2", narrow);
+}
+
+fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    try o.send("\x02");
+    try o.waitText(" PREFIX ");
+    {
+        var g: Grid = try .load(o);
+        defer g.deinit();
+        try expect(g.findIn("1 sh", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 }) != null, "prefix keeps the tab row visible");
+        try expect(g.findIn("PREFIX", .{ .x = 26, .y = 23, .cols = 54, .rows = 1 }) != null, "prefix help is on the bottom row");
+    }
+    try o.send("|");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("clear; echo RIGHT-$((20+2))\r");
+    try waitTextIn(o, "RIGHT-22", right_half);
+    try o.press(char('k', .{ .alt = true }));
+    try waitAccent(o, &.{ left_half, right_half });
+    try o.send("clear; echo LEFT-$((10+1))\r");
+    try waitTextIn(o, "LEFT-11", left_half);
+    try o.press(char('j', .{ .alt = true }));
+    try waitAccent(o, &.{ right_half, left_half });
+    try o.press(char('z', .{ .alt = true }));
+    try waitNoBorders(o);
+    try o.press(char('z', .{ .alt = true }));
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.press(char('o', .{ .alt = true }));
+    try waitTextIn(o, "RIGHT-22", left_half);
+    try waitTextIn(o, "LEFT-11", right_half);
+    try prefixed(o, "c");
+    try waitNoBorders(o);
+    try o.press(char('h', .{ .alt = true }));
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.press(char('l', .{ .alt = true }));
+    try waitNoBorders(o);
+    try prefixed(o, "N");
+    try waitHighlighted(o, 2);
+    try o.press(char('k', .{ .ctrl = true, .alt = true }));
+    try waitHighlighted(o, 1);
+    try o.press(char('j', .{ .ctrl = true, .alt = true }));
+    try waitHighlighted(o, 2);
+    try prefixed(o, "d");
+    try expect(try o.waitExit() == 0, "prefix d detaches");
+}
+
+fn keyboardCopyWritesClipboard(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.waitKitty();
+    try o.send("clear; printf 'hello \\344\\270\\255\\346\\226\\207  \\n'\r");
+    try o.waitLine("hello \u{4e2d}\u{6587}");
+    try o.waitLine("$");
+    try prefixed(o, "[");
+    try o.waitText(" COPY ");
+    try o.send("k0v");
+    try o.press(char('e', ctrl));
+    try o.send("y");
+    try o.waitGone(" COPY ");
+    const deadline = now() + 3000;
+    while (o.clipboard.items.len == 0 and now() < deadline) _ = try o.pump(50);
+    try expect(std.mem.eql(u8, o.clipboard.items, "hello \u{4e2d}\u{6587}"), "keyboard copy writes Unicode text to the system clipboard");
+    try prefixed(o, "\x0b");
+    try o.waitText(" COPY ");
+    try o.wheel(true, 40, 10);
+    try waitCursor(o, 28, 1);
+    try o.paste("must-not-reach-shell");
+    try o.press(named(.escape, .{}));
+    try o.waitGone(" COPY ");
+    try o.paste("echo pasted-$((3+4))");
+    try o.send("\r");
+    try o.waitLine("pasted-7");
+}
+
+fn sidebarDragPersists(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.drag(.{ 25, 10 }, .{ 37, 10 });
+    try waitSidebar(o, 38);
+    try o.send("clear; tput cols\r");
+    try o.waitLine("42");
+    try prefixed(o, "b");
+    try waitSidebar(o, 4);
+    try prefixed(o, "b");
+    try waitSidebar(o, 38);
+    try o.resize(50, 24);
+    try waitSidebar(o, 4);
+    try o.resize(80, 24);
+    try waitSidebar(o, 38);
+    const saved = try waitSaved(ctx, "\"sidebar_width\": 38");
+    defer ctx.gpa.free(saved.text);
+    try expect(try ctx.run("kill-server") == 0, "stopping saves the sidebar width");
+    _ = try o.waitExit();
+    const restored = try attachedWithPrompt(ctx);
+    try waitSidebar(restored, 38);
+}
+
+fn horizontalSplitUsesOneRow(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try prefixed(o, "-");
+    const top: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 11 };
+    const bottom: Box = .{ .x = 26, .y = 12, .cols = 54, .rows = 11 };
+    try waitBoxes(o, &.{ top, bottom });
+    try o.send("clear; tput lines\r");
+    try waitTextIn(o, "11", bottom);
+    try o.press(char('k', .{ .alt = true }));
+    try o.send("clear; tput lines\r");
+    try waitTextIn(o, "10", top);
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    for (26..80) |x| try expect(g.cp(x, 11) == 0x2500, "one shared horizontal divider");
+    try expect(g.cp(26, 1) != 0x250c and g.cp(79, 22) != 0x2518, "no outer pane borders");
 }
 
 fn wheelScrollsTheScrollback(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("clear; seq 1 200; sleep 1; seq 201 210\r");
     try o.waitLine("200");
-    try expect(!try o.hasLine("177"), "line 177 is above the screen");
+    try expect(!try o.hasLine("178"), "line 178 is above the screen");
     try o.wheel(true, 40, 10);
     try o.waitText("[3/");
-    try o.waitLine("177");
+    try o.waitLine("178");
     try o.waitText("[13/");
-    try expect(try o.hasLine("177"), "new output leaves the scrolled-back viewport where it was");
+    try expect(try o.hasLine("178"), "new output leaves the scrolled-back viewport where it was");
     try expect(!try o.hasLine("210"), "new output stays below the scrolled-back viewport");
     try o.wheel(false, 40, 10);
     try o.waitText("[10/");
@@ -2047,9 +2170,9 @@ fn wheelScrollsTheScrollback(ctx: *Ctx) !void {
 fn wheelScrollsLess(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("22");
+    try o.waitLine("21");
     try o.wheel(false, 40, 10);
-    try o.waitLine("25");
+    try o.waitLine("24");
     try expect(!try o.hasLine("3"), "less scrolled three lines");
     try o.wheel(true, 40, 10);
     try o.waitLine("3");
@@ -2506,20 +2629,20 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try o.waitKitty();
     try o.send("mkdir -p one/left one/top one/bottom two/x && cd one/left && echo in-$(basename $PWD)\r");
     try o.waitLine("in-left");
-    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 29 };
-    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 29 };
+    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 28 };
+    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 28 };
     try prefixed(o, "v");
-    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 29 }, half });
+    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 28 }, half });
     try o.send("cd ../top && echo in-$(basename $PWD)\r");
-    try waitTextIn(o, "in-top", half.inner());
+    try waitTextIn(o, "in-top", half);
     try prefixed(o, "-");
-    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 15 }, .{ .x = 93, .y = 16, .cols = 67, .rows = 14 } });
+    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 14 }, .{ .x = 93, .y = 15, .cols = 67, .rows = 14 } });
     try o.send("cd ../bottom && echo in-$(basename $PWD)\r");
     try o.waitText("in-bottom");
     try o.drag(.{ 92, 5 }, .{ 75, 5 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 29 };
-    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 15 };
-    const bottom: Box = .{ .x = 76, .y = 16, .cols = 84, .rows = 14 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 28 };
+    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 14 };
+    const bottom: Box = .{ .x = 76, .y = 15, .cols = 84, .rows = 14 };
     try waitBoxes(o, &.{ left, top, bottom });
     try prefixed(o, "k");
     try waitAccent(o, &.{ top, left, bottom });
@@ -2535,7 +2658,7 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try o.waitLine("in-x");
     try prefixed(o, "W");
     try renameTo(o, " rename workspace ", "proj");
-    try prefixed(o, "!");
+    try prefixed(o, "w1\r");
     try waitHighlighted(o, 1);
     try prefixed(o, "1");
     try waitBoxes(o, &.{ left, top, bottom });
@@ -2561,18 +2684,18 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try waitBoxes(b, &.{ left, top, bottom });
     try ctx.waitList(list.items);
     try b.waitFor("the same sidebar, tab row, and borders", @as([]const u8, before), chromeIs);
-    try pwdIn(ctx, b, "/one/top", top.inner());
+    try pwdIn(ctx, b, "/one/top", top);
     try prefixed(b, "h");
     try waitAccent(b, &.{ left, top, bottom });
-    try pwdIn(ctx, b, "/one/left", left.inner());
+    try pwdIn(ctx, b, "/one/left", left);
     try prefixed(b, "l");
     try prefixed(b, "j");
     try waitAccent(b, &.{ bottom, left, top });
-    try pwdIn(ctx, b, "/one/bottom", bottom.inner());
+    try pwdIn(ctx, b, "/one/bottom", bottom);
     try prefixed(b, "2");
     try waitNoBorders(b);
     try pwdIn(ctx, b, "/two", full);
-    try prefixed(b, "@");
+    try prefixed(b, "w2\r");
     try waitHighlighted(b, 2);
     try pwdIn(ctx, b, "/two/x", full);
 }
@@ -2622,7 +2745,7 @@ fn typingDoesNotSave(ctx: *Ctx) !void {
     try expect(settled.same(before), "nothing is written after the save the split armed");
     try o.send("for i in 1 2 3; do echo tick$i; sleep 1; done\r");
     try typeText(o, "echo typed ahead");
-    try waitTextIn(o, "tick3", right_half.inner());
+    try waitTextIn(o, "tick3", right_half);
     try o.send("\r");
     _ = try o.pump(1200);
     const after = (try Saved.read(ctx)).?;
@@ -2632,12 +2755,12 @@ fn typingDoesNotSave(ctx: *Ctx) !void {
     // A shell that reports its directory with OSC 7 saves its cd, but
     // repeating the same directory saves nothing.
     try o.send("clear; printf '\\033]7;file://localhost/tmp\\007'; echo reported\r");
-    try waitTextIn(o, "reported", right_half.inner());
+    try waitTextIn(o, "reported", right_half);
     const moved = try waitSaved(ctx, "\"cwd\": \"/tmp\"");
     defer ctx.gpa.free(moved.text);
     sleepMs(1200);
     try o.send("clear; printf '\\033]7;file://localhost/tmp\\007'; echo again\r");
-    try waitTextIn(o, "again", right_half.inner());
+    try waitTextIn(o, "again", right_half);
     sleepMs(1500);
     const repeated = (try Saved.read(ctx)).?;
     defer ctx.gpa.free(repeated.text);
@@ -2751,6 +2874,10 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "the outer cursor sits at the focused pane's cursor", .run = cursorFollowsTheFocusedPane },
     .{ .name = "clicks switch workspaces and tabs, add them, and toggle the sidebar", .run = clicksSwitchWorkspacesAndTabs },
     .{ .name = "a click focuses a pane", .run = clickFocusesPanes },
+    .{ .name = "default shortcuts and the bottom prefix bar", .run = defaultShortcutsAndFooter },
+    .{ .name = "keyboard copy writes Unicode to the clipboard", .run = keyboardCopyWritesClipboard },
+    .{ .name = "sidebar dragging changes pane size and survives restart", .run = sidebarDragPersists },
+    .{ .name = "horizontal splits use a single divider row", .run = horizontalSplitUsesOneRow },
     .{ .name = "dragging a border resizes both panes", .run = dragMovesTheBorder },
     .{ .name = "the wheel scrolls a shell pane's scrollback until typing returns", .run = wheelScrollsTheScrollback },
     .{ .name = "the wheel scrolls less on the alternate screen", .run = wheelScrollsLess },

@@ -9,7 +9,7 @@ const PaneId = @import("layout.zig").PaneId;
 
 const Handler = vt.TerminalStream.Handler;
 
-pub const scrollback_lines = 10_000;
+pub const scrollback_lines = 50_000;
 
 /// Bytes read from the PTY per wake before the loop serves other fds.
 const read_budget = 256 * 1024;
@@ -20,6 +20,7 @@ const read_budget = 256 * 1024;
 pub const clipboard_limit = 512 * 1024;
 
 pub const Pane = struct {
+    copy: ?@import("copy.zig").State = null,
     gpa: std.mem.Allocator,
     id: PaneId,
     fd: sys.fd_t,
@@ -112,6 +113,7 @@ pub const Pane = struct {
     }
 
     pub fn destroy(self: *Pane) void {
+        self.endCopy();
         sys.close(self.fd);
         self.pending.deinit(self.gpa);
         self.clipboard.deinit(self.gpa);
@@ -273,6 +275,11 @@ pub const Pane = struct {
         const screen = self.terminal.screens.active;
         const sel = screen.selection orelse return null;
         return try screen.selectionString(gpa, .{ .sel = sel, .trim = true });
+    }
+
+    pub fn endCopy(self: *Pane) void {
+        if (self.copy) |*c| c.deinit(&self.terminal);
+        self.copy = null;
     }
 
     pub fn flushPending(self: *Pane) !void {

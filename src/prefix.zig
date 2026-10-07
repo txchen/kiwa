@@ -1,9 +1,10 @@
 //! The prefix key: `ctrl+b` makes the next key a Kiwa action instead of
 //! pane input. It matches decoded keys, so legacy and kitty encodings of
-//! the same key behave alike. Three bindings enter a mode that keeps
+//! the same key behave alike. Bindings can enter modes that keep
 //! taking keys: `prefix r` resizes until `esc` or `enter`, `prefix w`
 //! navigates the sidebar until `enter`, `esc`, or `q`, and `prefix ?`
-//! shows key help until `esc`, `q`, or `?`. While a dialog is open, it
+//! shows scrollable key help until `esc`, `q`, or `?`. Copy mode takes
+//! keyboard selection commands. While a dialog is open, it
 //! takes every key and paste.
 
 const std = @import("std");
@@ -29,8 +30,12 @@ pub const Action = union(enum) {
     new_workspace,
     rename_workspace,
     close_workspace,
-    /// Zero-based.
-    workspace: u8,
+    next_workspace,
+    prev_workspace,
+    next_pane,
+    prev_pane,
+    rotate_panes,
+    copy_mode,
     navigate,
     toggle_sidebar,
     help,
@@ -108,10 +113,6 @@ const directions = [_]struct { Trigger, layout.Dir }{
     .{ .named(.arrow_right), .right },
 };
 
-/// Legacy terminals send shift+1..9 as the shifted character with no
-/// modifier, so workspace bindings also match a US layout's punctuation.
-const shifted_digits = "!@#$%^&*(";
-
 fn group(comptime keys: []const u8, comptime text: []const u8, comptime list: []const Binding) []const Binding {
     var out = list[0..list.len].*;
     out[0].help = .{ .keys = keys, .text = text };
@@ -125,19 +126,29 @@ fn focusBindings() []const Binding {
     return group("h j k l, arrows", "focus the pane in that direction", list);
 }
 
-fn digitBindings(comptime workspaces: bool) []const Binding {
+fn digitBindings() []const Binding {
     var list: []const Binding = &.{};
-    for (0..9) |i| list = list ++ if (workspaces) &[_]Binding{
-        .{ .trigger = .shifted('1' + i), .action = .{ .workspace = i } },
-        .{ .trigger = .char(shifted_digits[i]), .action = .{ .workspace = i } },
-    } else &[_]Binding{.{ .trigger = .char('1' + i), .action = .{ .tab = i } }};
-    return if (workspaces) group("shift+1..9", "workspace by number", list) else group("1..9", "tab by number", list);
+    for (0..9) |i| list = list ++ &[_]Binding{.{ .trigger = .char('1' + i), .action = .{ .tab = i } }};
+    return group("1..9", "tab by number", list);
 }
+
+const direct_bindings = [_]Binding{
+    .{ .trigger = .{ .code = .{ .char = 'h' }, .mods = .{ .alt = true } }, .action = .prev_tab, .help = .{ .keys = "alt+h / l", .text = "previous / next tab" } },
+    .{ .trigger = .{ .code = .{ .char = 'l' }, .mods = .{ .alt = true } }, .action = .next_tab },
+    .{ .trigger = .{ .code = .{ .char = 'j' }, .mods = .{ .alt = true } }, .action = .next_pane, .help = .{ .keys = "alt+j / k", .text = "next / previous pane" } },
+    .{ .trigger = .{ .code = .{ .char = 'k' }, .mods = .{ .alt = true } }, .action = .prev_pane },
+    .{ .trigger = .{ .code = .{ .char = 'z' }, .mods = .{ .alt = true } }, .action = .zoom, .help = .{ .keys = "alt+z", .text = "zoom the pane" } },
+    .{ .trigger = .{ .code = .{ .char = 'o' }, .mods = .{ .alt = true } }, .action = .rotate_panes, .help = .{ .keys = "alt+o", .text = "rotate panes upward" } },
+    .{ .trigger = .{ .code = .{ .char = 'j' }, .mods = .{ .ctrl = true, .alt = true } }, .action = .next_workspace, .help = .{ .keys = "ctrl+alt+j / k", .text = "next / previous workspace" } },
+    .{ .trigger = .{ .code = .{ .char = 'k' }, .mods = .{ .ctrl = true, .alt = true } }, .action = .prev_workspace },
+};
 
 /// In key help order.
 const bindings: []const Binding = &[_]Binding{
     .doc(.char('c'), .new_tab, "new tab"),
-    .doc(.char('v'), .{ .split = .right }, "split right"),
+    .{ .trigger = .char('|'), .action = .{ .split = .right }, .help = .{ .keys = "| / v", .text = "split right" } },
+    .{ .trigger = .char('v'), .action = .{ .split = .right } },
+    .{ .trigger = .shifted('\\'), .action = .{ .split = .right } },
     .doc(.char('-'), .{ .split = .down }, "split down"),
 } ++ focusBindings() ++ &[_]Binding{
     .doc(.char('z'), .zoom, "zoom the pane"),
@@ -145,25 +156,33 @@ const bindings: []const Binding = &[_]Binding{
     .doc(.char('r'), .resize_mode, "resize mode"),
     .doc(.char('n'), .next_tab, "next tab"),
     .doc(.char('p'), .prev_tab, "previous tab"),
-} ++ digitBindings(false) ++ &[_]Binding{
+} ++ digitBindings() ++ &[_]Binding{
     .doc(.shifted('t'), .rename_tab, "rename the tab"),
     .doc(.shifted('x'), .close_tab, "close the tab"),
     .doc(.shifted('n'), .new_workspace, "new workspace"),
     .doc(.shifted('w'), .rename_workspace, "rename the workspace"),
     .doc(.shifted('d'), .close_workspace, "close the workspace"),
-} ++ digitBindings(true) ++ &[_]Binding{
+
     .doc(.char('w'), .navigate, "navigate workspaces"),
     .doc(.char('b'), .toggle_sidebar, "toggle the sidebar"),
-    .doc(.char('q'), .detach, "detach"),
+    .{ .trigger = .char('d'), .action = .detach, .help = .{ .keys = "d / q", .text = "detach" } },
+    .{ .trigger = .char('q'), .action = .detach },
+    .{ .trigger = .char('['), .action = .copy_mode, .help = .{ .keys = "[ / ctrl+k", .text = "copy mode" } },
+    .{ .trigger = .{ .code = .{ .char = 'k' }, .mods = .{ .ctrl = true } }, .action = .copy_mode },
+    .{ .trigger = .named(.tab), .action = .next_pane, .help = .{ .keys = "tab / shift+tab", .text = "next / previous pane" } },
+    .{ .trigger = .{ .code = .{ .named = .tab }, .mods = .{ .shift = true } }, .action = .prev_pane },
     .doc(.char('?'), .help, "key help"),
     // What a kitty terminal reporting every key would send for `?`.
     .{ .trigger = .shifted('/'), .action = .help },
 };
 
-/// Every prefix key with its description, in table order.
+/// Prefix keys followed by direct shortcuts, in help order.
 pub const help: []const Help = blk: {
     var list: []const Help = &.{};
     for (bindings) |b| if (b.help) |h| {
+        list = list ++ &[_]Help{h};
+    };
+    for (direct_bindings) |b| if (b.help) |h| {
         list = list ++ &[_]Help{h};
     };
     break :blk list ++ &[_]Help{.{ .keys = "ctrl+b", .text = "send ctrl+b to the pane" }};
@@ -180,14 +199,16 @@ pub const Outcome = union(enum) {
     navigate: Nav,
     /// A key or paste for the open dialog.
     dialog: input.Event,
+    copy_key: input.Key,
     /// The prefix itself, an unbound key after it, or a mode change.
     none,
 };
 
 pub const Prefix = struct {
     mode: Mode = .normal,
+    help_offset: usize = 0,
 
-    pub const Mode = union(enum) { normal, armed, resize, navigate, help, dialog: Dialog };
+    pub const Mode = union(enum) { normal, armed, resize, navigate, help, copy, dialog: Dialog };
 
     /// Only keys and unknown sequences answer the prefix; focus, paste,
     /// and mouse events pass by without disarming it.
@@ -199,9 +220,14 @@ pub const Prefix = struct {
         };
         switch (ev) {
             .key => |k| {
-                if (k.action == .release) return if (p.mode == .normal) .{ .pane = ev } else .none;
+                if (k.action == .release) {
+                    if (p.mode != .normal) return .none;
+                    for (direct_bindings) |b| if (b.trigger.matches(k)) return .none;
+                    return .{ .pane = ev };
+                }
                 return switch (p.mode) {
                     .normal => {
+                        for (direct_bindings) |b| if (b.trigger.matches(k)) return .{ .action = b.action };
                         if (!prefix_key.matches(k)) return .{ .pane = ev };
                         p.mode = .armed;
                         return .none;
@@ -209,7 +235,21 @@ pub const Prefix = struct {
                     .armed => p.afterPrefix(ev, k),
                     .resize => p.inResize(k),
                     .navigate => p.inNavigate(k),
-                    .help => p.inMode(k, &help_exits),
+                    .help => blk: {
+                        if (Trigger.anyOf(&.{ .char('j'), .named(.arrow_down), .named(.page_down) }, k)) {
+                            p.help_offset = @min(p.help_offset + 1, help.len - 1);
+                            break :blk .none;
+                        }
+                        if (Trigger.anyOf(&.{ .char('k'), .named(.arrow_up), .named(.page_up) }, k)) {
+                            p.help_offset -|= 1;
+                            break :blk .none;
+                        }
+                        break :blk p.inMode(k, &help_exits);
+                    },
+                    .copy => if (prefix_key.matches(k)) blk: {
+                        p.mode = .armed;
+                        break :blk .none;
+                    } else .{ .copy_key = k },
                     .dialog => unreachable,
                 };
             },
@@ -218,7 +258,7 @@ pub const Prefix = struct {
                 if (p.mode == .armed) p.mode = .normal;
                 return .none;
             },
-            else => return .{ .pane = ev },
+            else => return if (p.mode == .copy and ev == .paste) .none else .{ .pane = ev },
         }
     }
 
@@ -226,10 +266,12 @@ pub const Prefix = struct {
         p.mode = .normal;
         if (prefix_key.matches(k)) return .{ .pane = ev };
         for (bindings) |b| if (b.trigger.matches(k)) {
+            if (b.action == .help) p.help_offset = 0;
             p.mode = switch (b.action) {
                 .resize_mode => .resize,
                 .navigate => .navigate,
                 .help => .help,
+                .copy_mode => .copy,
                 else => .normal,
             };
             return .{ .action = b.action };
@@ -290,7 +332,7 @@ fn run(bytes: []const u8) !Collected {
     while (try d.next(testing.allocator)) |ev| switch (p.feed(ev)) {
         .pane => |e| try c.pane.append(testing.allocator, e),
         .action => |a| try c.actions.append(testing.allocator, a),
-        .navigate, .dialog, .none => {},
+        .navigate, .dialog, .copy_key, .none => {},
     };
     return c;
 }
@@ -329,10 +371,16 @@ test "every table key maps to its action" {
     });
 }
 
-test "digits pick tabs; shift+digits pick workspaces as legacy punctuation or kitty shift" {
-    try expectRun("\x021\x029\x02!\x02(\x02#", &.{}, &.{ .{ .tab = 0 }, .{ .tab = 8 }, .{ .workspace = 0 }, .{ .workspace = 8 }, .{ .workspace = 2 } });
-    try expectRun("\x02\x1b[50;2u\x02\x1b[57;2u\x02\x1b[120;2u", &.{}, &.{ .{ .workspace = 1 }, .{ .workspace = 8 }, .close_tab });
-    try expectRun("\x020", &.{}, &.{});
+test "digits pick tabs and shifted digits no longer pick workspaces" {
+    try expectRun("\x021\x029\x02!\x02(\x02#", &.{}, &.{ .{ .tab = 0 }, .{ .tab = 8 } });
+    try expectRun("\x02\x1b[50;2u\x02\x1b[57;2u\x02\x1b[120;2u", &.{}, &.{.close_tab});
+    try expectRun("\x020\x02%\x02\"", &.{}, &.{});
+}
+
+test "direct shortcuts work in legacy and kitty encodings" {
+    try expectRun("\x1bh\x1bl\x1bj\x1bk\x1bz\x1bo\x1b\x0a\x1b\x0b", &.{}, &.{ .prev_tab, .next_tab, .next_pane, .prev_pane, .zoom, .rotate_panes, .next_workspace, .prev_workspace });
+    try expectRun("\x1b[106;7u\x1b[107;7u\x1b[106;3u", &.{}, &.{ .next_workspace, .prev_workspace, .next_pane });
+    try expectRun("\x02|\x02\x1b[92;2u\x02d", &.{}, &.{ .{ .split = .right }, .{ .split = .right }, .detach });
 }
 
 test "resize mode repeats resize keys until esc or enter, and drops other keys" {
@@ -415,11 +463,11 @@ test "the sidebar toggle and resize mode are prefix keys" {
     try expectModes("\x02b\x02r", .resize, &.{ .{ .action = .toggle_sidebar }, .{ .action = .resize_mode } });
 }
 
-test "key help describes every prefix action" {
+test "key help describes every action" {
     for (std.meta.tags(std.meta.Tag(Action))) |tag| {
         if (tag == .resize) continue;
-        for (bindings) |b| {
-            if (b.action == tag and b.help != null) break;
+        for (bindings ++ direct_bindings) |b| {
+            if (b.action == tag) break;
         } else {
             std.debug.print("no help for {t}\n", .{tag});
             return error.Undocumented;
@@ -431,4 +479,18 @@ test "key help describes every prefix action" {
     try testing.expectEqualStrings("shift+t", help[10].keys);
     try testing.expectEqualStrings("shift+x", help[11].keys);
     try testing.expectEqualStrings("ctrl+b", help[help.len - 1].keys);
+}
+
+test "direct shortcut releases are consumed and copy mode owns keys and pastes" {
+    var p: Prefix = .{};
+    const released = input.Event{ .key = .{ .code = .{ .char = 'j' }, .mods = .{ .alt = true }, .action = .release } };
+    try testing.expectEqualDeep(Outcome.none, p.feed(released));
+    _ = p.feed(ctrl_b);
+    try testing.expectEqualDeep(Outcome{ .action = .copy_mode }, p.feed(typed('[')));
+    try testing.expect(p.mode == .copy);
+    try testing.expectEqualDeep(Outcome{ .copy_key = .typed('j') }, p.feed(typed('j')));
+    try testing.expectEqualDeep(Outcome.none, p.feed(.{ .paste = .{ .data = @constCast("ignored") } }));
+    _ = p.feed(ctrl_b);
+    try testing.expect(p.mode == .armed);
+    try testing.expectEqualDeep(Outcome{ .action = .new_tab }, p.feed(typed('c')));
 }

@@ -1,5 +1,5 @@
-//! Everything on screen except pane content: the sidebar, the tab row or
-//! the mode bar that replaces it, and the key help box. Pure; it draws a
+//! Everything on screen except pane content: the sidebar, the tab row,
+//! the bottom mode bar, and the key help box. Pure; it draws a
 //! `View` of the session into a `Frame`.
 
 const std = @import("std");
@@ -13,10 +13,11 @@ const Cell = frame_mod.Cell;
 const Rect = frame_mod.Rect;
 const Style = frame_mod.Style;
 
-/// The expanded sidebar's width, including its divider column.
+/// The default expanded sidebar width, including its divider column.
 pub const sidebar_cols = 26;
 /// The collapsed sidebar's width, including its divider column.
 pub const collapsed_cols = 4;
+pub const min_sidebar_cols = 12;
 /// Narrower frames collapse the sidebar whatever the toggle says.
 pub const expand_min_cols = 64;
 
@@ -27,6 +28,7 @@ pub const Mode = union(enum) {
     /// The navigate cursor, a workspace index.
     navigate: usize,
     help,
+    copy: bool,
 };
 
 pub const Workspace = struct {
@@ -50,6 +52,7 @@ pub const View = struct {
     mode: Mode = .normal,
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
+    sidebar_width: u16 = sidebar_cols,
 };
 
 /// Where the chrome and the tab area go in a frame. Modes never change it,
@@ -59,22 +62,29 @@ pub const Geometry = struct {
     /// is too narrow for one.
     sidebar: u16,
     tab_row: bool,
+    status_row: bool,
     /// What the active tab's panes own.
     area: Rect,
 
     pub fn of(cols: u16, rows: u16, collapsed: bool) Geometry {
+        return sized(cols, rows, collapsed, sidebar_cols);
+    }
+
+    pub fn sized(cols: u16, rows: u16, collapsed: bool, width: u16) Geometry {
         const sidebar: u16 = if (cols >= expand_min_cols and !collapsed)
-            sidebar_cols
+            std.math.clamp(width, min_sidebar_cols, cols - 20)
         else if (cols >= collapsed_cols + 2)
             collapsed_cols
         else
             0;
         const tab_row = rows >= 2;
         const top: u16 = @intFromBool(tab_row);
+        const status_row = rows >= 3;
         return .{
             .sidebar = sidebar,
             .tab_row = tab_row,
-            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top },
+            .status_row = status_row,
+            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top - @intFromBool(status_row) },
         };
     }
 };
@@ -92,22 +102,29 @@ pub const box_border: Style = .{ .fg_color = accent };
 const ellipsis = 0x2026;
 const nav_mark = 0x25b6;
 
-/// Draws the sidebar and the tab row or mode bar, every cell of them.
+/// Draws the sidebar, tab row, and bottom mode bar, every cell of them.
 pub fn draw(f: *Frame, v: View) void {
-    const g: Geometry = .of(f.cols, f.rows, v.collapsed);
+    const g: Geometry = .sized(f.cols, f.rows, v.collapsed, v.sidebar_width);
     switch (g.sidebar) {
         0 => {},
-        sidebar_cols => drawSidebar(f, v),
-        else => drawCollapsed(f, v),
+        collapsed_cols => drawCollapsed(f, v),
+        else => drawSidebar(f, v, g.sidebar),
     }
     if (!g.tab_row) return;
     const row = f.rowMut(0)[g.sidebar..];
     @memset(row, .blank);
+    drawTabs(row, v.tabs);
+    if (!g.status_row) return;
+    const footer = f.rowMut(f.rows - 1)[g.sidebar..];
+    @memset(footer, .blank);
     switch (v.mode) {
-        .normal, .help => drawTabs(row, v.tabs),
-        .prefix => drawModeBar(row, " PREFIX ", "c tab  v split  - split  x close  w navigate  ? help"),
-        .resize => drawModeBar(row, " RESIZE ", "h j k l resize  esc done"),
-        .navigate => drawModeBar(row, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back"),
+        .normal, .help => {
+            _ = put(footer, 0, " ctrl+b ? help", dim);
+        },
+        .copy => |failed| drawModeBar(footer, " COPY ", if (failed) "copy failed: shorten selection or retry" else "h j k l move  v select  y copy  esc back"),
+        .prefix => drawModeBar(footer, " PREFIX ", "c tab  | split  - split  x close  w navigate  [ copy  ? help"),
+        .resize => drawModeBar(footer, " RESIZE ", "h j k l resize  esc done"),
+        .navigate => drawModeBar(footer, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back"),
     }
 }
 
@@ -118,6 +135,7 @@ pub const Hit = union(enum) {
     workspace: usize,
     new_workspace,
     toggle_sidebar,
+    resize_sidebar,
     tab: usize,
     new_tab,
 };
@@ -125,13 +143,14 @@ pub const Hit = union(enum) {
 /// What the chrome drawn by `draw` shows at (x, y), or null when the point
 /// is in the tab area.
 pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
-    const g: Geometry = .of(cols, rows, v.collapsed);
+    const g: Geometry = .sized(cols, rows, v.collapsed, v.sidebar_width);
     if (x < g.sidebar) {
-        const expanded = g.sidebar == sidebar_cols;
+        if (x == g.sidebar - 1) return .resize_sidebar;
+        const expanded = g.sidebar > collapsed_cols;
         const list: List = .of(rows, expanded);
         if (y == list.end and list.end < rows) {
             // The `«` and the cells around it toggle; the rest of the footer is `+ new`.
-            return if (!expanded or x >= sidebar_cols - 3) .toggle_sidebar else .new_workspace;
+            return if (!expanded or x >= g.sidebar - 3) .toggle_sidebar else .new_workspace;
         }
         var entries: Entries = .init(v, list, expanded);
         while (entries.next()) |e| {
@@ -139,8 +158,8 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         }
         return .none;
     }
+    if (g.status_row and y == rows - 1) return .none;
     if (!g.tab_row or y != 0) return null;
-    if (v.mode != .normal and v.mode != .help) return .none;
     const rel = x - g.sidebar;
     var slots: TabSlots = .init(v.tabs, cols - g.sidebar);
     while (slots.next()) |slot| {
@@ -232,8 +251,8 @@ fn markerCp(a: Activity) ?u21 {
     };
 }
 
-fn drawSidebar(f: *Frame, v: View) void {
-    const width = sidebar_cols - 1;
+fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
+    const width = sidebar_width - 1;
     for (0..f.rows) |y| {
         const row = f.rowMut(y);
         @memset(row[0..width], .blank);
@@ -388,7 +407,7 @@ fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8) void {
 }
 
 /// The key help box, centered over `area`. It lists `prefix.help`.
-pub fn drawHelp(f: *Frame, area: Rect) void {
+pub fn drawHelp(f: *Frame, area: Rect, offset: usize) void {
     const keys_cols = comptime blk: {
         var w: usize = 0;
         for (prefix.help) |h| w = @max(w, h.keys.len);
@@ -410,9 +429,10 @@ pub fn drawHelp(f: *Frame, area: Rect) void {
     const top = f.rowMut(box.y)[box.x..][0..box.cols];
     _ = put(top[0 .. top.len - 1], 2, " keys ", box_border);
     const bottom = f.rowMut(box.y + box.rows - 1)[box.x..][0..box.cols];
-    const close = " esc close ";
+    const close = " j/k scroll  esc close ";
     if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, box_border);
-    for (prefix.help[0..@min(prefix.help.len, box.rows - 2)], box.y + 1..) |h, y| {
+    const start = @min(offset, prefix.help.len -| (box.rows - 2));
+    for (prefix.help[start..@min(prefix.help.len, start + box.rows - 2)], box.y + 1..) |h, y| {
         const line = f.rowMut(y)[box.x + 1 ..][0 .. box.cols - 2];
         _ = put(line, 1, h.keys, .{ .flags = .{ .bold = true } });
         _ = put(line, 1 + keys_cols + 2, h.text, plain);
@@ -566,10 +586,10 @@ fn isHighlight(c: Cell) bool {
 }
 
 test "geometry: 26 columns at 64 or more, collapsed below or when toggled, and a tab row" {
-    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 94, .rows = 29 }, Geometry.of(120, 30, false).area);
-    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 38, .rows = 23 }, Geometry.of(64, 24, false).area);
-    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 59, .rows = 23 }, Geometry.of(63, 24, false).area);
-    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 116, .rows = 29 }, Geometry.of(120, 30, true).area);
+    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 94, .rows = 28 }, Geometry.of(120, 30, false).area);
+    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 38, .rows = 22 }, Geometry.of(64, 24, false).area);
+    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 59, .rows = 22 }, Geometry.of(63, 24, false).area);
+    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 116, .rows = 28 }, Geometry.of(120, 30, true).area);
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .cols = 5, .rows = 1 }, Geometry.of(5, 1, false).area);
 }
 
@@ -582,7 +602,7 @@ test "one workspace, expanded at 120 columns" {
         \\                         │
         \\                         │
         \\                         │
-        \\ + new                  «│
+        \\ + new                  «│ ctrl+b ? help
         \\
     );
     for (0..25) |x| try testing.expect(isHighlight(s.at(x, 1)));
@@ -601,7 +621,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
         \\ 2 a-very-long-worksp…   │
         \\ 3 notes               ! │
         \\                         │
-        \\ + new                  «│
+        \\ + new                  «│ ctrl+b ? help
         \\
     );
     try testing.expect(isHighlight(wide.at(0, 2)) and isHighlight(wide.at(24, 2)));
@@ -617,7 +637,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
         \\ 3!│
         \\   │
         \\   │
-        \\  »│
+        \\  »│ ctrl+b ? help
         \\
     );
     try testing.expect(isHighlight(narrow.at(0, 1)) and isHighlight(narrow.at(2, 1)));
@@ -630,7 +650,7 @@ test "the toggle collapses a wide sidebar" {
     try s.expect(
         \\ 1 │ 1 sh  2 vim  +
         \\   │
-        \\  »│
+        \\  »│ ctrl+b ? help
         \\
     );
 }
@@ -645,7 +665,7 @@ test "a branch line follows the name when a branch is known" {
         \\   main                  │
         \\ 2 other                 │
         \\   dev                   │
-        \\ + new                  «│
+        \\ + new                  «│ ctrl+b ? help
         \\
     );
     try testing.expect(isHighlight(s.at(3, 2)));
@@ -660,7 +680,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
         \\ workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\   feature/a-very-long-b…│
-        \\ + new                  «│
+        \\ + new                  «│ ctrl+b ? help
         \\
     );
     var narrow = try render(40, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
@@ -669,7 +689,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
         \\ 1 │ 1 sh  2 vim  +
         \\   │
         \\   │
-        \\  »│
+        \\  »│ ctrl+b ? help
         \\
     );
 }
@@ -686,14 +706,14 @@ test "workspaces that overflow scroll to keep the active one visible" {
         \\ 5 e                     │
         \\ 6 f                     │
         \\ 7 g                     │
-        \\ + new                  «│
+        \\ + new                  «│ ctrl+b ? help
         \\
     );
 }
 
-test "mode bars replace the tab row and leave the tab area alone" {
+test "mode bars occupy the footer and keep tabs visible" {
     const cases = [_]struct { Mode, []const u8 }{
-        .{ .prefix, " PREFIX   c tab  v split  - split  x close  w navigate  ? help" },
+        .{ .prefix, " PREFIX   c tab  | split  - split  x close  w navigate  [ copy  ? help" },
         .{ .resize, " RESIZE   h j k l resize  esc done" },
         .{ .{ .navigate = 0 }, " NAVIGATE   j k move  1-9 jump  enter switch  esc back" },
     };
@@ -702,9 +722,11 @@ test "mode bars replace the tab row and leave the tab area alone" {
         defer s.deinit();
         const got = try s.text();
         defer testing.allocator.free(got);
-        const first = got[0..std.mem.indexOfScalar(u8, got, '\n').?];
-        try testing.expectEqualStrings(c[1], first[first.len - c[1].len ..]);
-        try testing.expect(s.at(27, 0).style.flags.bold and isHighlight(s.at(27, 0)));
+        const trimmed = std.mem.trimEnd(u8, got, "\n");
+        const last = trimmed[std.mem.lastIndexOfScalar(u8, trimmed, '\n').? + 1 ..];
+        try testing.expectEqualStrings(c[1], last[last.len - c[1].len ..]);
+        try testing.expect(s.at(27, 2).style.flags.bold and isHighlight(s.at(27, 2)));
+        try testing.expectEqual(@as(u21, '1'), s.at(27, 0).cp);
     }
 }
 
@@ -746,16 +768,16 @@ test "tabs shorten their names, then scroll to keep the active tab visible" {
 }
 
 test "key help lists every prefix binding in a box centered over the tab area" {
-    var s: Screen = try .init(100, 30);
+    var s: Screen = try .init(120, 50);
     defer s.deinit();
-    const g: Geometry = .of(100, 30, false);
+    const g: Geometry = .of(120, 50, false);
     draw(&s.f, .{ .workspaces = &one, .tabs = &tabs2, .mode = .help });
-    drawHelp(&s.f, g.area);
+    drawHelp(&s.f, g.area, 0);
     const got = try s.text();
     defer testing.allocator.free(got);
     for (prefix.help) |h| try testing.expect(std.mem.indexOf(u8, got, h.text) != null);
-    try testing.expect(std.mem.indexOf(u8, got, "c                new tab") != null);
-    try testing.expect(std.mem.indexOf(u8, got, "shift+1..9       workspace by number") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "new tab") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "next / previous workspace") != null);
     var top: ?usize = null;
     var bottom: usize = 0;
     var left: usize = 0;
@@ -772,7 +794,7 @@ test "key help lists every prefix binding in a box centered over the tab area" {
     };
     try testing.expectEqual(prefix.help.len + 2, bottom - top.? + 1);
     try testing.expect(left - g.area.x == s.f.cols - 1 - right or left - g.area.x + 1 == s.f.cols - 1 - right);
-    try testing.expect(top.? - g.area.y == s.f.rows - 1 - bottom or top.? - g.area.y + 1 == s.f.rows - 1 - bottom);
+    try testing.expect(top.? - g.area.y == s.f.rows - 2 - bottom or top.? - g.area.y + 1 == s.f.rows - 2 - bottom);
     // The tab row stays a tab row under the help box.
     try testing.expect(std.mem.startsWith(u8, got, " workspaces              │ 1 sh"));
 }
@@ -781,7 +803,7 @@ test "a tiny frame draws what fits without crashing" {
     for ([_][2]u16{ .{ 2, 1 }, .{ 5, 3 }, .{ 9, 2 }, .{ 70, 1 }, .{ 70, 2 } }) |size| {
         var s = try render(size[0], size[1], .{ .workspaces = &three, .tabs = &tabs2, .mode = .prefix });
         defer s.deinit();
-        drawHelp(&s.f, Geometry.of(size[0], size[1], false).area);
+        drawHelp(&s.f, Geometry.of(size[0], size[1], false).area, 0);
     }
 }
 
@@ -820,7 +842,7 @@ test "clicks land on the workspace, tab, or button drawn there" {
     try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 26 + 16, 0));
     try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 1, 4));
     try testing.expectEqual(null, hit(v, 120, 6, 26, 1));
-    try testing.expectEqual(null, hit(v, 120, 6, 119, 5));
+    try testing.expectEqual(Hit.none, hit(v, 120, 6, 119, 5).?);
 }
 
 test "a collapsed sidebar hits by row, and its footer toggles" {
@@ -898,4 +920,15 @@ test "the scroll marker sits at the top right of the pane content" {
     try testing.expect(isHighlight(s.at(21, 1)) and isHighlight(s.at(27, 1)) and !isHighlight(s.at(28, 1)));
     drawScrollMarker(&s.f, .{ .x = 0, .y = 0, .cols = 4, .rows = 1 }, 3, 177);
     try testing.expect(s.at(0, 0).isDefaultBlank());
+}
+
+test "resized sidebar draws and hits the same divider and preserves terminal space" {
+    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .sidebar_width = 38 };
+    var s = try render(100, 24, v);
+    defer s.deinit();
+    try testing.expectEqual(@as(u21, 0x2502), s.at(37, 10).cp);
+    try testing.expectEqual(Hit.resize_sidebar, hit(v, 100, 24, 37, 10).?);
+    try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 22 }, Geometry.sized(100, 24, false, 38).area);
+    try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500).sidebar);
+    try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38).sidebar);
 }

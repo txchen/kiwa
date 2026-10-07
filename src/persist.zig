@@ -18,6 +18,7 @@ pub const Doc = struct {
     version: u32,
     /// The user's sidebar toggle.
     sidebar_collapsed: bool = false,
+    sidebar_width: u16 = 26,
     /// An index into `workspaces`.
     active_workspace: usize,
     /// Sidebar order.

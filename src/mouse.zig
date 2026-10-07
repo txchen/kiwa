@@ -19,6 +19,7 @@ pub const State = union(enum) {
     dragging_border: struct { split: layout.SplitPath, axis: layout.Axis, grab: i32 },
     /// A left drag in a pane whose program does not track the mouse.
     selecting: PaneId,
+    dragging_sidebar,
     /// A press went to a pane whose program tracks the mouse; its motion and
     /// release follow it there, wherever the pointer goes.
     passing_through: PaneId,
@@ -30,6 +31,7 @@ pub const Effect = union(enum) {
     select_workspace: usize,
     new_workspace,
     toggle_sidebar,
+    resize_sidebar: u16,
     select_tab: usize,
     new_tab,
     /// Focuses the pane and clears any selection. With `deliver`, the report
@@ -111,6 +113,10 @@ fn leftPress(s: *State, ev: input.Mouse, target: Target) Effect {
         .sidebar_workspace => |i| .{ .select_workspace = i },
         .sidebar_new => .new_workspace,
         .sidebar_toggle => .toggle_sidebar,
+        .sidebar_resize => {
+            s.* = .dragging_sidebar;
+            return .none;
+        },
         .tab => |i| .{ .select_tab = i },
         .tab_new => .new_tab,
         .border => |b| {
@@ -142,6 +148,7 @@ fn motion(s: *State, ev: input.Mouse) Effect {
             return .{ .start_selection = t.pane };
         },
         .selecting => |p| .{ .extend_selection = p },
+        .dragging_sidebar => .{ .resize_sidebar = ev.x +| 1 },
         .dragging_border => |d| .{ .move_divider = .{ .split = d.split, .at = along(ev, d.axis) - d.grab } },
         .passing_through => |p| .{ .deliver = p },
         .idle, .menu_open => .none,
@@ -288,5 +295,13 @@ test "right presses open menus; an item click runs it, and anything else closes 
     try expectSteps(.idle, &.{
         .{ report(.right, .press, 70, 0), .none, false, .none, .idle },
         .{ report(.right, .press, 70, 0), .tab_new, false, .none, .idle },
+    });
+}
+
+test "dragging the sidebar owns motion until release" {
+    try expectSteps(.idle, &.{
+        .{ report(.left, .press, 25, 10), .sidebar_resize, false, .none, .dragging_sidebar },
+        .{ report(.left, .motion, 37, 10), local(1, 0, 0), false, .{ .resize_sidebar = 38 }, .dragging_sidebar },
+        .{ report(.left, .release, 37, 10), .none, false, .none, .idle },
     });
 }

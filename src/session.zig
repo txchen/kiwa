@@ -277,6 +277,37 @@ pub const Session = struct {
         });
     }
 
+    pub fn cycleWorkspace(s: *Session, next: bool) bool {
+        const n = s.workspaces.items.len;
+        const i = s.activeIndex();
+        return s.selectWorkspace(if (next) (i + 1) % n else (i + n - 1) % n);
+    }
+
+    pub fn cyclePane(s: *Session, next: bool) !bool {
+        const t = s.activeTab();
+        var panes: std.ArrayList(PaneId) = .empty;
+        defer panes.deinit(s.gpa);
+        try t.layout.panes(s.gpa, &panes);
+        if (panes.items.len < 2) return false;
+        const i = std.mem.indexOfScalar(PaneId, panes.items, t.focused).?;
+        const n = panes.items.len;
+        t.focused = panes.items[if (next) (i + 1) % n else (i + n - 1) % n];
+        return true;
+    }
+
+    /// Moves each pane to the preceding layout slot, keeping focus on its slot.
+    pub fn rotatePanes(s: *Session) !bool {
+        const t = s.activeTab();
+        var panes: std.ArrayList(PaneId) = .empty;
+        defer panes.deinit(s.gpa);
+        try t.layout.panes(s.gpa, &panes);
+        if (panes.items.len < 2) return false;
+        const i = std.mem.indexOfScalar(PaneId, panes.items, t.focused).?;
+        t.layout.rotate();
+        t.focused = panes.items[(i + 1) % panes.items.len];
+        return true;
+    }
+
     /// Selects the workspace at zero-based `index` and clears its activity.
     pub fn selectWorkspace(s: *Session, index: usize) bool {
         if (index >= s.workspaces.items.len) return false;
@@ -693,4 +724,27 @@ test "a close target lists its panes and closes by id, and a gone target does no
     try testing.expectEqual(.workspace, (try s.closeWorkspace(first_ws, &panes)).?);
     try testing.expectEqual(null, try s.closeWorkspace(first_ws, &panes));
     try testing.expectEqualStrings("two", s.activeWorkspace().name.text());
+}
+
+test "pane and workspace cycling wraps, and rotation preserves layout slots" {
+    var s = Session.init(testing.allocator, "sh");
+    defer s.deinit();
+    const a = try s.newWorkspace("/one");
+    const b = try s.split(screen, .right);
+    const c = try s.split(screen, .down);
+    try testing.expect(try s.cyclePane(true));
+    try testing.expectEqual(a, s.focused());
+    try testing.expect(try s.cyclePane(false));
+    try testing.expectEqual(c, s.focused());
+    try testing.expect(try s.rotatePanes());
+    try testing.expectEqual(a, s.focused());
+    var panes: std.ArrayList(PaneId) = .empty;
+    defer panes.deinit(testing.allocator);
+    try s.activeTab().layout.panes(testing.allocator, &panes);
+    try testing.expectEqualSlices(PaneId, &.{ b, c, a }, panes.items);
+    _ = try s.newWorkspace("/two");
+    try testing.expect(s.cycleWorkspace(true));
+    try testing.expectEqualStrings("/one", s.activeWorkspace().root_dir);
+    try testing.expect(s.cycleWorkspace(false));
+    try testing.expectEqualStrings("/two", s.activeWorkspace().root_dir);
 }

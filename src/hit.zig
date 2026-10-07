@@ -16,6 +16,7 @@ pub const Target = union(enum) {
     sidebar_workspace: usize,
     sidebar_new,
     sidebar_toggle,
+    sidebar_resize,
     /// An index into the tab row's tabs.
     tab: usize,
     tab_new,
@@ -54,13 +55,14 @@ pub fn at(s: Scene, x: u16, y: u16) Target {
         .workspace => |i| .{ .sidebar_workspace = i },
         .new_workspace => .sidebar_new,
         .toggle_sidebar => .sidebar_toggle,
+        .resize_sidebar => .sidebar_resize,
         .tab => |i| .{ .tab = i },
         .new_tab => .tab_new,
     };
     for (s.panes) |p| {
         if (!contains(p.box, x, y)) continue;
         if (contains(p.inner, x, y)) return .{ .pane = .{ .pane = p.pane, .x = x - p.inner.x, .y = y - p.inner.y } };
-        const area = chrome.Geometry.of(s.cols, s.rows, s.chrome.collapsed).area;
+        const area = chrome.Geometry.sized(s.cols, s.rows, s.chrome.collapsed, s.chrome.sidebar_width).area;
         const divider = if (s.layout) |l| l.dividerAt(area, x, y) else null;
         return .{ .border = .{ .pane = p.pane, .divider = divider } };
     }
@@ -144,9 +146,9 @@ test "every target, at several sizes, expanded and collapsed" {
         try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 3, .y = 2 } }, at(s, b.inner.x + 3, b.inner.y + 2));
         const divider: layout.Divider = .{ .split = .{}, .axis = .right, .at = b.box.x };
         try testing.expectEqualDeep(Target{ .border = .{ .pane = pid(1), .divider = divider } }, at(s, b.box.x - 1, 5));
-        try testing.expectEqualDeep(Target{ .border = .{ .pane = pid(2), .divider = divider } }, at(s, b.box.x, 5));
-        try testing.expectEqualDeep(Target{ .border = .{ .pane = pid(2), .divider = null } }, at(s, cols - 1, 5));
-        try testing.expectEqualDeep(Target{ .border = .{ .pane = pid(1), .divider = null } }, at(s, a.box.x + 2, a.box.y));
+        try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 0, .y = 4 } }, at(s, b.box.x, 5));
+        try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = b.inner.cols - 1, .y = 4 } }, at(s, cols - 1, 5));
+        try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(1), .x = 2, .y = 0 } }, at(s, a.box.x + 2, a.box.y));
 
         try testing.expectEqualDeep(Target.none, at(s, cols, 0));
         try testing.expectEqualDeep(Target.none, at(s, 0, rows));
@@ -160,7 +162,7 @@ test "a zoomed pane has no border, and an open menu covers what is under it" {
     const zoomed = [_]Placement{.{ .pane = pid(2), .box = f.area, .inner = f.area }};
     s.panes = &zoomed;
     try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 0, .y = 0 } }, at(s, f.area.x, f.area.y));
-    try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 53, .y = 22 } }, at(s, 79, 23));
+    try testing.expectEqualDeep(Target{ .pane = .{ .pane = pid(2), .x = 53, .y = 21 } }, at(s, 79, 22));
 
     s.menu = .{ .subject = .{ .workspace = 0 }, .x = 1, .y = 1 };
     try testing.expectEqualDeep(Target{ .menu_item = 0 }, at(s, 2, 2));

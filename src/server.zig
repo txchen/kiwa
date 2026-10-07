@@ -221,6 +221,7 @@ const Server = struct {
     exit: ?Exit = null,
     /// The user's sidebar toggle; narrow clients collapse it regardless.
     collapsed: bool = false,
+    sidebar_width: u16 = chrome.sidebar_cols,
     hostname: []const u8,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
@@ -341,6 +342,12 @@ const Server = struct {
         if (ready.writable) p.flushPending() catch |e| std.log.err("pane write: {t}", .{e});
         if (ready.readable or ready.hangup) {
             const d = p.drain();
+            if (p.copy) |*copy| if (!copy.sync(&p.terminal)) {
+                p.endCopy();
+                if (s.client) |c| {
+                    if (c.prefix.mode == .copy) c.prefix.mode = .normal;
+                }
+            };
             if (p.clipboard.items.len > 0) try s.forwardClipboard(p);
             if (d.bytes > 0) {
                 // Output in a hidden pane changes nothing on screen, except
@@ -517,7 +524,7 @@ const Server = struct {
 
     /// The area the current tab owns in a frame of `size`.
     fn tabArea(s: *const Server, size: protocol.Size) Rect {
-        return chrome.Geometry.of(size.cols, size.rows, s.collapsed).area;
+        return chrome.Geometry.sized(size.cols, size.rows, s.collapsed, s.sidebar_width).area;
     }
 
     /// Lays out the current tab for the last client size and resizes its
@@ -531,6 +538,7 @@ const Server = struct {
             const p = s.panes.get(pl.pane) orelse continue;
             p.shown = true;
             p.resize(paneSize(pl.inner)) catch |e| std.log.err("pane resize: {t}", .{e});
+            if (p.copy) |*copy| _ = copy.sync(&p.terminal);
         }
     }
 
@@ -566,6 +574,7 @@ const Server = struct {
         s.session.deinit();
         s.session = built;
         s.collapsed = r.doc.sidebar_collapsed;
+        s.sidebar_width = r.doc.sidebar_width;
         for (s.session.workspaces.items) |ws| ws.git = try s.git.watch(s.gpa, ws.root_dir);
 
         const area = s.tabArea(s.size.?);
@@ -612,9 +621,10 @@ const Server = struct {
         if (s.session.isEmpty()) return session_file.remove(s.io, dir);
         var arena: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena.deinit();
-        const doc = persist.snapshot(arena.allocator(), &s.session, s.collapsed, PaneDirs{ .panes = &s.panes }) catch |e| {
+        var doc = persist.snapshot(arena.allocator(), &s.session, s.collapsed, PaneDirs{ .panes = &s.panes }) catch |e| {
             return std.log.err("saving {s}: {t}", .{ session_file.name, e });
         };
+        doc.sidebar_width = s.sidebar_width;
         session_file.save(s.io, dir, doc) catch |e| std.log.err("saving {s}: {t}", .{ session_file.name, e });
     }
 
@@ -687,6 +697,9 @@ const Server = struct {
 
     fn destroyPane(s: *Server, p: *Pane) void {
         if (s.selected == p.id) s.selected = null;
+        if (p.copy != null) if (s.client) |c| {
+            if (c.prefix.mode == .copy) c.prefix.mode = .normal;
+        };
         _ = s.panes.remove(p.id);
         _ = s.pane_fds.remove(p.fd);
         p.destroy();
@@ -741,8 +754,13 @@ const Server = struct {
                 else => {},
             }
             const mode = std.meta.activeTag(c.prefix.mode);
+            const help_offset = c.prefix.help_offset;
             const outcome = c.prefix.feed(ev);
-            if (std.meta.activeTag(c.prefix.mode) != mode) try s.markStale();
+            if (help_offset != c.prefix.help_offset) try s.markStale();
+            if (std.meta.activeTag(c.prefix.mode) != mode) {
+                if (mode == .copy) if (s.focusedPane()) |p| p.endCopy();
+                try s.markStale();
+            }
             switch (outcome) {
                 .pane => |pane_ev| if (s.focusedPane()) |p| {
                     // Typing returns a scrolled-back pane to the live screen.
@@ -756,6 +774,22 @@ const Server = struct {
                     if (s.exit != null) return;
                 },
                 .navigate => |n| try s.navigate(c, n),
+                .copy_key => |key| {
+                    const p = s.focusedPane() orelse continue;
+                    if (p.copy) |*copy| {
+                        const result = try copy.feed(&p.terminal, key);
+                        if (result == .copy and !try s.copySelection(c, p.id)) {
+                            copy.copy_failed = true;
+                            try s.markStale();
+                            continue;
+                        }
+                        if (result != .stay) {
+                            p.endCopy();
+                            c.prefix.mode = .normal;
+                        }
+                    } else c.prefix.mode = .normal;
+                    try s.markStale();
+                },
                 .dialog => |dialog_ev| {
                     try s.dialogInput(c, dialog_ev);
                     if (s.exit != null) return;
@@ -801,7 +835,18 @@ const Server = struct {
             .next_tab => ss.cycleTab(.next),
             .prev_tab => ss.cycleTab(.prev),
             .tab => |i| ss.selectTab(i),
-            .workspace => |i| ss.selectWorkspace(i),
+            .next_workspace => ss.cycleWorkspace(true),
+            .prev_workspace => ss.cycleWorkspace(false),
+            .next_pane, .prev_pane => blk: {
+                if (!try ss.cyclePane(a == .next_pane)) break :blk false;
+                try s.markName(ss.activeTab());
+                break :blk true;
+            },
+            .rotate_panes => blk: {
+                if (!try ss.rotatePanes()) break :blk false;
+                try s.markName(ss.activeTab());
+                break :blk true;
+            },
             .rename_tab => {
                 const t = ss.activeTab();
                 return s.openDialog(c, .{ .rename = .{ .target = .{ .tab = t.id }, .field = .init(t.name.text()) } });
@@ -820,6 +865,14 @@ const Server = struct {
             },
             // The prefix entered the mode; the mode bar shows it.
             .resize_mode, .help => false,
+            .copy_mode => blk: {
+                try s.clearSelection();
+                if (s.focusedPane()) |p| {
+                    p.endCopy();
+                    p.copy = try @import("copy.zig").State.init(&p.terminal);
+                }
+                break :blk false;
+            },
         };
         if (!changed) return;
         try s.relayout();
@@ -935,6 +988,25 @@ const Server = struct {
             .layout = if (t.zoomed) null else &t.layout,
             .menu = if (c.mouse == .menu_open) c.mouse.menu_open else null,
         }, ev.x, ev.y);
+        // Wheel input in copy mode moves its cursor, never the child program.
+        if (c.prefix.mode == .copy and ev.action == .press and
+            (ev.button == .wheel_up or ev.button == .wheel_down))
+        {
+            if (target != .pane or target.pane.pane != s.session.focused()) return;
+            const p = s.focusedPane() orelse return;
+            if (p.copy) |*copy| {
+                const key = input.Key.named(if (ev.button == .wheel_up) .arrow_up else .arrow_down, .{});
+                for (0..3) |_| {
+                    if (try copy.feed(&p.terminal, key) == .cancel) {
+                        p.endCopy();
+                        c.prefix.mode = .normal;
+                        break;
+                    }
+                }
+            }
+            try s.markStale();
+            return;
+        }
         const tracking = switch (target) {
             .pane => |l| if (s.panes.get(l.pane)) |p| p.tracksMouse() else false,
             else => false,
@@ -942,6 +1014,7 @@ const Server = struct {
         // A click leaves prefix, resize, navigate, and help mode.
         const button = ev.button == .left or ev.button == .middle or ev.button == .right;
         if (ev.action == .press and button and c.prefix.mode != .normal) {
+            if (c.prefix.mode == .copy) if (s.focusedPane()) |p| p.endCopy();
             c.prefix.mode = .normal;
             try s.markStale();
         }
@@ -951,6 +1024,14 @@ const Server = struct {
             .select_tab => |i| if (s.session.selectTab(i)) try s.showChanges(),
             .new_workspace => try s.act(c, .new_workspace),
             .toggle_sidebar => try s.act(c, .toggle_sidebar),
+            .resize_sidebar => |width| {
+                if (c.size.cols < chrome.expand_min_cols) return;
+                const wanted = std.math.clamp(width, chrome.min_sidebar_cols, c.size.cols - 20);
+                if (!s.collapsed and wanted == s.sidebar_width) return;
+                s.sidebar_width = wanted;
+                s.collapsed = false;
+                try s.showChanges();
+            },
             .new_tab => try s.act(c, .new_tab),
             .focus => |f| {
                 try s.clearSelection();
@@ -975,7 +1056,9 @@ const Server = struct {
                 try p.extendSelection(s.cellIn(pane, ev) orelse return);
                 try s.markStale();
             },
-            .copy_selection => |pane| try s.copySelection(c, pane),
+            .copy_selection => |pane| {
+                _ = try s.copySelection(c, pane);
+            },
             .move_divider => |d| if (!t.zoomed and t.layout.moveDivider(s.tabArea(c.size), d.split, d.at)) try s.showChanges(),
             .open_menu, .close_menu => try s.markStale(),
             .run_menu_item => |r| try s.runMenuItem(c, r.menu, r.item),
@@ -1033,14 +1116,17 @@ const Server = struct {
     }
 
     /// Sends the selected text to the outer terminal's clipboard with OSC 52.
-    fn copySelection(s: *Server, c: *Conn, pane: PaneId) !void {
-        const p = s.panes.get(pane) orelse return;
-        const text = try p.selectionText(s.gpa) orelse return;
+    fn copySelection(s: *Server, c: *Conn, pane: PaneId) !bool {
+        const p = s.panes.get(pane) orelse return false;
+        const text = try p.selectionText(s.gpa) orelse return true;
         defer s.gpa.free(text);
-        if (text.len == 0) return;
+        if (text.len == 0) return true;
+        if (std.base64.standard.Encoder.calcSize(text.len) > pane_mod.clipboard_limit) return false;
         s.scratch.clearRetainingCapacity();
         try pane_mod.appendOsc52(s.gpa, &s.scratch, 'c', text);
-        if (try s.pushTerminal(c, s.scratch.items)) try s.flush(c);
+        if (!try s.pushTerminal(c, s.scratch.items)) return false;
+        try s.flush(c);
+        return true;
     }
 
     /// Sends a pane program's clipboard write on to the outer terminal.
@@ -1210,7 +1296,7 @@ const Server = struct {
         const uncover_panes = (c.drawn_help and !help) or (c.drawn_dialog and dialog == null);
         try s.compose(c, compose_all or uncover or uncover_panes);
         try s.drawChrome(c, compose_all or uncover);
-        if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size));
+        if (help) chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset);
         c.drawn_help = help;
         if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size));
         c.drawn_dialog = dialog != null;
@@ -1272,12 +1358,35 @@ const Server = struct {
             };
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, which);
             if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);
-            if (pl.pane == focus) c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
+            if (pl.pane == focus) {
+                c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
+                if (p.copy) |*copy| {
+                    c.frame.cursor.visible = false;
+                    if (copy.position(&p.terminal)) |pos| if (pos.x < pl.inner.cols and pos.y < pl.inner.rows) {
+                        c.frame.cursor = .{
+                            .x = pl.inner.x + @as(u16, @intCast(pos.x)),
+                            .y = pl.inner.y + @as(u16, @intCast(pos.y)),
+                            .shape = .steady_block,
+                        };
+                    };
+                }
+            }
         }
-        if (moved or c.drawn_focus != focus) for (s.view.items) |pl| {
-            if (std.meta.eql(pl.box, pl.inner)) continue;
-            c.frame.drawBox(pl.box, if (pl.pane == focus) focused_border_style else border_style);
-        };
+        if (moved or c.drawn_focus != focus) {
+            const focused = s.placementOf(focus);
+            for (s.view.items) |pl| {
+                const right = pl.box.x + pl.box.cols;
+                const bottom = pl.box.y + pl.box.rows;
+                if (pl.inner.cols < pl.box.cols) for (pl.box.y..bottom) |y| {
+                    const active = pl.pane == focus or if (focused) |f| f.box.x == right and y >= f.box.y and y < f.box.y + f.box.rows else false;
+                    c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = if (active) focused_border_style else border_style };
+                };
+                if (pl.inner.rows < pl.box.rows) for (pl.box.x..right) |x| {
+                    const active = pl.pane == focus or if (focused) |f| f.box.y == bottom and x >= f.box.x and x < f.box.x + f.box.cols else false;
+                    c.frame.rowMut(bottom - 1)[x] = .{ .cp = if (pl.inner.cols < pl.box.cols and x == right - 1) @as(u21, 0x253c) else 0x2500, .style = if (active) focused_border_style else border_style };
+                };
+            }
+        }
         c.drawn.clearRetainingCapacity();
         try c.drawn.appendSlice(s.gpa, s.view.items);
         c.drawn_focus = focus;
@@ -1313,12 +1422,14 @@ const Server = struct {
             .workspaces = s.chrome_workspaces.items,
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,
+            .sidebar_width = s.sidebar_width,
             .mode = switch (c.prefix.mode) {
                 .normal => .normal,
                 .armed => .prefix,
                 .resize => .resize,
                 .navigate => .{ .navigate = @min(c.nav, ss.workspaces.items.len - 1) },
                 .help => .help,
+                .copy => .{ .copy = if (s.focusedPane()) |p| if (p.copy) |copy| copy.copy_failed else false else false },
                 .dialog => .normal,
             },
         };
@@ -1391,7 +1502,10 @@ const Server = struct {
     /// goes out.
     fn releaseTerminal(s: *Server, c: *Conn) void {
         const t = c.tty() orelse return;
-        if (s.client == c) s.client = null;
+        if (s.client == c) {
+            if (s.focusedPane()) |p| p.endCopy();
+            s.client = null;
+        }
         c.out.dropQueued();
         while (!c.out.isEmpty()) {
             const n = sys.write(t.fd, c.out.bytes.items) catch break;

@@ -49,13 +49,9 @@ pub const ratio_full: u16 = 1000;
 /// How far one resize step moves a divider.
 pub const resize_step: u16 = 50;
 
-/// The smallest pane content. Split panes have a one-cell border on every
-/// side, so the smallest box is two cells larger each way. A split or
-/// resize that would leave any box smaller is refused.
+/// The smallest pane content. Internal dividers occupy one cell.
 pub const min_cols = 2;
 pub const min_rows = 1;
-const min_box_cols = min_cols + 2;
-const min_box_rows = min_rows + 2;
 
 pub const Node = union(enum) {
     pane: PaneId,
@@ -95,6 +91,14 @@ pub const Layout = struct {
         try collect(gpa, l.root, out);
     }
 
+    /// Rotates pane identities to the preceding leaf without changing the tree.
+    pub fn rotate(l: *Layout) void {
+        var previous: ?*PaneId = null;
+        const first = firstLeaf(l.root);
+        rotateNode(l.root, &previous);
+        previous.?.* = first;
+    }
+
     /// Splits `target`'s box along `axis` and gives the new half to `pane`.
     pub fn split(l: *Layout, gpa: std.mem.Allocator, area: Rect, target: PaneId, axis: Axis, pane: PaneId) !void {
         const leaf = findLeaf(l.root, target).?;
@@ -131,9 +135,9 @@ pub const Layout = struct {
     }
 
     /// Appends each pane's placement inside `area`, top-left first. With
-    /// two or more panes every pane gets a border.
+    /// multiple panes, only internal divider cells are excluded from content.
     pub fn place(l: *const Layout, gpa: std.mem.Allocator, area: Rect, out: *std.ArrayList(Placement)) !void {
-        try placeNode(gpa, l.root, area, l.root.* == .split, out);
+        try placeNode(gpa, l.root, area, area, out);
     }
 
     /// Moves the divider of the innermost split around `pane` that `dir`
@@ -155,9 +159,8 @@ pub const Layout = struct {
         return false;
     }
 
-    /// The divider whose border cells cover (x, y) when `area` is laid out:
-    /// the last column or row of a split's `a` box, or the first of its `b`
-    /// box. Null for every other cell, including a pane's outer edges.
+    /// The divider at (x, y): the last column or row of a split's `a`
+    /// box. The first cell of the `b` box is already terminal content.
     pub fn dividerAt(l: *const Layout, area: Rect, x: u16, y: u16) ?Divider {
         if (x < area.x or x >= area.right() or y < area.y or y >= area.bottom()) return null;
         var n: *const Node = l.root;
@@ -173,8 +176,8 @@ pub const Layout = struct {
                 .right => .{ x, parts[1].x },
                 .down => .{ y, parts[1].y },
             };
-            if (p == at or p + 1 == at) return .{ .split = path, .axis = s.axis, .at = at };
-            const side = @intFromBool(p > at);
+            if (p + 1 == at) return .{ .split = path, .axis = s.axis, .at = at };
+            const side = @intFromBool(p >= at);
             if (path.len == std.math.maxInt(u5)) return null;
             path.bits |= @as(u32, side) << path.len;
             path.len += 1;
@@ -269,6 +272,19 @@ pub fn neighbor(placed: []const Placement, from: PaneId, dir: Dir) ?PaneId {
         best_gap = gap;
     }
     return if (best) |p| p.pane else null;
+}
+
+fn rotateNode(n: *Node, previous: *?*PaneId) void {
+    switch (n.*) {
+        .pane => |*id| {
+            if (previous.*) |p| p.* = id.*;
+            previous.* = id;
+        },
+        .split => |s| {
+            rotateNode(s.a, previous);
+            rotateNode(s.b, previous);
+        },
+    }
 }
 
 fn destroyTree(gpa: std.mem.Allocator, n: *Node) void {
@@ -367,24 +383,35 @@ fn divide(r: Rect, axis: Axis, ratio: u16) [2]Rect {
     };
 }
 
-/// Whether every box under a split keeps the minimum size inside `box`.
-fn fits(n: *const Node, box: Rect) bool {
+/// Leave one cell for each internal divider on the right or bottom edge.
+fn content(box: Rect, area: Rect) Rect {
+    return .{ .x = box.x, .y = box.y, .cols = box.cols -| @intFromBool(box.right() < area.right()), .rows = box.rows -| @intFromBool(box.bottom() < area.bottom()) };
+}
+
+fn fits(n: *const Node, area: Rect) bool {
+    return fitsNode(n, area, area);
+}
+
+fn fitsNode(n: *const Node, box: Rect, area: Rect) bool {
     return switch (n.*) {
-        .pane => box.cols >= min_box_cols and box.rows >= min_box_rows,
-        .split => |s| {
+        .pane => blk: {
+            const inner = content(box, area);
+            break :blk inner.cols >= min_cols and inner.rows >= min_rows;
+        },
+        .split => |s| blk: {
             const parts = divide(box, s.axis, s.ratio);
-            return fits(s.a, parts[0]) and fits(s.b, parts[1]);
+            break :blk fitsNode(s.a, parts[0], area) and fitsNode(s.b, parts[1], area);
         },
     };
 }
 
-fn placeNode(gpa: std.mem.Allocator, n: *const Node, box: Rect, bordered: bool, out: *std.ArrayList(Placement)) !void {
+fn placeNode(gpa: std.mem.Allocator, n: *const Node, box: Rect, area: Rect, out: *std.ArrayList(Placement)) !void {
     switch (n.*) {
-        .pane => |id| try out.append(gpa, .{ .pane = id, .box = box, .inner = if (bordered) box.shrink() else box }),
+        .pane => |id| try out.append(gpa, .{ .pane = id, .box = box, .inner = content(box, area) }),
         .split => |s| {
             const parts = divide(box, s.axis, s.ratio);
-            try placeNode(gpa, s.a, parts[0], bordered, out);
-            try placeNode(gpa, s.b, parts[1], bordered, out);
+            try placeNode(gpa, s.a, parts[0], area, out);
+            try placeNode(gpa, s.b, parts[1], area, out);
         },
     }
 }
@@ -438,13 +465,13 @@ test "one pane fills the area without a border" {
     try testing.expectEqualSlices(Placement, &.{.{ .pane = pid(1), .box = screen, .inner = screen }}, try f.place(screen));
 }
 
-test "splitting right then down gives each new pane half, all bordered" {
+test "splits use single internal dividers and no outer borders" {
     var f: Fixture = try .three();
     defer f.deinit();
     try testing.expectEqualSlices(Placement, &.{
-        .{ .pane = pid(1), .box = .{ .cols = 40, .rows = 24 }, .inner = .{ .x = 1, .y = 1, .cols = 38, .rows = 22 } },
-        .{ .pane = pid(2), .box = .{ .x = 40, .cols = 40, .rows = 12 }, .inner = .{ .x = 41, .y = 1, .cols = 38, .rows = 10 } },
-        .{ .pane = pid(3), .box = .{ .x = 40, .y = 12, .cols = 40, .rows = 12 }, .inner = .{ .x = 41, .y = 13, .cols = 38, .rows = 10 } },
+        .{ .pane = pid(1), .box = .{ .cols = 40, .rows = 24 }, .inner = .{ .x = 0, .y = 0, .cols = 39, .rows = 24 } },
+        .{ .pane = pid(2), .box = .{ .x = 40, .cols = 40, .rows = 12 }, .inner = .{ .x = 40, .y = 0, .cols = 40, .rows = 11 } },
+        .{ .pane = pid(3), .box = .{ .x = 40, .y = 12, .cols = 40, .rows = 12 }, .inner = .{ .x = 40, .y = 12, .cols = 40, .rows = 12 } },
     }, try f.place(screen));
     try testing.expectEqual(3, f.l.count());
 }
@@ -462,14 +489,14 @@ test "an odd extent gives the extra cell to the second half" {
 test "a split that would leave a pane below the minimum is refused and changes nothing" {
     var f: Fixture = try .init();
     defer f.deinit();
-    const small: Rect = .{ .cols = 7, .rows = 5 };
+    const small: Rect = .{ .cols = 4, .rows = 2 };
     try testing.expectError(error.TooSmall, f.l.split(alloc, small, pid(1), .right, pid(2)));
     try testing.expectError(error.TooSmall, f.l.split(alloc, small, pid(1), .down, pid(2)));
     try testing.expectEqual(1, f.l.count());
-    try f.l.split(alloc, .{ .cols = 8, .rows = 3 }, pid(1), .right, pid(2));
-    const placed = try f.place(.{ .cols = 8, .rows = 3 });
-    try testing.expectEqual(Rect{ .x = 1, .y = 1, .cols = min_cols, .rows = min_rows }, placed[0].inner);
-    try testing.expectEqual(Rect{ .x = 5, .y = 1, .cols = min_cols, .rows = min_rows }, placed[1].inner);
+    try f.l.split(alloc, .{ .cols = 5, .rows = 1 }, pid(1), .right, pid(2));
+    const placed = try f.place(.{ .cols = 5, .rows = 1 });
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .cols = min_cols, .rows = min_rows }, placed[0].inner);
+    try testing.expectEqual(Rect{ .x = 3, .y = 0, .cols = min_cols, .rows = min_rows }, placed[1].inner);
 }
 
 test "closing a pane gives its space to its sibling and focus to the nearest pane there" {
@@ -535,10 +562,10 @@ test "resize moves the innermost matching divider and stops at the minimum" {
 
     var moves: usize = 0;
     while (f.l.resize(screen, pid(2), .up)) moves += 1;
-    try testing.expectEqual(Rect{ .x = 36, .cols = 44, .rows = 4 }, try f.box(2));
+    try testing.expectEqual(Rect{ .x = 36, .cols = 44, .rows = 2 }, try f.box(2));
     try testing.expect(moves > 0);
     while (f.l.resize(screen, pid(1), .right)) {}
-    try testing.expectEqual(Rect{ .x = 76, .y = 4, .cols = 4, .rows = 20 }, try f.box(3));
+    try testing.expectEqual(Rect{ .x = 76, .y = 2, .cols = 4, .rows = 22 }, try f.box(3));
 }
 
 test "random splits, resizes, and closes always tile the area exactly" {
@@ -567,7 +594,7 @@ test "random splits, resizes, and closes always tile the area exactly" {
             const placed = try f.place(screen);
             try testing.expectEqual(live.items.len, placed.len);
             for (placed) |p| {
-                if (placed.len > 1) try testing.expect(p.box.cols >= min_box_cols and p.box.rows >= min_box_rows);
+                if (placed.len > 1) try testing.expect(p.inner.cols >= min_cols and p.inner.rows >= min_rows);
                 for (p.box.y..p.box.bottom()) |y| for (p.box.x..p.box.right()) |x| {
                     covered[y][x] += 1;
                 };
@@ -577,15 +604,15 @@ test "random splits, resizes, and closes always tile the area exactly" {
     }
 }
 
-test "a divider is found on both border cells next to it, and outer edges have none" {
+test "a divider occupies one cell and outer edges have none" {
     var f: Fixture = try .three();
     defer f.deinit();
     const root: Divider = .{ .split = .{}, .axis = .right, .at = 40 };
     try testing.expectEqual(root, f.l.dividerAt(screen, 39, 5).?);
-    try testing.expectEqual(root, f.l.dividerAt(screen, 40, 0).?);
+    try testing.expectEqual(root, f.l.dividerAt(screen, 39, 0).?);
     const inner: Divider = .{ .split = .{ .bits = 1, .len = 1 }, .axis = .down, .at = 12 };
     try testing.expectEqual(inner, f.l.dividerAt(screen, 60, 11).?);
-    try testing.expectEqual(inner, f.l.dividerAt(screen, 79, 12).?);
+    try testing.expectEqual(inner, f.l.dividerAt(screen, 79, 11).?);
     try testing.expectEqual(null, f.l.dividerAt(screen, 0, 5));
     try testing.expectEqual(null, f.l.dividerAt(screen, 60, 0));
     try testing.expectEqual(null, f.l.dividerAt(screen, 79, 5));
@@ -604,15 +631,15 @@ test "moving a divider follows the pointer and stops at the minimum pane size" {
     try testing.expectEqual(Rect{ .x = 30, .cols = 50, .rows = 12 }, try f.box(2));
     try testing.expect(!f.l.moveDivider(screen, .{}, 30));
     try testing.expect(f.l.moveDivider(screen, .{}, -5));
-    try testing.expectEqual(Rect{ .cols = min_box_cols, .rows = 24 }, try f.box(1));
+    try testing.expectEqual(Rect{ .cols = min_cols + 1, .rows = 24 }, try f.box(1));
     try testing.expect(f.l.moveDivider(screen, .{}, 500));
-    try testing.expectEqual(Rect{ .x = 80 - min_box_cols, .cols = min_box_cols, .rows = 12 }, try f.box(2));
+    try testing.expectEqual(Rect{ .x = 80 - min_cols, .cols = min_cols, .rows = 12 }, try f.box(2));
 
     const inner: SplitPath = .{ .bits = 1, .len = 1 };
     try testing.expect(f.l.moveDivider(screen, inner, 20));
-    try testing.expectEqual(Rect{ .x = 76, .y = 20, .cols = 4, .rows = 4 }, try f.box(3));
+    try testing.expectEqual(Rect{ .x = 78, .y = 20, .cols = 2, .rows = 4 }, try f.box(3));
     try testing.expect(f.l.moveDivider(screen, inner, 23));
-    try testing.expectEqual(Rect{ .x = 76, .y = 24 - min_box_rows, .cols = 4, .rows = min_box_rows }, try f.box(3));
+    try testing.expectEqual(Rect{ .x = 78, .y = 24 - min_rows, .cols = 2, .rows = min_rows }, try f.box(3));
     try testing.expect(!f.l.moveDivider(screen, .{ .bits = 0, .len = 1 }, 10));
     try testing.expect(!f.l.moveDivider(screen, .{ .bits = 3, .len = 2 }, 10));
 }
