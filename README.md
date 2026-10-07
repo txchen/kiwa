@@ -1,448 +1,167 @@
-# Kiwa
+<h1 align="center">
+  <img src="docs/assets/kiwa.svg" alt="Kiwa · 際（きわ）" width="760">
+</h1>
 
-Kiwa is a lightweight terminal multiplexer with a persistent sidebar. It is
-written in Zig 0.16 and uses Ghostty's `ghostty-vt` module as the terminal
-engine for each pane. See `GLOSSARY.md` for vocabulary and `docs/adr/` for
-the main decisions.
+A terminal multiplexer with a workspace sidebar. No agent supervision. No configuration homework.
 
-## Install
+I built Kiwa because I liked Herdr's workspace sidebar more than I liked paying its CPU bill. I wanted a multiplexer, not something watching my terminal output to work out what my AI agent was doing. I'll leave the AI coding controls to tools like Paseo.
 
-On Linux (x86_64 or ARM64) or an Apple silicon Mac:
+Tmux is the performance benchmark, but I didn't want another configuration project just to get a comfortable workspace sidebar. Herdr got that part right. Zellij wasn't my answer either. Its 52.5 MB executable was a lot of multiplexer for someone who mostly wanted a column on the left.
+
+So Kiwa keeps the sidebar and does less.
+
+The name comes from the Japanese 際（きわ）, meaning "edge" or "boundary". A fitting name for the bit of UI I wanted on the left.
+
+## Features
+
+- A persistent workspace sidebar, with tabs and split panes for each project.
+- Useful defaults. Install it, run `kiwa`, and start working. No config file required.
+- Keyboard navigation and mouse controls. Click to switch, drag to resize, right-click for actions.
+- Detach without stopping your programs. Reattach when you need them.
+- Layout restore after a server restart, including workspace directories, splits, names, and zoom. Restored panes start new shells, not the old programs.
+- Scrollback, keyboard selection, and clipboard copy through OSC 52.
+- Directory and foreground-program tab names, Git branch display, and unread-output markers. No agent-status detective work.
+
+Kiwa is written in Zig and uses Ghostty's `ghostty-vt` terminal engine. It works inside your existing terminal on Linux and Apple silicon macOS. It is not a terminal emulator app or an AI agent manager.
+
+### Small binary, quiet idle panes
+
+The comparison below is a **historical snapshot from October 6, 2026**, not a measurement of the latest commit. Kiwa used ReleaseFast product code at `dcd6ecd`, with benchmark code at `1565702`. The other versions were tmux 3.7c, Zellij 0.45.1, and Herdr 0.9.3.
+
+Executable and download sizes on Linux x86_64, in decimal MB:
+
+| Size | Kiwa | tmux | Zellij | Herdr |
+| --- | ---: | ---: | ---: | ---: |
+| Executable | 2.10 MB | 1.43 MB | 52.55 MB | 29.96 MB |
+| Executable + shared libraries beyond libc | 2.10 MB | 3.81 MB | 52.55 MB | 29.96 MB |
+| Download asset | 0.84 MB | Not measured | 18.73 MB | 29.96 MB |
+| Linking | Static | Dynamic | Static PIE | Static PIE |
+
+Tmux has the smaller executable. Kiwa's Linux binary includes its dependencies. Tmux's library total depends on the distribution and does not mean those libraries are unique to tmux. Kiwa and Zellij downloads are gzip archives; Herdr's is a bare executable.
+
+CPU below is the median percentage of **one core**, summed across server and client. Lower is better.
+
+| Scenario | Kiwa | tmux | Zellij | Herdr |
+| --- | ---: | ---: | ---: | ---: |
+| 1 idle pane | 0.000% | 0.000% | 0.059% | 0.272% |
+| 10 idle panes | 0.000% | 0.000% | 0.254% | 0.761% |
+| 60 Hz one-cell spinner | 0.247% | 0.544% | 3.868% | 2.186% |
+| 30 lines/s, 80 bytes each | 0.423% | 0.429% | 10.780% | 11.989% |
+| 10 hidden output panes, focused pane idle | 0.876% | 2.944% | 7.139% | 3.463% |
+| 10 idle panes, detached | 0.000% | 0.000% | 0.253% | 0.620% |
+| 10 hidden output panes, detached | 0.872% | 2.781% | 6.328% | 3.048% |
+
+Herdr's sidebar was the inspiration. Its idle CPU usage was the motivation.
+
+Memory is server RSS at the end of the sample, not peak memory. Client RSS is separate.
+
+| Memory | Kiwa | tmux | Zellij | Herdr |
+| --- | ---: | ---: | ---: | ---: |
+| Server, 1 idle pane | 1.9 MiB | 4.4 MiB | 77.5 MiB | 26.4 MiB |
+| Server, 10 idle panes | 3.6 MiB | 4.4 MiB | 149.8 MiB | 29.0 MiB |
+| Server, 10 hidden output panes + 1 idle | 10.1 MiB | 7.6 MiB | 170.9 MiB | 35.5 MiB |
+| Client, 1 idle pane | 1.0 MiB | 5.1 MiB | 21.4 MiB | 19.7 MiB |
+
+These are three-run results on a four-core Intel N97, at 100×40, with a 6-second warmup and 12-second sample. Kiwa keeps its sidebar and tab row; tmux's status line is off. Kiwa's scrolling result uses an outer terminal with left and right margins. Without them, it measured 0.444% CPU. Both overlap tmux's measured range, so scrolling is a tie here, not a claimed win.
+
+The workloads have fixed output rates. They measure multiplexer overhead, not maximum throughput or input latency. Pane programs and the outer terminal emulator are excluded. This is a comparison of the tested configurations, not proof that one program is universally faster.
+
+[Full results, ranges, output bytes, caveats, and reproduction commands](docs/benchmarks.md).
+
+## How to use
+
+### Install and start
+
+On Linux x86_64 or ARM64, or an Apple silicon Mac running macOS 13 or later:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/txchen/kiwa/master/install.sh | sh
+kiwa
 ```
 
-The script downloads the latest release for the machine, checks it against
-the release's `SHA256SUMS`, and installs `kiwa` to `~/.local/bin`. Set
-`KIWA_INSTALL_DIR` to install elsewhere and `KIWA_VERSION` (for example,
-`0.1.0`) to pin a release. After an upgrade, run `kiwa kill-server` to
-move the running server onto the new version; the layout is restored.
+The installer verifies the release checksum and puts `kiwa` in `~/.local/bin`. Make sure that directory is on your `PATH`. Set `KIWA_INSTALL_DIR` for another location or `KIWA_VERSION` to pin a release.
 
-## Workspace directories
+Kiwa starts its background server if needed, then attaches. Click **+ new** in the sidebar to create a workspace, or use the shortcuts below. New workspaces ask for a directory. New tabs use the workspace directory; splits inherit the focused pane's directory.
 
-Creating a workspace opens a directory field prefilled with the focused pane's
-current directory. Press Enter to use it, Ctrl+u to replace it, or Escape to
-cancel. Absolute paths, `~/path`, and paths relative to the prefilled directory
-are accepted. The directory must already exist.
+### Everyday keys
 
-Right-click a workspace and choose **Change directory** (or press prefix +
-Shift+C) to see or change its
-root. Its branch and automatic name update to the selected directory; a name
-you set yourself is preserved. New tabs start in the workspace directory.
-Existing panes keep their directories and running programs, while splits
-continue to inherit the focused pane's directory. The root is saved with the
-session and restored on restart.
+The default prefix is `Ctrl+b`. Release it, then press the next key. Press `Ctrl+b` twice to send it to the pane.
 
-## Configuration
+| Keys | Action |
+| --- | --- |
+| `prefix c` | New tab |
+| `prefix v` / `prefix -` | Split right / down |
+| `prefix h/j/k/l` or arrows | Focus a pane by direction |
+| `prefix z` | Zoom or unzoom a pane |
+| `prefix x` | Close a pane |
+| `prefix Shift+n` | New workspace |
+| `prefix w` | Navigate the workspace sidebar |
+| `prefix b` | Collapse or expand the sidebar |
+| `prefix [` | Copy mode; `v` selects, `y` copies |
+| `prefix d` | Detach, leaving programs running |
+| `prefix ?` | Show current keybindings |
+| `Alt+h` / `Alt+l` | Previous / next tab, without prefix |
+| `Alt+j` / `Alt+k` | Next / previous pane, without prefix |
+| `Ctrl+Alt+j` / `Ctrl+Alt+k` | Next / previous workspace, without prefix |
 
-No configuration is required. On first startup Kiwa creates a commented
-example at `$XDG_CONFIG_HOME/kiwa/config.toml`, falling back to
-`~/.config/kiwa/config.toml`. Existing files are never overwritten; omitted
-settings continue to use the built-in defaults of the installed version.
+Mouse selection copies to your clipboard when the outer terminal allows OSC 52 writes. Programs that request mouse input receive it inside their panes.
 
 ```sh
-kiwa config path       # locate the configuration file
-kiwa config guide      # bundled reference, examples, and agent workflow
-kiwa config bindings   # effective bindings computed from the file
-kiwa config check      # validate without applying
-kiwa reload-config     # apply to the running server without restarting panes
+kiwa              # attach or start
+kiwa ls           # list workspaces and tabs
+kiwa --version    # print version and pinned Ghostty commit
 ```
 
-Configuration supports the prefix key, individual action bindings, sidebar
-width, and scrollback limits for new panes. For example:
+After upgrading, `kiwa kill-server` stops the old server **and its pane programs**. The next `kiwa` restores the layout with new shells. Detach instead when you want programs to keep running.
+
+[Full usage guide](docs/usage.md) covers all shortcuts, workspace directories, mouse behavior, copy mode, session restore, and environment variables.
+
+### Configure only what you want
+
+First startup creates a commented example at `~/.config/kiwa/config.toml`, or under `$XDG_CONFIG_HOME`. Omitted settings keep their built-in defaults.
 
 ```toml
 [keys]
 prefix = "ctrl+a"
 
-[bindings]
-"prefix+v" = "split_right"
-"alt+h" = "none" # let the pane receive this shortcut
-
 [ui]
 sidebar_width = 30
 ```
 
-Save, check, then reload. Invalid configuration reports a line number and
-leaves all live settings unchanged. Reload does not restart pane programs.
-An explicit sidebar width applies on startup and reload; without one, the
-saved width from dragging is preserved. Scrollback changes affect new panes
-only. Saving alone does not trigger reload or background polling.
+```sh
+kiwa config path      # find your config file
+kiwa config check     # validate edits
+kiwa reload-config    # apply without restarting pane programs
+```
 
-The generated file points humans and agents to the version-matched CLI
-reference. No agent plugin, skill installation, or network access is needed.
-The parser accepts a documented TOML subset; run `kiwa config guide` for
-supported syntax and the complete action list.
+Saving alone does not reload. Invalid configuration leaves live settings unchanged.
 
-## Build
+[Complete configuration reference](docs/configuration.md) covers every setting, action, key syntax, and reload rule. `kiwa config guide` provides the reference for your installed version without network access.
 
-Zig is pinned in `mise.toml`. Run every command through mise:
+## How to develop
+
+Install [mise](https://mise.jdx.dev/), then use the Zig version pinned in `mise.toml`:
 
 ```sh
-mise exec -- zig build                          # Debug build, zig-out/bin/kiwa
-mise exec -- zig build -Doptimize=ReleaseFast   # optimized, stripped release binary
+mise install
+mise exec -- zig build
+mise exec -- zig build test
+mise exec -- zig build e2e
+mise exec -- zig build -Doptimize=ReleaseFast
 ```
 
-The default target is static `x86_64-linux-musl`. A cold build takes about
-3 minutes per optimize mode because ghostty-vt compiles with Kiwa. Do not use
-`--watch` or `-fincremental`; Zig 0.16 incremental compilation crashes on
-this project.
+The binary is `zig-out/bin/kiwa`. The default target is static `x86_64-linux-musl`. On an Apple silicon Mac, add `-Dtarget=aarch64-macos.13.0` to build and test commands.
 
-## CI and binary releases
+End-to-end tests need git, Python 3, less, Vim, htop, fzf, and ncurses utilities and terminfo. They use private sockets and state directories, not your running session. Do not use `--watch` or `-fincremental`; Zig 0.16 incremental compilation crashes on this project.
 
-GitHub Actions runs formatting checks, unit tests, and PTY end-to-end tests
-in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners and
-a `macos-15` ARM64 runner. Each successful ReleaseFast job uploads a
-downloadable archive. The same
-workflow builds and tests release artifacts, so release tests use the same
-CPU target and optimization mode as the shipped binary. Zig is installed
-from `mise.toml`; Ghostty remains pinned by `build.zig.zon`.
-
-To publish a release:
-
-1. Set `.version` in `build.zig.zon` (for example, `0.1.0`), commit the
-   change and workflows, and push them to `master`.
-2. Tag that commit with the matching version and push the tag over HTTPS:
-
-   ```sh
-   gh auth setup-git
-   git push https://github.com/txchen/kiwa.git master
-   git tag -a v0.1.0 -m "Release v0.1.0"
-   git push https://github.com/txchen/kiwa.git v0.1.0
-   ```
-
-3. The Release workflow rejects a tag that differs from the package
-   version, runs all CI checks, and publishes a GitHub Release containing
-   `kiwa-x86_64-linux-musl.tar.gz`, `kiwa-aarch64-linux-musl.tar.gz`,
-   `kiwa-aarch64-macos.tar.gz`, `install.sh`, and `SHA256SUMS`. Tags
-   containing a hyphen are marked as prereleases. Publishing requires every
-   platform and both test modes to pass.
-
-Download the archive for your architecture and `SHA256SUMS` from the same
-release. Verify it with `sha256sum --ignore-missing -c SHA256SUMS`, then
-extract the archive and install `kiwa` on your PATH. Linux binaries link
-musl statically and do not depend on the target machine's glibc version.
-
-Reproduce the release builds locally:
+To reproduce the comparison on Linux with Python 3 and tmux installed:
 
 ```sh
-mise exec -- zig build -Dtarget=x86_64-linux-musl -Dcpu=baseline -Doptimize=ReleaseFast
-mise exec -- zig build -Dtarget=aarch64-linux-musl -Dcpu=baseline -Doptimize=ReleaseFast
+mise exec -- zig build bench -Doptimize=ReleaseFast -- --runs 5
 ```
 
-[ReleaseFast](https://ziglang.org/documentation/0.16.0/#ReleaseFast) optimizes
-both Kiwa and Ghostty for speed and disables runtime safety checks. Debug CI retains those checks. ReleaseSmall optimizes for
-size instead and is not used for published binaries. Release CPU targets
-are explicitly `baseline`, avoiding accidental dependence on the CI
-runner's CPU instructions. A local build for one known machine can use
-`-Dcpu=native`; do not distribute that binary as a generic architecture
-release. No compiler mode guarantees the fastest result on every CPU.
-Measure changes with `bench-check` on consistent, dedicated hardware
-before tagging; shared GitHub runners are too noisy for reliable CPU
-performance gates. The benchmark is Linux-only and requires Python 3 and
-tmux; its first run also downloads Zellij and Herdr.
+The benchmark downloads pinned Zellij and Herdr releases on its first run. `bench-check` also checks Kiwa's CPU and memory budgets against tmux.
 
-### macOS
+Kiwa's main design constraint is [work only in response to events](docs/adr/0002-work-only-on-events.md). An idle pane should not need a babysitter, including one written in Zig.
 
-Kiwa builds for Apple silicon Macs running macOS 13.0 or later. Intel Macs
-are not supported. Build and test on a Mac with:
-
-```sh
-brew install htop fzf   # the end-to-end tests also need git, Python 3, less, and Vim
-mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0
-```
-
-The binary links the system libraries, so it is not a static executable.
-Releases publish it as `kiwa-aarch64-macos.tar.gz`. It carries the ad-hoc
-signature Zig's linker adds and is not notarized. `install.sh` downloads it
-with curl, which sets no quarantine flag, so Gatekeeper does not block it. An
-archive downloaded with a browser needs `xattr -d com.apple.quarantine kiwa`.
-
-OS-specific code lives in `src/os/linux.zig` and `src/os/darwin.zig`, and
-the test harness's in `tests/os/` (ADR 0005). On Linux,
-`zig build check -Dtarget=aarch64-macos.13.0` compiles the macOS binary,
-unit tests, and end-to-end tests without running them. A clean compile
-means the macOS calls exist in libSystem. It does not show that they
-behave, because Zig compiles `std.os.linux` calls for macOS too.
-`tools/check-os-layer.sh` fails when Zig code outside the per-OS files
-names Linux syscalls or a macOS-only API.
-
-CI runs the unit tests and the functional end-to-end tests natively on a
-`macos-15` runner, in Debug and ReleaseFast. A pass there does not show
-that macOS 13 or 14 works, and `zig build e2e-perf` has not run on a Mac.
-
-## Test
-
-```sh
-mise exec -- zig build test       # unit tests for the pure modules
-mise exec -- zig build e2e        # functional end-to-end tests against the built kiwa binary
-mise exec -- zig build e2e-perf   # end-to-end tests that measure cost; run on demand
-```
-
-`e2e-perf` holds the cases that measure wakes, context switches, or outer
-bytes, or that load the machine on purpose, such as the stalled-client
-overflow. Their results depend on the machine, so CI does not run them.
-Run them before a change that could affect the event loop or the renderer.
-Both steps take a name filter, as in `zig build e2e -- vim`.
-
-The end-to-end tests require git, Python 3, less, Vim, htop, fzf, and ncurses
-utilities/terminfo (CI installs these explicitly).
-
-The end-to-end harness runs each client under a PTY it owns and models the
-outer terminal with ghostty-vt. Every test sets a private `KIWA_SOCKET` and
-`KIWA_STATE_DIR` under a temporary directory, so it never touches a running
-Kiwa session. The e2e step also builds `kiwa-skewed`, whose protocol
-version is one higher, to test a client and a server of different versions.
-`kiwa __stats` prints the server's debug counters, such as
-`renders` and `name_checks`, for tests and benchmarks.
-
-## Benchmark
-
-```sh
-mise exec -- zig build bench -Doptimize=ReleaseFast
-```
-
-`tools/bench.py` compares Kiwa with tmux, Zellij, and Herdr at 100x40 with
-`/bin/sh`, each in its default UI: Kiwa's sidebar and tab row, Zellij's tab
-bar and status bar, and Herdr's sidebar. tmux runs with its status line off.
-Its scenarios are 1 and 10 idle panes, a 60 Hz one-cell spinner, 30 lines/s
-of output, and 10 hidden panes that each print 30 lines/s while the focused
-pane is idle. The idle and hidden-producer scenarios also run detached, with
-no client. A Kiwa tab is a tmux window, a Zellij tab, and a Herdr tab, each
-with one pane. For each program the bench sums its own processes, the
-server and the client, and reports their CPU from
-`/proc/<pid>/task/*/schedstat`, their context switches, and their RSS at
-the end of the sample, plus the bytes that reach the outer terminal. A
-second table lists the processes it counted, and a third compares sizes:
-the executable, whether it is static, the shared libraries it needs beyond
-libc, and the release archive. Kiwa's outer side answers its probes like a
-terminal with left and right margins; the 30 lines/s scenario also runs
-Kiwa against one without them. Each run checks that every producer kept
-writing.
-
-tmux is the system binary. Zellij 0.45.1 and Herdr 0.9.3 are the official
-release assets, downloaded once, checked against a pinned SHA-256, and
-cached under `~/.cache/kiwa-bench`. Each program runs with a private
-`HOME`, XDG directories, config, and socket in a temporary directory, so
-the benchmark never touches a running session; private configs turn off
-Zellij's startup tips and release notes and Herdr's onboarding and update
-checks. SIGTERM, SIGHUP, and ctrl+c still stop every server the bench
-started. Pass options after `--`, for example `-- --runs 5`,
-`-- --only detached`, `-- --programs kiwa,zellij`, or `-- --herdr PATH` to
-run another binary.
-
-```sh
-mise exec -- zig build bench-check -Doptimize=ReleaseFast
-```
-
-`bench-check` runs the same bench with `--check`. After the table it prints
-one PASS or FAIL line per gate with the measured values and the limit, and
-it fails if any gate fails. The gates are the v1 budgets, and they compare
-medians over the runs:
-
-| Gate | Scenarios | Rule |
-| --- | --- | --- |
-| Idle | 1 and 10 idle panes, attached and detached | Kiwa's total CPU and context switches are 0 over the sample |
-| Spinner | 60 Hz one-cell spinner | Kiwa's total CPU is at most tmux's |
-| Hidden output | 10 hidden producers, attached and detached | Kiwa's total CPU is at most tmux's |
-| Scrolling | 30 lines/s, outer with and without margins | Kiwa's total CPU is at most 1.5 times tmux's |
-| Memory | Every scenario with 10 or more panes | Kiwa's server RSS is at most 20 MiB |
-
-Total CPU is server plus client. A relative CPU gate adds a tolerance for
-measurement noise: 5% of tmux's value, at least 0.01 percentage points. The
-idle gate has no tolerance. RSS is read at the end of the sample, so the
-memory gate checks a snapshot, not a steady state. With `--only`, only the
-gates of the scenarios that ran are checked.
-
-## Run
-
-```sh
-kiwa              # attach, starting the server if needed
-kiwa ls           # print the workspaces and tabs
-kiwa kill-server  # stop the server and its panes
-kiwa --version    # version and pinned Ghostty commit
-```
-
-On attach, the client puts the terminal in raw mode and passes it to the
-server over the socket, as tmux's client does. The server then reads keys
-from it and writes frames to it directly, and the client sleeps until it
-detaches and restores the terminal.
-
-The prefix is `ctrl+b`. Press it, then one of these keys:
-
-| Key | Action |
-| --- | --- |
-| `c` | New tab in the workspace directory |
-| `\` / `\|` / `v` | Split the focused pane right |
-| `-` | Split the focused pane down |
-| `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
-| `z` | Zoom or unzoom the focused pane |
-| `x` | Close the focused pane |
-| `r` | Resize mode: `h/j/k/l` or arrows move the divider, `esc` or `enter` leaves |
-| `n` / `p`, `1..9` | Next / previous tab, tab by number |
-| `shift+t` / `shift+x` | Rename / close the tab |
-| `shift+n` / `shift+w` / `shift+d` | Choose a directory for a new workspace / rename / close the workspace |
-| `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
-| `b` | Collapse or expand the sidebar |
-| `d` / `q` | Detach |
-| `[` / `ctrl+k` | Keyboard copy mode |
-| `tab` / `shift+tab` | Next / previous pane |
-| `?` | Key help; `j/k` or arrows scroll; `esc`, `q`, or `?` closes it |
-| `ctrl+b` | Send `ctrl+b` to the pane |
-
-These shortcuts work directly, without the prefix:
-
-| Key | Action |
-| --- | --- |
-| `alt+h` / `alt+l` | Previous / next tab |
-| `alt+j` / `alt+k` | Next / previous pane, wrapping in layout order |
-| `alt+z` | Zoom or unzoom |
-| `alt+o` | Rotate pane contents to the preceding layout slot, keeping the same pane focused |
-| `ctrl+alt+j` / `ctrl+alt+k` | Next / previous workspace, wrapping around |
-
-The pane shortcuts behave the same in every program, including Neovim.
-Directional pane focus remains available with `prefix h/j/k/l` or arrows.
-Cycling panes while zoomed keeps the newly focused pane zoomed.
-
-The sidebar on the left lists the workspaces and highlights the current
-one. A workspace you are not viewing shows `•` after output and `!` after a
-bell, until you view it. Below 64 columns the sidebar collapses to the
-workspace numbers. Drag the sidebar's right edge to change its width;
-Kiwa remembers it across restarts and collapse/expand. The default is 26
-columns, with at least 12 for the sidebar and 20 for the panes when expanded.
-A narrow client temporarily clamps the width without changing the saved choice.
-
-The sidebar's **+ new** and **• menu** controls sit above the information
-section, or at the bottom when that section is hidden. The **menu** opens **Show keybindings**, **Reload config**, and
-**Detach**. Keybindings reflect the live configuration. Reload success appears
-briefly in the footer; a failed reload shows an error and keeps the old settings.
-Detach leaves the session and its programs running.
-
-When the expanded sidebar has spare room, its lower section shows
-the hostname, the current workspace directory, and its tab and pane counts.
-Long hostnames wrap to the sidebar width without truncation. The information
-section aligns with the bottom of the sidebar without trailing blank rows.
-Click the directory to change it. Details hide in short or crowded sidebars and
-never displace workspace entries. Host information is read at startup; counts
-and directories update on changes without polling.
-
-The tab row above the panes always lists the current workspace's tabs.
-A colored underline separates it from the panes without taking another row.
-A one-line status bar below the panes shows help for prefix, resize,
-navigate, and copy modes. It stays blank and reserved in normal mode, so pressing
-prefix never resizes a pane. Split panes share a single divider row or
-column, with no outer frame. The outer window
-title is `{hostname}: {workspace}`, and the outer terminal's own title is
-restored on detach.
-
-A workspace is named after its chosen directory. An idle tab shows the focused
-pane's directory name, such as `interview` or `src`, and `~` in the home directory. While a foreground program
-runs, it shows `program · directory`, such as `vim · src` or `codex · interview`.
-Switching pane focus updates the tab to describe that pane. Long names are
-clipped with an ellipsis while the tab number remains visible.
-
-Kiwa checks names only after pane output or a focus change, at most every
-500 ms, with a short settling delay for fast commands. Quiet tabs are never
-polled. A manual name always takes priority. The rename dialog supports typing,
-paste, `backspace`, `ctrl+u` to clear, `left`/`right`/`home`/`end` to move,
-`enter` to save, and `esc` or a click outside to cancel. Saving an empty name
-restores automatic naming for a tab or the directory name for a workspace.
-
-Unseen tabs show an activity dot after output, or `!` after a bell. Viewing a
-tab clears its marker. Returning to a workspace clears only the visible tab;
-markers on its other tabs remain until those tabs are viewed.
-
-A pane closes when its program exits. The last pane of a tab closes the
-tab, the last tab closes the workspace, and the last workspace stops the
-server. Closing a pane, a tab, or a workspace yourself asks first when one
-of its panes runs something other than its shell, for example
-`close pane? vim is running`; `y` closes it, and `n` or `esc` keeps it. Directional focus picks the nearest pane on that side that
-overlaps the focused one; among equally near panes it picks the topmost,
-then the leftmost.
-
-Kiwa saves the session's shape to `session.json` in the state directory:
-the workspaces and tabs in order, fixed names, layouts and divider
-positions, focus, zoom, the sidebar toggle and width, and each pane's working
-directory. It writes the file 1 s after a change to any of these, and at
-once when `kiwa kill-server` or `SIGTERM`/`SIGHUP` stops the server. Typing
-and output alone never write it; a shell that reports a new directory with
-OSC 7 does. After the server restarts, `kiwa` rebuilds that session with a
-new shell in each pane's saved directory, or in the workspace's root, then
-`$HOME`, then `/` when that directory is gone. Programs, screen contents,
-and activity markers are not restored. Closing the last workspace deletes
-the file, so the next `kiwa` starts fresh in the current directory. A file
-Kiwa cannot read is renamed to `session.json.bad-<unix seconds>`, the reason
-goes to `server.log`, and the server starts fresh; Kiwa keeps the newest
-three such files.
-
-After you rebuild Kiwa, the running server still runs the old code. When
-the new `kiwa` speaks another protocol version, it says so and exits 1:
-
-```text
-detached: version mismatch (server 3, client 4)
-run kiwa kill-server to restart the server on this version; the layout is restored
-```
-
-`kiwa kill-server` works across versions: it sends the server `SIGTERM`,
-which saves the session, and waits up to 5 s for it to exit. The next
-`kiwa` starts a server on the new code and restores the layout.
-
-Keyboard copy mode uses the pane's existing 50,000-line scrollback:
-
-- Enter with `prefix [` or `prefix ctrl+k`.
-- Move with `h/j/k/l` or arrows; `page up/down` move a page,
-  and `ctrl+u/d` move half a page. The mouse wheel moves three rows. `gg` goes to the oldest text and `G` to
-  the bottom. `0` / `ctrl+a` / `home` and `$` / `ctrl+e` / `end` move to
-  the start and end of a line.
-- Press `v` to start or cancel a selection. `y` or `enter` copies a
-  selection and exits; `esc` or `q` cancels. Leaving copy mode returns to
-  live output. Clicking also leaves copy mode.
-- Copies go directly to the system clipboard through OSC 52, as mouse
-  selections do. The outer terminal must allow clipboard writes. Paste
-  with the outer terminal's usual paste shortcut; Kiwa keeps no separate
-  paste buffer and does not read the clipboard. Pastes during copy mode
-  are ignored. A copy is limited to 384 KiB of text; if it cannot be sent,
-  copy mode keeps the selection and shows a retry message.
-
-Kiwa works with the mouse:
-
-- Click a workspace or a tab to switch to it, `+ new` for a new workspace,
-  `+` in the tab row for a new tab, and `«` or `»` to collapse or expand
-  the sidebar.
-- Click a pane to focus it. Drag the border between two panes to resize
-  them.
-- The wheel scrolls a pane's scrollback 3 lines per notch, and
-  `[{lines back}/{scrollback}]` in the pane's top-right corner shows how far.
-  Typing or scrolling back down returns to the live screen. On the
-  alternate screen, such as in `less`, the wheel sends up and down arrows.
-- Drag in a pane to select text. Releasing the button copies the selection
-  to the clipboard with OSC 52, so the outer terminal must allow OSC 52
-  writes. A click clears the selection.
-- Right-click a workspace (Rename, Close), a tab (New tab, Rename, Close),
-  or a pane (Rename tab, Split right, Split down, Zoom, Close pane) for a
-  menu. Click an item, or move with `j`/`k` or the arrows and press
-  `enter`; `esc`, a click outside, or another right-click closes it.
-
-When a pane's program turns on mouse reporting, as `vim` with `mouse=a`
-or `htop` do, clicks, drags, and the wheel inside the pane go to the
-program. A right-click on the pane's border still opens the pane menu. To
-use the outer terminal's own selection instead, hold `shift` while you
-drag; most terminals then bypass Kiwa's mouse capture.
-
-Kiwa decodes the outer terminal's keys and encodes them again for the
-pane from the pane's own modes. A program that asks for the kitty keyboard
-protocol gets it when the outer terminal supports the protocol, so keys
-such as `shift+enter`, `ctrl+i` and `tab`, or `esc` and `alt` stay
-distinct. Pastes reach the pane bracketed when the pane enabled bracketed
-paste, and focus changes reach it when it enabled focus reporting. A
-program's OSC 52 clipboard writes go on to the outer terminal; writes over
-384 KiB are dropped, and clipboard reads are refused. Without
-kitty support in the outer terminal, a lone `esc` reaches the pane after
-25 ms with no further input.
-
-`KIWA_SOCKET` overrides the socket path (default
-`$XDG_RUNTIME_DIR/kiwa/default.sock`, or `/tmp/kiwa-<uid>/default.sock`).
-`KIWA_STATE_DIR` overrides the state directory (default
-`$XDG_STATE_HOME/kiwa/default`, or `~/.local/state/kiwa/default`), which
-holds `server.log` and `session.json`.
+[Development guide](docs/development.md) covers testing, cross-compilation, CI, and releases. [GLOSSARY.md](GLOSSARY.md) defines the model; [architecture decisions](docs/adr/) explain the implementation choices.
