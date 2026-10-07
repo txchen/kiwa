@@ -1880,8 +1880,10 @@ fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " Workspaces "), "the sidebar header is on the top row");
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 ws "), "workspace 1 is listed under the header");
     try expect(g.highlighted(0, 1) and g.highlighted(24, 1), "workspace 1 is highlighted across the sidebar");
-    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 23, 0), " + new"), "the new button is on the last row");
-    try expect(g.cp(24, 23) == 0x00ab, "the collapse control sits before the divider");
+    const controls = g.findIn("+ new", .{ .x = 0, .y = 1, .cols = 25, .rows = 22 }) orelse return error.MissingSidebarControl;
+    const host = g.findIn("Host", .{ .x = 0, .y = 1, .cols = 25, .rows = 22 }) orelse return error.MissingSidebarDetails;
+    try expect(controls[1] < host[1], "new is above the information section");
+    try expect(g.cp(24, controls[1]) == 0x00ab, "the collapse control sits before the divider");
     for (0..24) |y| try expect(g.cp(25, y) == 0x2502, "the divider runs down the sidebar's right edge");
     try expect(std.mem.eql(u8, try g.rowText(&buf, 0, 26), " 1 ~  +"), "the tab row shows tab 1 and +");
     try expect(g.highlighted(26, 0) and g.highlighted(30, 0) and !g.highlighted(31, 0), "the active tab is highlighted");
@@ -2070,7 +2072,7 @@ fn listWith(ctx: *Ctx, comptime fmt: []const u8, args: anytype) !void {
 fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     const name = caseName(ctx);
-    try o.click(2, 23);
+    try clickSidebarText(o, "+ new", 0);
     try o.waitText(" new workspace ");
     try o.press(named(.enter, .{}));
     try o.waitGone(" new workspace ");
@@ -2087,7 +2089,7 @@ fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane\n  2: ~, 1 pane (active)\n2: {s}\n  1: ~, 1 pane (active)\n", .{ name, name });
     try o.click(28, 0);
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane (active)\n  2: ~, 1 pane\n2: {s}\n  1: ~, 1 pane (active)\n", .{ name, name });
-    try o.click(24, 23);
+    try clickSidebarText(o, "menu", 8);
     try waitSidebar(o, 4);
     try o.send("clear; tput cols\r");
     try o.waitLine("76");
@@ -2179,18 +2181,26 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     try expect(try o.waitExit() == 0, "prefix d detaches");
 }
 
+/// Find visible sidebar controls by label so layout changes do not break clicks.
+fn clickSidebarText(o: *Outer, label: []const u8, offset: usize) !void {
+    try o.waitText(label);
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    const at = g.findIn(label, .{ .x = 0, .y = 0, .cols = @intCast(g.sidebarCols() - 1), .rows = g.rs.rows }) orelse return error.MissingSidebarControl;
+    try o.click(@intCast(at[0] + offset), @intCast(at[1]));
+}
+
 fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitText("Host");
-    try o.waitText("test-user@");
-    // The sidebar clips long CI hostnames after the user prefix.
+    // Long hostnames wrap; the first line fits 23 terminal cells.
     const host = hostname();
-    try waitTextIn(o, host[0..@min(host.len, 12)], .{ .x = 11, .y = 18, .cols = 12, .rows = 1 });
+    try o.waitText(host[0..@min(host.len, 23)]);
     try o.waitText("1 tab · 1 pane");
     try o.click(3, 20);
     try o.waitText(" change directory ");
     try o.press(named(.escape, .{}));
-    try o.click(17, 23);
+    try clickSidebarText(o, "menu", 0);
     try o.waitText("Show keybindings");
     try o.press(named(.enter, .{}));
     try o.waitText("vsplit (left/right)");
@@ -2198,20 +2208,20 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
     defer ctx.gpa.free(path);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[bindings]\n'prefix+g' = 'new_tab'\n" });
-    try o.click(17, 23);
+    try clickSidebarText(o, "menu", 0);
     try o.waitText("Reload config");
     try o.send("j\r");
     try o.waitText("Configuration reloaded");
     try o.waitGone("Configuration reloaded");
     try prefixed(o, "g");
     try o.waitText("2 tabs · 2 panes");
-    try o.click(17, 23);
+    try clickSidebarText(o, "menu", 0);
     try o.waitText("Show keybindings");
     try o.press(named(.enter, .{}));
     try o.waitText("prefix+g");
     try o.press(named(.escape, .{}));
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "invalid config\n" });
-    try o.click(17, 23);
+    try clickSidebarText(o, "menu", 0);
     try o.waitText("Reload config");
     try o.send("j\r");
     try o.waitText("Reload config failed");
@@ -2221,7 +2231,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try o.waitText("3 tabs · 3 panes");
     try o.send("export MENU_TOKEN=alive\r");
     try o.waitText("MENU_TOKEN");
-    try o.click(17, 23);
+    try clickSidebarText(o, "menu", 0);
     try o.waitText("Detach");
     try o.send("jj\r");
     try expect(try o.waitExit() == 0, "menu detaches without stopping the session");

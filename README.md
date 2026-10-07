@@ -313,13 +313,15 @@ Kiwa remembers it across restarts and collapse/expand. The default is 26
 columns, with at least 12 for the sidebar and 20 for the panes when expanded.
 A narrow client temporarily clamps the width without changing the saved choice.
 
-The sidebar's **menu** opens **Show keybindings**, **Reload config**, and
+The sidebar's **+ new** and **• menu** controls sit above the information
+section, or at the bottom when that section is hidden. The **menu** opens **Show keybindings**, **Reload config**, and
 **Detach**. Keybindings reflect the live configuration. Reload success appears
 briefly in the footer; a failed reload shows an error and keeps the old settings.
 Detach leaves the session and its programs running.
 
 When the expanded sidebar has spare room, its lower section shows
-`user@hostname`, the current workspace directory, and its tab and pane counts.
+the hostname, the current workspace directory, and its tab and pane counts.
+Long hostnames wrap to the sidebar width without truncation.
 Click the directory to change it. Details hide in short or crowded sidebars and
 never displace workspace entries. Host information is read at startup; counts
 and directories update on changes without polling.

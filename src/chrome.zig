@@ -52,7 +52,6 @@ pub const View = struct {
     tabs: []const Tab,
     mode: Mode = .normal,
     custom_keys: bool = false,
-    username: []const u8 = "",
     hostname: []const u8 = "",
     directory: []const u8 = "",
     home: []const u8 = "",
@@ -167,15 +166,15 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         if (x == g.sidebar - 1) return .resize_sidebar;
         const expanded = g.sidebar > collapsed_cols;
         const full: List = .of(rows, expanded);
-        if (expanded) if (infoTop(v, rows)) |top| {
-            if (y == top + 4) return .workspace_directory;
+        if (expanded) if (infoTop(v, rows, g.sidebar)) |top| {
+            if (y == rows - 4) return .workspace_directory;
             if (y >= top and y < full.end) return .none;
         };
-        const list = sidebarList(v, rows, expanded);
-        if (y == full.end and full.end < rows) {
+        const list = sidebarList(v, rows, expanded, g.sidebar);
+        if (y == list.end and list.end < rows) {
             // The `«` and the cells around it toggle; the rest of the footer is `+ new`.
             if (!expanded or x >= g.sidebar - 3) return .toggle_sidebar;
-            if (x >= g.sidebar - 10) return .application_menu;
+            if (x >= g.sidebar - 12) return .application_menu;
             return .new_workspace;
         }
         var entries: Entries = .init(v, list, expanded);
@@ -210,19 +209,51 @@ const List = struct {
     }
 };
 
+/// Wrap by terminal cells without splitting UTF-8 or wide characters.
+const Wrapped = struct {
+    text: []const u8,
+    cols: usize,
+
+    fn next(w: *Wrapped) ?[]const u8 {
+        if (w.text.len == 0) return null;
+        var it: Codepoints = .{ .bytes = w.text };
+        var cols: usize = 0;
+        var end: usize = 0;
+        while (it.next()) |cp| {
+            const width = vt.unicode.codepointWidth(cp);
+            if (cols + width > w.cols) break;
+            cols += width;
+            end = it.i;
+        }
+        if (end == 0) end = it.i;
+        const line = w.text[0..end];
+        w.text = w.text[end..];
+        return line;
+    }
+};
+
+fn hostRows(text: []const u8, cols: usize) usize {
+    var wrapped: Wrapped = .{ .text = text, .cols = cols };
+    var count: usize = 0;
+    while (wrapped.next() != null) count += 1;
+    return count;
+}
+
 /// Show details only in spare space; never displace workspace entries.
-fn infoTop(v: View, rows: u16) ?u16 {
+fn infoTop(v: View, rows: u16, sidebar: u16) ?u16 {
     if (v.hostname.len == 0 or rows < 12) return null;
     var used: usize = 1;
     for (v.workspaces) |ws| used += entryRows(ws, true);
-    const top = rows - 8;
+    const count = hostRows(v.hostname, sidebar - 3);
+    if (count + 7 >= rows) return null;
+    const top: u16 = @intCast(rows - 7 - count);
     return if (used + 1 <= top) top else null;
 }
 
-fn sidebarList(v: View, rows: u16, expanded: bool) List {
+fn sidebarList(v: View, rows: u16, expanded: bool, sidebar: u16) List {
     var list = List.of(rows, expanded);
-    if (expanded) if (infoTop(v, rows)) |top| {
-        list.end = top;
+    if (expanded) if (infoTop(v, rows, sidebar)) |top| {
+        list.end = top - 1;
     };
     return list;
 }
@@ -301,32 +332,33 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         @memset(row[0..width], .blank);
         row[width] = .{ .cp = 0x2502, .style = divider };
     }
-    const list = sidebarList(v, f.rows, true);
+    const list = sidebarList(v, f.rows, true, sidebar_width);
     if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " Workspaces", sidebar_heading);
     if (f.rows >= 2) {
-        const footer = f.rowMut(f.rows - 1)[0..width];
+        const footer = f.rowMut(list.end)[0..width];
         _ = put(footer, 0, " + new", plain);
+        footer[width - 11] = .{ .cp = 0x2022, .style = .{ .fg_color = accent } };
         _ = put(footer, width - 9, "menu", plain);
         footer[width - 1] = .{ .cp = 0x00ab };
     }
 
-    if (infoTop(v, f.rows)) |top| {
+    if (infoTop(v, f.rows, sidebar_width)) |top| {
         const inner = width - 2;
         for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = divider };
         _ = put(f.rowMut(top + 1)[1..width], 0, "Host", sidebar_heading);
-        var host_buf: [512]u8 = undefined;
-        const host = std.fmt.bufPrint(&host_buf, "{s}{s}{s}", .{ v.username, if (v.username.len > 0) "@" else "", v.hostname }) catch v.hostname;
-        fit(f.rowMut(top + 2)[1..][0..inner], 0, host, plain);
-        _ = put(f.rowMut(top + 3)[1..width], 0, "Workspace", sidebar_heading);
+        var host: Wrapped = .{ .text = v.hostname, .cols = inner };
+        var y = top + 2;
+        while (host.next()) |line| : (y += 1) _ = put(f.rowMut(y)[1..][0..inner], 0, line, plain);
+        _ = put(f.rowMut(y)[1..width], 0, "Workspace", sidebar_heading);
         var path_buf: [4096]u8 = undefined;
         const path = if (v.home.len > 0 and std.mem.startsWith(u8, v.directory, v.home) and
             (v.directory.len == v.home.len or v.directory[v.home.len] == '/'))
             std.fmt.bufPrint(&path_buf, "~{s}", .{v.directory[v.home.len..]}) catch v.directory
         else
             v.directory;
-        fit(f.rowMut(top + 4)[1..][0..inner], 0, path, plain);
+        fit(f.rowMut(y + 1)[1..][0..inner], 0, path, plain);
         var counts: [80]u8 = undefined;
-        fit(f.rowMut(top + 5)[1..][0..inner], 0, std.fmt.bufPrint(&counts, "{d} {s} · {d} {s}", .{ v.tabs.len, if (v.tabs.len == 1) "tab" else "tabs", v.pane_count, if (v.pane_count == 1) "pane" else "panes" }) catch unreachable, dim);
+        fit(f.rowMut(y + 2)[1..][0..inner], 0, std.fmt.bufPrint(&counts, "{d} {s} · {d} {s}", .{ v.tabs.len, if (v.tabs.len == 1) "tab" else "tabs", v.pane_count, if (v.pane_count == 1) "pane" else "panes" }) catch unreachable, dim);
     }
 
     var entries: Entries = .init(v, list, true);
@@ -680,7 +712,7 @@ test "one workspace, expanded at 120 columns" {
         \\                         │
         \\                         │
         \\                         │
-        \\ + new          menu    «│
+        \\ + new        • menu    «│
         \\
     );
     for (0..25) |x| try testing.expect(isHighlight(s.at(x, 1)));
@@ -699,7 +731,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
         \\ 2 a-very-long-worksp…   │
         \\ 3 notes               ! │
         \\                         │
-        \\ + new          menu    «│
+        \\ + new        • menu    «│
         \\
     );
     try testing.expect(isHighlight(wide.at(0, 2)) and isHighlight(wide.at(24, 2)));
@@ -743,7 +775,7 @@ test "a branch line follows the name when a branch is known" {
         \\   main                  │
         \\ 2 other                 │
         \\   dev                   │
-        \\ + new          menu    «│
+        \\ + new        • menu    «│
         \\
     );
     try testing.expect(isHighlight(s.at(3, 2)));
@@ -763,7 +795,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
         \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\   feature/a-very-long-b…│
-        \\ + new          menu    «│
+        \\ + new        • menu    «│
         \\
     );
     var narrow = try render(40, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
@@ -789,7 +821,7 @@ test "workspaces that overflow scroll to keep the active one visible" {
         \\ 5 e                     │
         \\ 6 f                     │
         \\ 7 g                     │
-        \\ + new          menu    «│
+        \\ + new        • menu    «│
         \\
     );
 }
@@ -1034,21 +1066,40 @@ test "tab activity markers survive truncation and share their tab hit target" {
 }
 
 test "sidebar details use spare space and directory and menu clicks match their labels" {
-    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .username = "alice", .hostname = "devbox", .home = "/home/alice", .directory = "/home/alice/code/kiwa", .pane_count = 3 };
+    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .hostname = "devbox", .home = "/home/alice", .directory = "/home/alice/code/kiwa", .pane_count = 3 };
     var s = try render(80, 24, v);
     defer s.deinit();
     try expectHit(v, &s, "menu", .application_menu);
+    try expectHit(v, &s, "•", .application_menu);
     try expectHit(v, &s, "~/code/kiwa", .workspace_directory);
     const text = try s.text();
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "alice@devbox") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "devbox") != null);
     try testing.expect(std.mem.indexOf(u8, text, "2 tabs · 3 panes") != null);
-    try testing.expectEqual(null, infoTop(v, 10));
+    try testing.expect(std.mem.indexOf(u8, text, "+ new").? < std.mem.indexOf(u8, text, "Host").?);
+    try testing.expectEqual(null, infoTop(v, 10, 26));
     var many: [20]Workspace = undefined;
     for (&many) |*ws| ws.* = .{ .name = "workspace" };
     var crowded = v;
     crowded.workspaces = &many;
-    try testing.expectEqual(null, infoTop(crowded, 24));
+    try testing.expectEqual(null, infoTop(crowded, 24, 26));
+}
+
+test "long hostnames wrap in spare sidebar space and keep controls above the details" {
+    const host = "abcdefghijklmnopqrstuvw-second-line";
+    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .hostname = host, .directory = "/code/kiwa" };
+    var s = try render(80, 24, v);
+    defer s.deinit();
+    const text = try s.text();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "abcdefghijklmnopqrstuvw") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "-second-line") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "…") == null);
+    try expectHit(v, &s, "/code/kiwa", .workspace_directory);
+    try expectHit(v, &s, "menu", .application_menu);
+    try testing.expectEqual(2, hostRows(host, 23));
+    try testing.expectEqual(3, hostRows(host, 15));
+    try testing.expectEqual(null, infoTop(v, 9, 26));
 }
 
 test "the tab separator uses the sidebar divider color without consuming a pane row" {

@@ -1557,7 +1557,6 @@ const Server = struct {
         var pane_count: usize = 0;
         for (current.tabs.items) |t| pane_count += t.layout.count();
         return .{
-            .username = s.env.get("USER") orelse s.env.get("LOGNAME") orelse "",
             .hostname = s.hostname,
             .directory = current.root_dir,
             .home = s.env.get("HOME") orelse "",
