@@ -2165,6 +2165,9 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     try o.press(char('o', .{ .alt = true }));
     try waitTextIn(o, "RIGHT-22", left_half);
     try waitTextIn(o, "LEFT-11", right_half);
+    try waitAccent(o, &.{ left_half, right_half });
+    try o.send("echo ROTATED-$((30+3))\r");
+    try waitTextIn(o, "ROTATED-33", left_half);
     try prefixed(o, "c");
     try waitNoBorders(o);
     try o.press(char('h', .{ .alt = true }));
@@ -2197,7 +2200,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     const host = hostname();
     try o.waitText(host[0..@min(host.len, 23)]);
     try o.waitText("1 tab · 1 pane");
-    try o.click(3, 20);
+    try clickSidebarText(o, "~", 0);
     try o.waitText(" change directory ");
     try o.press(named(.escape, .{}));
     try clickSidebarText(o, "menu", 0);

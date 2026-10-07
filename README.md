@@ -298,7 +298,7 @@ These shortcuts work directly, without the prefix:
 | `alt+h` / `alt+l` | Previous / next tab |
 | `alt+j` / `alt+k` | Next / previous pane, wrapping in layout order |
 | `alt+z` | Zoom or unzoom |
-| `alt+o` | Rotate pane contents to the preceding layout slot, keeping focus on the same slot |
+| `alt+o` | Rotate pane contents to the preceding layout slot, keeping the same pane focused |
 | `ctrl+alt+j` / `ctrl+alt+k` | Next / previous workspace, wrapping around |
 
 The pane shortcuts behave the same in every program, including Neovim.
@@ -321,7 +321,8 @@ Detach leaves the session and its programs running.
 
 When the expanded sidebar has spare room, its lower section shows
 the hostname, the current workspace directory, and its tab and pane counts.
-Long hostnames wrap to the sidebar width without truncation.
+Long hostnames wrap to the sidebar width without truncation. The information
+section aligns with the bottom of the sidebar without trailing blank rows.
 Click the directory to change it. Details hide in short or crowded sidebars and
 never displace workspace entries. Host information is read at startup; counts
 and directories update on changes without polling.

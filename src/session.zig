@@ -310,16 +310,11 @@ pub const Session = struct {
         return true;
     }
 
-    /// Moves each pane to the preceding layout slot, keeping focus on its slot.
-    pub fn rotatePanes(s: *Session) !bool {
+    /// Moves panes to the preceding layout slot, keeping the same pane focused.
+    pub fn rotatePanes(s: *Session) bool {
         const t = s.activeTab();
-        var panes: std.ArrayList(PaneId) = .empty;
-        defer panes.deinit(s.gpa);
-        try t.layout.panes(s.gpa, &panes);
-        if (panes.items.len < 2) return false;
-        const i = std.mem.indexOfScalar(PaneId, panes.items, t.focused).?;
+        if (t.layout.count() < 2) return false;
         t.layout.rotate();
-        t.focused = panes.items[(i + 1) % panes.items.len];
         return true;
     }
 
@@ -767,8 +762,8 @@ test "pane and workspace cycling wraps, and rotation preserves layout slots" {
     try testing.expectEqual(a, s.focused());
     try testing.expect(try s.cyclePane(false));
     try testing.expectEqual(c, s.focused());
-    try testing.expect(try s.rotatePanes());
-    try testing.expectEqual(a, s.focused());
+    try testing.expect(s.rotatePanes());
+    try testing.expectEqual(c, s.focused());
     var panes: std.ArrayList(PaneId) = .empty;
     defer panes.deinit(testing.allocator);
     try s.activeTab().layout.panes(testing.allocator, &panes);

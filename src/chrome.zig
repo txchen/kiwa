@@ -167,7 +167,7 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         const expanded = g.sidebar > collapsed_cols;
         const full: List = .of(rows, expanded);
         if (expanded) if (infoTop(v, rows, g.sidebar)) |top| {
-            if (y == rows - 4) return .workspace_directory;
+            if (y == rows - 2) return .workspace_directory;
             if (y >= top and y < full.end) return .none;
         };
         const list = sidebarList(v, rows, expanded, g.sidebar);
@@ -245,8 +245,8 @@ fn infoTop(v: View, rows: u16, sidebar: u16) ?u16 {
     var used: usize = 1;
     for (v.workspaces) |ws| used += entryRows(ws, true);
     const count = hostRows(v.hostname, sidebar - 3);
-    if (count + 7 >= rows) return null;
-    const top: u16 = @intCast(rows - 7 - count);
+    if (count + 5 >= rows) return null;
+    const top: u16 = @intCast(rows - 5 - count);
     return if (used + 1 <= top) top else null;
 }
 
@@ -1076,6 +1076,7 @@ test "sidebar details use spare space and directory and menu clicks match their 
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "devbox") != null);
     try testing.expect(std.mem.indexOf(u8, text, "2 tabs · 3 panes") != null);
+    try testing.expectEqual(@as(u21, '2'), s.at(1, 23).cp);
     try testing.expect(std.mem.indexOf(u8, text, "+ new").? < std.mem.indexOf(u8, text, "Host").?);
     try testing.expectEqual(null, infoTop(v, 10, 26));
     var many: [20]Workspace = undefined;

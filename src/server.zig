@@ -905,7 +905,7 @@ const Server = struct {
                 break :blk true;
             },
             .rotate_panes => blk: {
-                if (!try ss.rotatePanes()) break :blk false;
+                if (!ss.rotatePanes()) break :blk false;
                 try s.markName(ss.activeTab());
                 break :blk true;
             },
