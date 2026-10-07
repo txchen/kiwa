@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Step.Compile{ exe, skewed_exe, unit, e2e_exe }) |artifact| check.dependOn(&artifact.step);
 
     const benches = [_]struct { name: []const u8, description: []const u8, check: bool }{
-        .{ .name = "bench", .description = "Compare CPU, memory, and outer bytes with tmux; use -Doptimize=ReleaseFast", .check = false },
+        .{ .name = "bench", .description = "Compare CPU, memory, outer bytes, and size with tmux, Zellij, and Herdr; use -Doptimize=ReleaseFast", .check = false },
         .{ .name = "bench-check", .description = "Run the bench and fail if Kiwa misses a v1 budget; use -Doptimize=ReleaseFast", .check = true },
     };
     for (benches) |spec| {

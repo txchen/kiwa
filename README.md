@@ -85,7 +85,7 @@ release. No compiler mode guarantees the fastest result on every CPU.
 Measure changes with `bench-check` on consistent, dedicated hardware
 before tagging; shared GitHub runners are too noisy for reliable CPU
 performance gates. The benchmark is Linux-only and requires Python 3 and
-tmux.
+tmux; its first run also downloads Zellij and Herdr.
 
 ### macOS
 
@@ -147,22 +147,34 @@ version is one higher, to test a client and a server of different versions.
 mise exec -- zig build bench -Doptimize=ReleaseFast
 ```
 
-`tools/bench.py` compares Kiwa with tmux at 100x40 with `/bin/sh`. Its
-scenarios are 1 and 10 idle panes, a 60 Hz one-cell spinner, 30 lines/s of
-output, and 10 hidden panes that each print 30 lines/s while the focused
-pane is idle. The idle and hidden-producer scenarios also run detached,
-with no client. Kiwa's tabs and tmux's windows hold one pane each. For the
-server and the client separately, the bench reports CPU from
-`/proc/<pid>/task/*/schedstat`, context switches, and RSS at the end of the
-sample, plus the bytes that reach the outer terminal. Kiwa's outer side
-answers its probes like a terminal with left and right margins; the
-30 lines/s scenario also runs Kiwa against one without them. Each run
-checks that every producer kept writing. tmux runs only as
-`tmux -L kiwa-bench-<pid>-<n> -f /dev/null`, and Kiwa uses a private
-`KIWA_SOCKET` and `KIWA_STATE_DIR`, so the benchmark never touches a
-running session. SIGTERM, SIGHUP, and ctrl+c still stop every server the
-bench started and remove its tmux sockets. Pass options after `--`, for
-example `-- --runs 5` or `-- --only detached`.
+`tools/bench.py` compares Kiwa with tmux, Zellij, and Herdr at 100x40 with
+`/bin/sh`, each in its default UI: Kiwa's sidebar and tab row, Zellij's tab
+bar and status bar, and Herdr's sidebar. tmux runs with its status line off.
+Its scenarios are 1 and 10 idle panes, a 60 Hz one-cell spinner, 30 lines/s
+of output, and 10 hidden panes that each print 30 lines/s while the focused
+pane is idle. The idle and hidden-producer scenarios also run detached, with
+no client. A Kiwa tab is a tmux window, a Zellij tab, and a Herdr tab, each
+with one pane. For each program the bench sums its own processes, the
+server and the client, and reports their CPU from
+`/proc/<pid>/task/*/schedstat`, their context switches, and their RSS at
+the end of the sample, plus the bytes that reach the outer terminal. A
+second table lists the processes it counted, and a third compares sizes:
+the executable, whether it is static, the shared libraries it needs beyond
+libc, and the release archive. Kiwa's outer side answers its probes like a
+terminal with left and right margins; the 30 lines/s scenario also runs
+Kiwa against one without them. Each run checks that every producer kept
+writing.
+
+tmux is the system binary. Zellij 0.45.1 and Herdr 0.9.3 are the official
+release assets, downloaded once, checked against a pinned SHA-256, and
+cached under `~/.cache/kiwa-bench`. Each program runs with a private
+`HOME`, XDG directories, config, and socket in a temporary directory, so
+the benchmark never touches a running session; private configs turn off
+Zellij's startup tips and release notes and Herdr's onboarding and update
+checks. SIGTERM, SIGHUP, and ctrl+c still stop every server the bench
+started. Pass options after `--`, for example `-- --runs 5`,
+`-- --only detached`, `-- --programs kiwa,zellij`, or `-- --herdr PATH` to
+run another binary.
 
 ```sh
 mise exec -- zig build bench-check -Doptimize=ReleaseFast
