@@ -1,6 +1,6 @@
 # 01 A repeatable comparison of Kiwa, tmux, Zellij, and Herdr
 
-Status: in progress
+Status: resolved
 
 ## Why
 
