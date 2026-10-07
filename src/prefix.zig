@@ -29,6 +29,7 @@ pub const Action = union(enum) {
     close_tab,
     new_workspace,
     rename_workspace,
+    change_workspace_directory,
     close_workspace,
     next_workspace,
     prev_workspace,
@@ -179,6 +180,7 @@ const bindings: []const Binding = &[_]Binding{
     .doc(.shifted('x'), .close_tab, "close the tab"),
     .doc(.shifted('n'), .new_workspace, "new workspace"),
     .doc(.shifted('w'), .rename_workspace, "rename the workspace"),
+    .doc(.shifted('c'), .change_workspace_directory, "change workspace directory"),
     .doc(.shifted('d'), .close_workspace, "close the workspace"),
 
     .doc(.char('w'), .navigate, "navigate workspaces"),

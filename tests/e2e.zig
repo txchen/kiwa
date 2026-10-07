@@ -1223,9 +1223,10 @@ const Grid = struct {
         return cells.items(.style)[x];
     }
 
-    /// Whether the cell has Kiwa's highlight: black on the accent color.
+    /// Whether the cell has a sidebar selection or the tab accent.
     fn highlighted(g: *const Grid, x: usize, y: usize) bool {
         const s = g.style(x, y);
+        if (s.bg_color == .rgb) return s.bg_color.rgb.r == 50 and s.bg_color.rgb.g == 55 and s.bg_color.rgb.b == 76;
         return s.bg_color == .palette and s.bg_color.palette == 6 and s.fg_color == .palette and s.fg_color.palette == 0;
     }
 
@@ -1414,7 +1415,7 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try waitNoBorders(o);
     try o.waitLine("$");
     try cdTwo(o);
-    try prefixed(o, "N");
+    try createWorkspace(o);
     // Finish each shell's startup output before hiding the workspace.
     // Otherwise a late prompt legitimately marks it as having activity.
     try o.send("echo workspace$((20+1))\r");
@@ -1426,7 +1427,7 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try o.waitLine("$");
     var want: std.ArrayList(u8) = .empty;
     defer want.deinit(ctx.gpa);
-    try want.print(ctx.gpa, "1: {s}\n  1: sh, 3 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
+    try want.print(ctx.gpa, "1: {s}\n  1: ws, 3 panes\n  2: two, 1 pane (active)\n2: two (active)\n  1: two, 1 pane\n  2: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
 
     try prefixed(o, "w1\r");
@@ -1448,7 +1449,7 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try o.waitLine("54");
     try o.waitLine("22");
     want.clearRetainingCapacity();
-    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: two\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n", .{name});
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: ws, 1 pane (active)\n  2: two, 1 pane\n2: two\n  1: two, 1 pane\n  2: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
 }
 
@@ -1492,20 +1493,20 @@ fn exitCascadesToTheServer(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try prefixed(o, "c");
     try cdTwo(o);
-    try prefixed(o, "N");
+    try createWorkspace(o);
     const name = caseName(ctx);
     var want: std.ArrayList(u8) = .empty;
     defer want.deinit(ctx.gpa);
-    try want.print(ctx.gpa, "1: {s}\n  1: sh, 2 panes\n  2: sh, 1 pane (active)\n2: two (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try want.print(ctx.gpa, "1: {s}\n  1: ws, 2 panes\n  2: two, 1 pane (active)\n2: two (active)\n  1: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
 
     try o.send("exit\r");
     want.clearRetainingCapacity();
-    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 2 panes\n  2: sh, 1 pane (active)\n", .{name});
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: ws, 2 panes\n  2: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
     try o.send("exit\r");
     want.clearRetainingCapacity();
-    try want.print(ctx.gpa, "1: {s} (active)\n  1: sh, 2 panes (active)\n", .{name});
+    try want.print(ctx.gpa, "1: {s} (active)\n  1: ws, 2 panes (active)\n", .{name});
     try ctx.waitList(want.items);
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("exit\r");
@@ -1514,6 +1515,78 @@ fn exitCascadesToTheServer(ctx: *Ctx) !void {
     try expect(try o.waitExit() == 0, "the client exits 0");
     try expect(try o.hasLine("exited"), "the client prints \"exited\"");
     try ctx.waitServerGone(pid);
+}
+
+fn workspaceDirectoriesCanChange(ctx: *Ctx) !void {
+    const setup = try ctx.sh("mkdir repo-a repo-b; git -C repo-a init -b alpha; git -C repo-b init -b beta");
+    defer ctx.gpa.free(setup);
+    const o = try ctx.attachSized(120, 24);
+    try o.waitLine("$");
+    try o.waitKitty();
+    try prefixed(o, "N");
+    try o.waitText(" new workspace ");
+    try o.press(named(.escape, .{}));
+    try o.waitGone(" new workspace ");
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{caseName(ctx)});
+    try prefixed(o, "N");
+    try o.waitText(" new workspace ");
+    try o.press(char('u', ctrl));
+    try typeText(o, "missing-directory");
+    try o.press(named(.enter, .{}));
+    try o.waitText("Directory does not exist");
+    try o.press(char('u', ctrl));
+    try typeText(o, "~/repo-a");
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" new workspace ");
+    try o.waitText("alpha");
+    const a = try std.fmt.allocPrint(ctx.gpa, "{s}/repo-a", .{ctx.dir});
+    defer ctx.gpa.free(a);
+    const b = try std.fmt.allocPrint(ctx.gpa, "{s}/repo-b", .{ctx.dir});
+    defer ctx.gpa.free(b);
+    try o.send("export KEPT=alive; clear; pwd\r");
+    try o.waitLine(a);
+    try o.rightClick(5, 2);
+    try o.waitText("Change directory");
+    try o.send("j\r");
+    try o.waitText(" change directory ");
+    try o.press(char('u', ctrl));
+    try typeText(o, "../repo-b");
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" change directory ");
+    try o.waitText("beta");
+    try o.waitText("2 repo-b");
+    try o.send("clear; pwd; echo KEPT-$KEPT\r");
+    try o.waitLine(a);
+    try o.waitLine("KEPT-alive");
+    try prefixed(o, "c");
+    try o.waitText("2 repo-b");
+    try o.send("pwd\r");
+    try o.waitLine(b);
+    try prefixed(o, "W");
+    try renameTo(o, " rename workspace ", "Project");
+    try prefixed(o, "C");
+    try o.waitText(" change directory ");
+    try o.press(char('u', ctrl));
+    try o.paste(a);
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" change directory ");
+    try o.waitText("alpha");
+    try o.waitText("2 Project");
+    try expect(try ctx.run("kill-server") == 0, "saving directory changes");
+    _ = try o.waitExit();
+    const restored = try ctx.attachSized(120, 24);
+    try restored.waitText("2 Project");
+    try restored.waitText("alpha");
+    try prefixed(restored, "c");
+    try restored.send("pwd\r");
+    try restored.waitLine(a);
+}
+
+fn createWorkspace(o: *Outer) !void {
+    try prefixed(o, "N");
+    try o.waitText(" new workspace ");
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" new workspace ");
 }
 
 fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
@@ -1533,12 +1606,15 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     // A reported OSC 7 directory wins over the shell's actual one.
     try o.send("clear; mkdir '../o d'; printf '\\033]7;file://localhost%s/o%%20d\\007' \"$(dirname \"$PWD\")\"\r");
     _ = try o.pump(200);
-    try prefixed(o, "c");
-    try waitNoBorders(o);
+    try prefixed(o, "-");
     try o.send("pwd\r");
     const osc = try std.fmt.allocPrint(ctx.gpa, "{s}/o d", .{ctx.dir});
     defer ctx.gpa.free(osc);
-    try o.waitLine(osc);
+    try o.waitText(osc);
+    try prefixed(o, "c");
+    try waitNoBorders(o);
+    try o.send("pwd\r");
+    try o.waitLine(ctx.dir);
 }
 
 /// Whether a process runs with exactly this command line.
@@ -1617,17 +1693,17 @@ fn closingARunningProgramAsks(ctx: *Ctx) !void {
     try o.waitText("close pane?");
     try o.send("y");
     try waitNoBorders(o);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 
     // An idle shell closes without asking.
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
+    try o.waitText(" 2 ws ");
     try prefixed(o, "x");
-    try o.waitGone(" 2 sh ");
+    try o.waitGone(" 2 ws ");
     try expect(!try o.contains("close pane?"), "an idle shell closes without a dialog");
 
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
+    try o.waitText(" 2 ws ");
     const in_tab = try startSleep(ctx, o);
     defer ctx.gpa.free(in_tab);
     try prefixed(o, "1");
@@ -1638,9 +1714,9 @@ fn closingARunningProgramAsks(ctx: *Ctx) !void {
     try o.click(35, 3);
     try o.waitText("close tab? sleep is running");
     try o.send("y");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     const in_workspace = try startSleep(ctx, o);
     defer ctx.gpa.free(in_workspace);
@@ -1648,11 +1724,11 @@ fn closingARunningProgramAsks(ctx: *Ctx) !void {
     try o.waitText("close workspace? sleep is running");
     try o.click(1, 1);
     try o.waitGone("close workspace?");
-    try listWith(ctx, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sleep, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s}\n  1: ws, 1 pane (active)\n2: {s} (active)\n  1: sleep · ws, 1 pane (active)\n", .{ name, name });
     try prefixed(o, "D");
     try o.waitText("close workspace? sleep is running");
     try o.send("y");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 }
 
 fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
@@ -1801,13 +1877,13 @@ fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
     defer g.deinit();
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(ctx.gpa);
-    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " workspaces "), "the sidebar header is on the top row");
-    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 kiwa-e2e-"), "workspace 1 is listed under the header");
+    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " Workspaces "), "the sidebar header is on the top row");
+    try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 ws "), "workspace 1 is listed under the header");
     try expect(g.highlighted(0, 1) and g.highlighted(24, 1), "workspace 1 is highlighted across the sidebar");
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 23, 0), " + new"), "the new button is on the last row");
     try expect(g.cp(24, 23) == 0x00ab, "the collapse control sits before the divider");
     for (0..24) |y| try expect(g.cp(25, y) == 0x2502, "the divider runs down the sidebar's right edge");
-    try expect(std.mem.eql(u8, try g.rowText(&buf, 0, 26), " 1 sh  +"), "the tab row shows tab 1 and +");
+    try expect(std.mem.eql(u8, try g.rowText(&buf, 0, 26), " 1 ws  +"), "the tab row shows tab 1 and +");
     try expect(g.highlighted(26, 0) and g.highlighted(31, 0) and !g.highlighted(32, 0), "the active tab is highlighted");
     try expect(g.cp(26, 1) == '$', "the prompt starts the tab area");
     try waitCursor(o, 28, 1);
@@ -1817,7 +1893,7 @@ fn activityMarksOtherWorkspaces(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("sleep 1; echo out; sleep 1; printf '\\a'\r");
     try o.waitText("printf");
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     try waitCell(o, "the output marker on workspace 1", 23, 1, 0x2022);
     {
@@ -1862,7 +1938,7 @@ fn sidebarCollapsesAndExpands(ctx: *Ctx) !void {
 fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitKitty();
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     // The new shell's late prompt would otherwise mark the hidden workspace.
     try o.waitLine("$");
@@ -1871,10 +1947,10 @@ fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
     const name = caseName(ctx);
     var first: std.ArrayList(u8) = .empty;
     defer first.deinit(ctx.gpa);
-    try first.print(ctx.gpa, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try first.print(ctx.gpa, "1: {s} (active)\n  1: ws, 1 pane (active)\n2: {s}\n  1: ws, 1 pane (active)\n", .{ name, name });
     var second: std.ArrayList(u8) = .empty;
     defer second.deinit(ctx.gpa);
-    try second.print(ctx.gpa, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try second.print(ctx.gpa, "1: {s}\n  1: ws, 1 pane (active)\n2: {s} (active)\n  1: ws, 1 pane (active)\n", .{ name, name });
     try ctx.waitList(first.items);
 
     try prefixed(o, "w");
@@ -1931,11 +2007,11 @@ fn outerTitleNamesTheWorkspace(ctx: *Ctx) !void {
     try want.print(ctx.gpa, "{s}: {s}", .{ hostname(), caseName(ctx) });
     try o.waitFor("the outer title", want.items, titleIs);
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
+    try o.waitText(" 2 ws ");
     _ = try o.pump(200);
     try expect(std.mem.count(u8, seen.items, "\x1b]2;") == 1, "an unchanged title is not sent again");
     try cdTwo(o);
-    try prefixed(o, "N");
+    try createWorkspace(o);
     var two: std.ArrayList(u8) = .empty;
     defer two.deinit(ctx.gpa);
     try two.print(ctx.gpa, "{s}: two", .{hostname()});
@@ -1977,19 +2053,22 @@ fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     const name = caseName(ctx);
     try o.click(2, 23);
+    try o.waitText(" new workspace ");
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" new workspace ");
     try waitHighlighted(o, 2);
     // The new shell's late prompt would otherwise mark the hidden workspace.
     try o.waitLine("$");
-    try listWith(ctx, "1: {s}\n  1: sh, 1 pane (active)\n2: {s} (active)\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s}\n  1: ws, 1 pane (active)\n2: {s} (active)\n  1: ws, 1 pane (active)\n", .{ name, name });
     try o.click(10, 1);
     try waitHighlighted(o, 1);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n2: {s}\n  1: ws, 1 pane (active)\n", .{ name, name });
     try o.waitLine("$");
     try o.click(33, 0);
-    try o.waitText(" 2 sh ");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane\n  2: sh, 1 pane (active)\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try o.waitText(" 2 ws ");
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane\n  2: ws, 1 pane (active)\n2: {s}\n  1: ws, 1 pane (active)\n", .{ name, name });
     try o.click(28, 0);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n  2: sh, 1 pane\n2: {s}\n  1: sh, 1 pane (active)\n", .{ name, name });
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n  2: ws, 1 pane\n2: {s}\n  1: ws, 1 pane (active)\n", .{ name, name });
     try o.click(24, 23);
     try waitSidebar(o, 4);
     try o.send("clear; tput cols\r");
@@ -2045,7 +2124,7 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     {
         var g: Grid = try .load(o);
         defer g.deinit();
-        try expect(g.findIn("1 sh", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 }) != null, "prefix keeps the tab row visible");
+        try expect(g.findIn("1 ws", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 }) != null, "prefix keeps the tab row visible");
         try expect(g.findIn("PREFIX", .{ .x = 26, .y = 23, .cols = 54, .rows = 1 }) != null, "prefix help is on the bottom row");
     }
     try o.send("|");
@@ -2071,7 +2150,7 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     try waitBoxes(o, &.{ left_half, right_half });
     try o.press(char('l', .{ .alt = true }));
     try waitNoBorders(o);
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     try o.press(char('k', .{ .ctrl = true, .alt = true }));
     try waitHighlighted(o, 1);
@@ -2125,7 +2204,7 @@ fn configReloadPreservesPanes(ctx: *Ctx) !void {
     try o.press(named(.escape, .{}));
     try o.waitGone("prefix+v");
     try o.send("\x01v");
-    try o.waitText("2 sh");
+    try o.waitText("2 ws");
     try waitNoBorders(o);
     // A valid first section must not apply if a later section is invalid.
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[ui]\nsidebar_width = 50\n[bindings]\n'alt+h' = 'typo'\n" });
@@ -2269,7 +2348,7 @@ fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = mouse_reader });
     const o = try attachedWithPrompt(ctx);
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     try o.send("clear; python3 mouse.py\r");
     try o.waitLine("ready");
@@ -2289,7 +2368,7 @@ fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
     try o.click(10, 1);
     try waitHighlighted(o, 1);
     const name = caseName(ctx);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n2: {s}\n  1: {s}, 1 pane (active)\n", .{ name, name, os.python_name });
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n2: {s}\n  1: {s} · ws, 1 pane (active)\n", .{ name, name, os.python_name });
     try o.click(10, 2);
     try waitHighlighted(o, 2);
     try o.send("z");
@@ -2342,7 +2421,7 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try o.press(named(.escape, .{}));
     try o.waitGone("Split right");
     try waitNoBorders(o);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 
     try o.rightClick(40, 10);
     try o.waitText("Split right");
@@ -2358,25 +2437,25 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try o.waitText("Zoom");
     try o.send("jjj\r");
     try waitNoBorders(o);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 2 panes, zoomed (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 2 panes, zoomed (active)\n", .{name});
     try o.rightClick(30, 20);
     try o.waitText("Unzoom");
     try o.click(70, 3);
     try o.waitGone("Unzoom");
 
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
+    try o.waitText(" 2 ws ");
     try o.rightClick(28, 0);
     try o.waitText("New tab");
     try o.click(30, 3);
     try o.waitGone("New tab");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 
     try o.rightClick(5, 1);
     try o.waitText("Close");
     try o.rightClick(5, 1);
     try o.waitGone("Close");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 }
 
 /// Where the rename dialog's field starts in an 80x24 outer terminal.
@@ -2389,7 +2468,7 @@ fn renameTabWithPrefix(ctx: *Ctx) !void {
     try prefixed(o, "T");
     try o.waitText(" rename tab ");
     try expect(try o.contains("enter save  esc cancel"), "the dialog shows its keys");
-    try waitTextIn(o, "sh", .{ .x = rename_field[0], .y = rename_field[1], .cols = 2, .rows = 1 });
+    try waitTextIn(o, "ws", .{ .x = rename_field[0], .y = rename_field[1], .cols = 2, .rows = 1 });
     try waitCursor(o, rename_field[0] + 2, rename_field[1]);
     try o.press(char('u', ctrl));
     try typeText(o, "editor");
@@ -2410,7 +2489,7 @@ fn renameTabWithPrefix(ctx: *Ctx) !void {
     try o.press(named(.enter, .{}));
     try o.waitText(" 1 vim ");
     try o.send(":q\r");
-    try o.waitText(" 1 sh ");
+    try o.waitText(" 1 ws ");
     try prefixed(o, "T");
     try o.waitText(" rename tab ");
     try o.press(char('u', ctrl));
@@ -2436,8 +2515,8 @@ fn renameTabWithPrefix(ctx: *Ctx) !void {
     try o.click(rename_field[0], rename_field[1]);
     try o.press(char('u', ctrl));
     try o.press(named(.enter, .{}));
-    try o.waitText(" 1 sh ");
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{name});
+    try o.waitText(" 1 ws ");
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{name});
 }
 
 fn renameWorkspaceFromItsMenu(ctx: *Ctx) !void {
@@ -2457,7 +2536,7 @@ fn renameWorkspaceFromItsMenu(ctx: *Ctx) !void {
     defer title.deinit(ctx.gpa);
     try title.print(ctx.gpa, "{s}: \u{4e2d}\u{6587}-ws", .{hostname()});
     try o.waitFor("the renamed workspace's title", title.items, titleIs);
-    try listWith(ctx, "1: \u{4e2d}\u{6587}-ws (active)\n  1: sh, 1 pane (active)\n", .{});
+    try listWith(ctx, "1: \u{4e2d}\u{6587}-ws (active)\n  1: ws, 1 pane (active)\n", .{});
 
     try prefixed(o, "W");
     try o.waitText(" rename workspace ");
@@ -2470,31 +2549,52 @@ fn renameWorkspaceFromItsMenu(ctx: *Ctx) !void {
     try waitCursor(o, rename_field[0] + 2, rename_field[1]);
     try o.press(char('u', ctrl));
     try o.press(named(.enter, .{}));
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{caseName(ctx)});
 }
 
 fn dynamicNamesFollowTheForegroundCommand(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    try o.waitText(" 1 sh ");
+    try o.waitText(" 1 ws ");
     _ = try o.pump(700);
     try o.send("vim -u NONE -N\r");
     const start = now();
-    try o.waitText(" 1 vim ");
+    try o.waitText(" 1 vim · ws ");
     const took = (now() - start) / std.time.ns_per_ms;
     std.debug.print("    vim showed in the tab row after {d} ms\n", .{took});
     try expect(took <= 1000, "vim shows in the tab row within 1 s");
     try o.send(":q\r");
-    try o.waitText(" 1 sh ");
-    _ = try o.pump(700);
+    try o.waitText(" 1 ws ");
+    // The name can change before the shell restores its prompt and input mode.
+    try waitCursor(o, area.x + 2, area.y + 1);
+    try o.send("mkdir src other; cd src\r");
+    try o.waitText(" 1 src ");
     try o.send("sleep 3\r");
-    try o.waitText(" 1 sleep ");
-    try o.waitText(" 1 sh ");
+    try o.waitText(" 1 sleep · src ");
+    try o.waitText(" 1 src ");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.send("cd ../other\r");
+    try o.waitText(" 1 other ");
+    try prefixed(o, "h");
+    try o.waitText(" 1 src ");
+    try prefixed(o, "l");
+    try o.waitText(" 1 other ");
+    try prefixed(o, "T");
+    try renameTo(o, " rename tab ", "server");
+    try o.send("cd ..; sleep 1; echo FIXED-$((1+1))\r");
+    try o.waitText("FIXED-2");
+    try expect(try o.contains(" 1 server "), "manual names survive commands and directory changes");
+    try prefixed(o, "T");
+    try renameTo(o, " rename tab ", "");
+    try o.waitText(" 1 ws ");
+    try o.send("printf '\\033]7;file://localhost/tmp/reported-dir\\007'\r");
+    try o.waitText(" 1 reported-dir ");
 }
 
 fn quietTabsAreNotChecked(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
+    try o.waitText(" 2 ws ");
     try o.waitLine("$");
     _ = try o.pump(1200);
     const before = try ctx.counter("name_checks");
@@ -2560,13 +2660,13 @@ fn branchLinesBelongToRepositoryWorkspaces(ctx: *Ctx) !void {
     try waitSidebarRow(o, 2, "");
     try o.send("cd repo/sub && echo in-sub\r");
     try o.waitLine("in-sub");
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitSidebarRow(o, 2, " 2 sub");
     try waitSidebarRow(o, 3, "   main");
     try o.waitLine("$");
     try o.send("cd .. && echo in-repo\r");
     try o.waitLine("in-repo");
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitSidebarRow(o, 4, " 3 repo");
     try waitSidebarRow(o, 5, "   main");
     // Workspace 2 still uses the watch that workspace 3 shared.
@@ -2723,10 +2823,10 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try prefixed(o, "T");
     try renameTo(o, " rename tab ", "editor");
     try prefixed(o, "c");
-    try o.waitText(" 2 sh ");
-    try o.send("cd ../../two && echo in-$(basename $PWD)\r");
+    try o.waitText(" 2 ws ");
+    try o.send("cd two && echo in-$(basename $PWD)\r");
     try o.waitLine("in-two");
-    try prefixed(o, "N");
+    try createWorkspace(o);
     try waitHighlighted(o, 2);
     try o.send("cd x && echo in-$(basename $PWD)\r");
     try o.waitLine("in-x");
@@ -2740,7 +2840,7 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     const name = caseName(ctx);
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(ctx.gpa);
-    try list.print(ctx.gpa, "1: {s} (active)\n  1: editor, 3 panes (active)\n  2: sh, 1 pane\n2: proj\n  1: sh, 1 pane (active)\n", .{name});
+    try list.print(ctx.gpa, "1: {s} (active)\n  1: editor, 3 panes (active)\n  2: two, 1 pane\n2: proj\n  1: x, 1 pane (active)\n", .{name});
     try ctx.waitList(list.items);
     _ = try o.pump(300);
     const before = try chromeAndBorders(o);
@@ -2853,7 +2953,7 @@ fn closingTheLastWorkspaceRemovesTheSave(ctx: *Ctx) !void {
     try expect(try o.hasLine("exited"), "the client prints \"exited\"");
     try expect(try savedGone(ctx), "session.json is removed with the last workspace");
     const b = try attachedWithPrompt(ctx);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{caseName(ctx)});
     try b.send("clear; pwd\r");
     try b.waitLine(ctx.dir);
 }
@@ -2866,7 +2966,7 @@ fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
     defer ctx.gpa.free(path);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "{\"version\": 1, \"workspaces\": [" });
     const o = try attachedWithPrompt(ctx);
-    try listWith(ctx, "1: {s} (active)\n  1: sh, 1 pane (active)\n", .{caseName(ctx)});
+    try listWith(ctx, "1: {s} (active)\n  1: ws, 1 pane (active)\n", .{caseName(ctx)});
     var dir = try std.Io.Dir.openDirAbsolute(ctx.io, state, .{ .iterate = true });
     defer dir.close(ctx.io);
     var it = dir.iterate();
@@ -2934,6 +3034,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "zoom fills the tab and unzoom restores the split", .run = zoomAndUnzoom },
     .{ .name = "resize mode moves the divider", .run = resizeModeMovesTheDivider },
     .{ .name = "exit cascades from panes to tabs, workspaces, and the server", .run = exitCascadesToTheServer },
+    .{ .name = "workspace directories can be chosen, changed, and restored", .run = workspaceDirectoriesCanChange },
     .{ .name = "new panes start in the focused pane's directory", .run = newPanesStartInTheFocusedDirectory },
     .{ .name = "hidden producers draw nothing until their tab shows", .run = hiddenProducersDrawNothing },
     .{ .name = "a split survives a client shrunk below the minimum pane size", .run = tinyClientKeepsTheSplit },
@@ -3033,10 +3134,11 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, shell: []const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {
-    const made = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}", .{ sys.getpid(), index }, 0);
+    // A short, stable basename makes automatic tab names and hit coordinates deterministic.
+    const made = try std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}/ws", .{ sys.getpid(), index }, 0);
     defer gpa.free(made);
     try std.Io.Dir.cwd().createDirPath(io, made);
-    defer std.Io.Dir.cwd().deleteTree(io, made) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, std.fs.path.dirname(made).?) catch {};
     // On macOS /tmp is a link to /private/tmp, the path that panes report.
     var real_buf: [sys.PATH_MAX]u8 = undefined;
     const real = libc.realpath(made, &real_buf) orelse return error.NoRealPath;

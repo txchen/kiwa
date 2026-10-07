@@ -34,6 +34,7 @@ pub const Item = struct {
 pub const tables = std.EnumArray(std.meta.Tag(Subject), []const Item).init(.{
     .workspace = &.{
         .{ .label = "Rename", .action = .rename_workspace },
+        .{ .label = "Change directory", .action = .change_workspace_directory },
         .{ .label = "Close", .action = .close_workspace },
     },
     .tab = &.{
@@ -138,7 +139,7 @@ test "every subject has a table: rename and close a workspace or tab; rename, sp
         }
     };
     for ([_]struct { Subject, []const u8 }{
-        .{ .{ .workspace = 0 }, "Rename,Close," },
+        .{ .{ .workspace = 0 }, "Rename,Change directory,Close," },
         .{ .{ .tab = 0 }, "New tab,Rename,Close," },
         .{ pane(1), "Rename tab,Split right,Split down,Zoom,Close pane," },
     }) |case| {

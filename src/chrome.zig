@@ -93,7 +93,11 @@ pub const Geometry = struct {
 const accent: Style.Color = .palette(6);
 const plain: Style = .{};
 const dim: Style = .{ .flags = .{ .faint = true } };
-const divider: Style = .{ .fg_color = .palette(8) };
+const divider: Style = .{ .fg_color = .rgb(66, 70, 86) };
+const sidebar_heading: Style = .{ .fg_color = .rgb(132, 149, 194), .flags = .{ .bold = true } };
+const workspace_selected: Style = .{ .fg_color = .rgb(230, 232, 240), .bg_color = .rgb(50, 55, 76) };
+const workspace_number: Style.Color = .rgb(139, 149, 174);
+const branch_color: Style.Color = .rgb(200, 154, 216);
 pub const highlight: Style = .{ .fg_color = .palette(0), .bg_color = accent };
 const mode_label: Style = .{ .fg_color = .palette(0), .bg_color = accent, .flags = .{ .bold = true } };
 const marker_fg: Style.Color = .palette(3);
@@ -239,7 +243,7 @@ fn firstShown(v: View, height: u16, expanded: bool) usize {
 }
 
 fn lineStyle(ws: Workspace, under_cursor: bool) Style {
-    var s = if (ws.active) highlight else plain;
+    var s = if (ws.active) workspace_selected else plain;
     s.flags.inverse = under_cursor;
     return s;
 }
@@ -260,7 +264,7 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         row[width] = .{ .cp = 0x2502, .style = divider };
     }
     const list: List = .of(f.rows, true);
-    if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " workspaces", dim);
+    if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " Workspaces", sidebar_heading);
     if (list.end < f.rows) {
         const footer = f.rowMut(list.end)[0..width];
         _ = put(footer, 0, " + new", plain);
@@ -277,9 +281,13 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         for (line) |*c| c.style = style;
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         var num: [24]u8 = undefined;
-        const x = put(line, 1, std.fmt.bufPrint(&num, "{d} ", .{i + 1}) catch unreachable, style);
+        var number_style = style;
+        number_style.fg_color = workspace_number;
+        const x = put(line, 1, std.fmt.bufPrint(&num, "{d} ", .{i + 1}) catch unreachable, number_style);
+        var name_style = style;
+        name_style.flags.bold = ws.active;
         // The name stops one column short of the marker.
-        fit(line[0 .. width - 3], x, ws.name, style);
+        fit(line[0 .. width - 3], x, ws.name, name_style);
         if (markerCp(ws.activity)) |cp| {
             var ms = style;
             ms.fg_color = marker_fg;
@@ -288,6 +296,7 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         if (e.rows == 2) {
             const bl = f.rowMut(e.y + 1)[0..width];
             var bs = style;
+            bs.fg_color = branch_color;
             bs.flags.faint = !ws.active;
             for (bl) |*c| c.style = bs;
             fit(bl, 3, ws.branch.?, bs);
@@ -587,7 +596,7 @@ const three = [_]Workspace{
 const tabs2 = [_]Tab{ .{ .name = "sh", .active = true }, .{ .name = "vim" } };
 
 fn isHighlight(c: Cell) bool {
-    return c.style.bg_color.eql(.palette(6)) and c.style.fg_color.eql(.palette(0));
+    return c.style.bg_color.eql(workspace_selected.bg_color) or (c.style.bg_color.eql(.palette(6)) and c.style.fg_color.eql(.palette(0)));
 }
 
 test "geometry: 26 columns at 64 or more, collapsed below or when toggled, and a tab row" {
@@ -602,7 +611,7 @@ test "one workspace, expanded at 120 columns" {
     var s = try render(120, 6, .{ .workspaces = &one, .tabs = &tabs2 });
     defer s.deinit();
     try s.expect(
-        \\ workspaces              │ 1 sh  2 vim  +
+        \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\                         │
         \\                         │
@@ -612,7 +621,7 @@ test "one workspace, expanded at 120 columns" {
     );
     for (0..25) |x| try testing.expect(isHighlight(s.at(x, 1)));
     try testing.expect(!isHighlight(s.at(25, 1)));
-    try testing.expect(s.at(1, 0).style.flags.faint);
+    try testing.expect(s.at(1, 0).style.flags.bold);
     for (26..32) |x| try testing.expect(isHighlight(s.at(x, 0)));
     try testing.expect(!isHighlight(s.at(32, 0)));
 }
@@ -621,7 +630,7 @@ test "three workspaces with markers and a long name, at 120 and 40 columns" {
     var wide = try render(120, 6, .{ .workspaces = &three, .tabs = &tabs2 });
     defer wide.deinit();
     try wide.expect(
-        \\ workspaces              │ 1 sh  2 vim  +
+        \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                • │
         \\ 2 a-very-long-worksp…   │
         \\ 3 notes               ! │
@@ -665,7 +674,7 @@ test "a branch line follows the name when a branch is known" {
     var s = try render(80, 6, .{ .workspaces = &ws, .tabs = &tabs2 });
     defer s.deinit();
     try s.expect(
-        \\ workspaces              │ 1 sh  2 vim  +
+        \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\   main                  │
         \\ 2 other                 │
@@ -674,6 +683,11 @@ test "a branch line follows the name when a branch is known" {
         \\
     );
     try testing.expect(isHighlight(s.at(3, 2)));
+    try testing.expect(s.at(3, 1).style.flags.bold);
+    try testing.expect(!s.at(1, 1).style.flags.bold);
+    try testing.expect(!s.at(3, 2).style.flags.bold);
+    try testing.expectEqual(branch_color, s.at(3, 2).style.fg_color);
+    try testing.expectEqual(workspace_number, s.at(1, 1).style.fg_color);
     try testing.expect(s.at(3, 4).style.flags.faint);
 }
 
@@ -682,7 +696,7 @@ test "a long branch ends in an ellipsis before the divider, and the collapsed si
     var wide = try render(80, 4, .{ .workspaces = &ws, .tabs = &tabs2 });
     defer wide.deinit();
     try wide.expect(
-        \\ workspaces              │ 1 sh  2 vim  +
+        \\ Workspaces              │ 1 sh  2 vim  +
         \\ 1 kiwa                  │
         \\   feature/a-very-long-b…│
         \\ + new                  «│ ctrl+b ? help
@@ -707,7 +721,7 @@ test "workspaces that overflow scroll to keep the active one visible" {
     var s = try render(80, 5, .{ .workspaces = &ws, .tabs = &tabs2 });
     defer s.deinit();
     try s.expect(
-        \\ workspaces              │ 1 sh  2 vim  +
+        \\ Workspaces              │ 1 sh  2 vim  +
         \\ 5 e                     │
         \\ 6 f                     │
         \\ 7 g                     │
@@ -801,7 +815,7 @@ test "key help lists every prefix binding in a box centered over the tab area" {
     try testing.expect(left - g.area.x == s.f.cols - 1 - right or left - g.area.x + 1 == s.f.cols - 1 - right);
     try testing.expect(top.? - g.area.y == s.f.rows - 2 - bottom or top.? - g.area.y + 1 == s.f.rows - 2 - bottom);
     // The tab row stays a tab row under the help box.
-    try testing.expect(std.mem.startsWith(u8, got, " workspaces              │ 1 sh"));
+    try testing.expect(std.mem.startsWith(u8, got, " Workspaces              │ 1 sh"));
 }
 
 test "a tiny frame draws what fits without crashing" {
@@ -840,7 +854,7 @@ test "clicks land on the workspace, tab, or button drawn there" {
     try expectHit(v, &s, "3 notes", .{ .workspace = 2 });
     try expectHit(v, &s, "+ new", .new_workspace);
     try expectHit(v, &s, "\u{ab}", .toggle_sidebar);
-    try expectHit(v, &s, "workspaces", .none);
+    try expectHit(v, &s, "Workspaces", .none);
     try expectHit(v, &s, "1 sh", .{ .tab = 0 });
     try expectHit(v, &s, "2 vim", .{ .tab = 1 });
     try testing.expectEqualDeep(@as(?Hit, .new_tab), hit(v, 120, 6, 26 + 13, 0));

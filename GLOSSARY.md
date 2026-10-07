@@ -76,8 +76,8 @@ input.
 A persistent keyboard mode for moving through the sidebar and panes.
 
 **Dynamic name**:
-A tab name that follows the focused pane's foreground command until the user
-renames the tab. A renamed tab has a fixed name.
+A tab name that follows the focused pane's directory, with the foreground
+program added while it runs. A renamed tab has a fixed name.
 _Avoid_: auto title, default name
 
 **Activity marker**:

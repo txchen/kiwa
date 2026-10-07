@@ -167,5 +167,5 @@ test "a zoomed pane has no border, and an open menu covers what is under it" {
     s.menu = .{ .subject = .{ .workspace = 0 }, .x = 1, .y = 1 };
     try testing.expectEqualDeep(Target{ .menu_item = 0 }, at(s, 2, 2));
     try testing.expectEqualDeep(Target.none, at(s, 1, 1));
-    try testing.expectEqualDeep(Target{ .sidebar_workspace = 1 }, at(s, 12, 2));
+    try testing.expectEqualDeep(Target{ .sidebar_workspace = 1 }, at(s, 24, 2));
 }

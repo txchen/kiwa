@@ -19,6 +19,21 @@ the release's `SHA256SUMS`, and installs `kiwa` to `~/.local/bin`. Set
 `0.1.0`) to pin a release. After an upgrade, run `kiwa kill-server` to
 move the running server onto the new version; the layout is restored.
 
+## Workspace directories
+
+Creating a workspace opens a directory field prefilled with the focused pane's
+current directory. Press Enter to use it, Ctrl+u to replace it, or Escape to
+cancel. Absolute paths, `~/path`, and paths relative to the prefilled directory
+are accepted. The directory must already exist.
+
+Right-click a workspace and choose **Change directory** (or press prefix +
+Shift+C) to see or change its
+root. Its branch and automatic name update to the selected directory; a name
+you set yourself is preserved. New tabs start in the workspace directory.
+Existing panes keep their directories and running programs, while splits
+continue to inherit the focused pane's directory. The root is saved with the
+session and restored on restart.
+
 ## Configuration
 
 No configuration is required. On first startup Kiwa creates a commented
@@ -258,7 +273,7 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 
 | Key | Action |
 | --- | --- |
-| `c` | New tab in the focused pane's directory |
+| `c` | New tab in the workspace directory |
 | `\|` / `v` | Split the focused pane right |
 | `-` | Split the focused pane down |
 | `h` `j` `k` `l`, arrows | Focus the pane to the left, below, above, right |
@@ -267,7 +282,7 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `r` | Resize mode: `h/j/k/l` or arrows move the divider, `esc` or `enter` leaves |
 | `n` / `p`, `1..9` | Next / previous tab, tab by number |
 | `shift+t` / `shift+x` | Rename / close the tab |
-| `shift+n` / `shift+w` / `shift+d` | New workspace in the focused pane's directory / rename / close the workspace |
+| `shift+n` / `shift+w` / `shift+d` | Choose a directory for a new workspace / rename / close the workspace |
 | `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
 | `b` | Collapse or expand the sidebar |
 | `d` / `q` | Detach |
@@ -306,14 +321,18 @@ column, with no outer frame. The outer window
 title is `{hostname}: {workspace}`, and the outer terminal's own title is
 restored on detach.
 
-A workspace is named after its start directory. A tab shows the command
-in the foreground of its focused pane, such as `sh`, `vim`, or `htop`,
-until you rename it. Kiwa checks that command only after the pane's output
-or a focus change, at most every 500 ms, as tmux's `automatic-rename`
-does. The rename dialog edits the current name: type, paste, `backspace`,
-`ctrl+u` to clear, `left`/`right`/`home`/`end` to move, `enter` to save,
-and `esc` or a click outside to cancel. Saving an empty name returns a tab
-to its command and a workspace to its directory's name.
+A workspace is named after its chosen directory. An idle tab shows the focused
+pane's directory name, such as `interview` or `src`. While a foreground program
+runs, it shows `program · directory`, such as `vim · src` or `codex · interview`.
+Switching pane focus updates the tab to describe that pane. Long names are
+clipped with an ellipsis while the tab number remains visible.
+
+Kiwa checks names only after pane output or a focus change, at most every
+500 ms, with a short settling delay for fast commands. Quiet tabs are never
+polled. A manual name always takes priority. The rename dialog supports typing,
+paste, `backspace`, `ctrl+u` to clear, `left`/`right`/`home`/`end` to move,
+`enter` to save, and `esc` or a click outside to cancel. Saving an empty name
+restores automatic naming for a tab or the directory name for a workspace.
 
 A pane closes when its program exits. The last pane of a tab closes the
 tab, the last tab closes the workspace, and the last workspace stops the

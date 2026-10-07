@@ -93,3 +93,27 @@ test "an unmarked tab is never due" {
     try testing.expectEqual(null, l.ran(0));
     try testing.expectEqual(null, l.ran(5000 * ms));
 }
+
+/// The shell's directory is useful even when it has no foreground job.
+/// Keep the full UTF-8 name here; the tab row clips by display cells.
+pub fn label(buf: []u8, cwd: []const u8, command: ?[]const u8, shell: []const u8) []const u8 {
+    const base = std.fs.path.basename(cwd);
+    const directory = if (base.len == 0) cwd else base;
+    const cmd = command orelse return directory;
+    const executable = std.mem.trimStart(u8, std.fs.path.basename(cmd), "-");
+    if (std.mem.eql(u8, executable, std.fs.path.basename(shell))) return directory;
+    for ([_][]const u8{ "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu" }) |known| {
+        if (std.mem.eql(u8, executable, known)) return directory;
+    }
+    return std.fmt.bufPrint(buf, "{s} · {s}", .{ executable, directory }) catch directory;
+}
+
+test "tab labels show the directory for shells and pair it with foreground programs" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("interview", label(&buf, "/code/interview", "zsh", "zsh"));
+    try testing.expectEqualStrings("src", label(&buf, "/code/src", "-bash", "zsh"));
+    try testing.expectEqualStrings("src", label(&buf, "/code/src", null, "zsh"));
+    try testing.expectEqualStrings("vim · src", label(&buf, "/code/src", "vim", "zsh"));
+    try testing.expectEqualStrings("codex · 中文", label(&buf, "/code/中文", "codex", "zsh"));
+    try testing.expectEqualStrings("/", label(&buf, "/", "zsh", "zsh"));
+}

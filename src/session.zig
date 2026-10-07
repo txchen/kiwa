@@ -42,7 +42,7 @@ pub const Tab = struct {
 pub const Workspace = struct {
     id: WorkspaceId,
     name: Name,
-    /// The start directory, used for the name and Git.
+    /// The workspace directory, used for new tabs, the automatic name, and Git.
     root_dir: []const u8,
     /// The watch on the repository's `HEAD`; null outside a repository.
     /// The server sets it.
@@ -170,6 +170,19 @@ pub const Session = struct {
     /// basename when `text` is empty.
     pub fn renameWorkspace(s: *Session, ws: *Workspace, text: []const u8) !void {
         try s.setName(&ws.name, if (text.len == 0) .{ .dynamic = rootName(ws.root_dir) } else .{ .fixed = text });
+    }
+
+    /// Rebinds a workspace without changing existing pane processes or layouts.
+    pub fn setWorkspaceDirectory(s: *Session, ws: *Workspace, directory: []const u8) !void {
+        const root = try s.gpa.dupe(u8, directory);
+        errdefer s.gpa.free(root);
+        const name = if (ws.name == .dynamic) try s.gpa.dupe(u8, rootName(directory)) else null;
+        s.gpa.free(ws.root_dir);
+        ws.root_dir = root;
+        if (name) |n| {
+            s.gpa.free(ws.name.dynamic);
+            ws.name = .{ .dynamic = n };
+        }
     }
 
     /// Updates a dynamic tab name to the latest check's `text`. Returns
@@ -747,4 +760,19 @@ test "pane and workspace cycling wraps, and rotation preserves layout slots" {
     try testing.expectEqualStrings("/one", s.activeWorkspace().root_dir);
     try testing.expect(s.cycleWorkspace(false));
     try testing.expectEqualStrings("/two", s.activeWorkspace().root_dir);
+}
+
+test "changing the workspace directory preserves panes and fixed names" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    const pane = try s.newWorkspace("/one");
+    const ws = s.activeWorkspace();
+    try s.setWorkspaceDirectory(ws, "/two");
+    try testing.expectEqualStrings("/two", ws.root_dir);
+    try testing.expectEqualStrings("two", ws.name.text());
+    try testing.expectEqual(pane, s.focused());
+    try s.renameWorkspace(ws, "Custom");
+    try s.setWorkspaceDirectory(ws, "/three");
+    try testing.expectEqualStrings("Custom", ws.name.text());
+    try testing.expectEqual(pane, s.focused());
 }

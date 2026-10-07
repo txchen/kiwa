@@ -585,7 +585,10 @@ const Server = struct {
         };
         // A new pane always goes on the visible tab.
         s.panes.get(id).?.shown = true;
-        if (s.session.tabOf(id)) |t| try s.markName(t);
+        if (s.session.tabOf(id)) |t| {
+            _ = try s.session.setDynamicName(t, session_mod.rootName(cwd));
+            try s.markName(t);
+        }
         try s.markStale();
         try s.markSave();
     }
@@ -621,6 +624,7 @@ const Server = struct {
                     try failed.append(s.gpa, pl.pane);
                 };
             }
+            if (s.panes.get(t.focused)) |pane| _ = try s.session.setDynamicName(t, session_mod.rootName(pane.start_dir));
             try s.markName(t);
         };
         r.arena.deinit();
@@ -668,7 +672,7 @@ const Server = struct {
     }
 
     /// Marks a tab with a dynamic name for a check of its focused pane's
-    /// command, which the names deadline runs.
+    /// directory and command, which the names deadline runs.
     fn markName(s: *Server, t: *session_mod.Tab) !void {
         if (t.name != .dynamic) return;
         try s.armNames(t.name_check.mark(monotonicNs()));
@@ -678,8 +682,8 @@ const Server = struct {
         try s.setDeadline(.names, @min(due, s.deadlines.get(.names) orelse due));
     }
 
-    /// Sets a dynamic tab name to its focused pane's foreground command,
-    /// or the shell's name when that cannot be read.
+    /// Names a tab for its focused pane's directory and foreground program.
+    /// The same event-driven limiter handles both command and directory changes.
     fn checkName(s: *Server, t: *session_mod.Tab, now: u64) !void {
         if (t.name != .dynamic) {
             t.name_check = .{};
@@ -687,9 +691,12 @@ const Server = struct {
         }
         if (t.name_check.ran(now)) |due| try s.armNames(due);
         s.stats.name_checks += 1;
-        var buf: pane_mod.Comm = undefined;
-        const p = s.panes.get(t.focused);
-        const name = (if (p) |pane| pane.foreground(&buf) else null) orelse s.session.tab_name;
+        const pane = s.panes.get(t.focused) orelse return;
+        var comm: pane_mod.Comm = undefined;
+        var cwd_buf: [sys.PATH_MAX]u8 = undefined;
+        var label_buf: [sys.PATH_MAX + 128]u8 = undefined;
+        const cwd = pane.cwd(&cwd_buf) orelse pane.start_dir;
+        const name = names.label(&label_buf, cwd, pane.foreground(&comm), s.session.tab_name);
         if (try s.session.setDynamicName(t, name) and s.session.showsTab(t)) try s.markStale();
     }
 
@@ -833,12 +840,21 @@ const Server = struct {
         const changed = switch (a) {
             .detach => unreachable,
             .new_tab => {
-                const cwd = s.focusedCwd(&cwd_buf);
+                const cwd = ss.activeWorkspace().root_dir;
+                if (!paths_mod.isDir(cwd)) {
+                    var directory = dialog_mod.Directory.init(ss.active, cwd);
+                    directory.message = "Workspace directory is missing; choose another";
+                    return s.openDialog(c, .{ .directory = directory });
+                }
                 return s.openPane(try ss.newTab(), cwd);
             },
             .new_workspace => {
                 const cwd = s.focusedCwd(&cwd_buf);
-                return s.openPane(try s.newWorkspace(cwd), cwd);
+                return s.openDialog(c, .{ .directory = dialog_mod.Directory.init(null, cwd) });
+            },
+            .change_workspace_directory => {
+                const ws = ss.activeWorkspace();
+                return s.openDialog(c, .{ .directory = dialog_mod.Directory.init(ws.id, ws.root_dir) });
             },
             .split => |axis| {
                 const cwd = s.focusedCwd(&cwd_buf);
@@ -945,8 +961,12 @@ const Server = struct {
             .changed => {},
             .cancel => c.prefix.mode = .normal,
             .save => {
-                try s.rename(&d.rename);
-                c.prefix.mode = .normal;
+                if (d.* == .directory) {
+                    if (!try s.applyDirectory(c, &d.directory)) return s.markStale();
+                } else {
+                    try s.rename(&d.rename);
+                    c.prefix.mode = .normal;
+                }
             },
             .confirm => {
                 const target = d.confirm.target;
@@ -956,6 +976,56 @@ const Server = struct {
             },
         }
         try s.markStale();
+    }
+
+    fn applyDirectory(s: *Server, c: *Conn, d: *dialog_mod.Directory) !bool {
+        var buf: TextField.Utf8Buf = undefined;
+        const typed = d.field.utf8(&buf);
+        if (typed.len == 0) {
+            d.message = "Enter a directory path";
+            return false;
+        }
+        var expanded: ?[]u8 = null;
+        defer if (expanded) |e| s.gpa.free(e);
+        if (typed[0] == '~') {
+            if (typed.len > 1 and typed[1] != '/') {
+                d.message = "Use ~ or ~/path for your home directory";
+                return false;
+            }
+            const home = s.env.get("HOME") orelse {
+                d.message = "HOME is not set";
+                return false;
+            };
+            expanded = try std.fmt.allocPrint(s.gpa, "{s}{s}", .{ home, typed[1..] });
+        }
+        const resolved = try std.fs.path.resolve(s.gpa, &.{ d.base[0..d.base_len], expanded orelse typed });
+        defer s.gpa.free(resolved);
+        if (!paths_mod.isDir(resolved)) {
+            d.message = "Directory does not exist or is not accessible";
+            return false;
+        }
+        const dir = std.Io.Dir.openDirAbsolute(s.io, resolved, .{}) catch {
+            d.message = "Cannot open directory";
+            return false;
+        };
+        dir.close(s.io);
+        if (d.workspace) |id| {
+            const ws = s.session.findWorkspace(id) orelse {
+                c.prefix.mode = .normal;
+                return true;
+            };
+            const watch = try s.git.watch(s.gpa, resolved);
+            try s.session.setWorkspaceDirectory(ws, resolved);
+            ws.git = watch;
+            s.git.prune(s.gpa, s.session.workspaces.items);
+            c.prefix.mode = .normal;
+            try s.relayout();
+            try s.markSave();
+        } else {
+            c.prefix.mode = .normal;
+            try s.openPane(try s.newWorkspace(resolved), resolved);
+        }
+        return true;
     }
 
     /// Applies a rename dialog's text to its tab or workspace, if it still exists.

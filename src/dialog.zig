@@ -16,6 +16,7 @@ const Rect = frame_mod.Rect;
 pub const Dialog = union(enum) {
     rename: Rename,
     confirm: Confirm,
+    directory: Directory,
 
     /// What an input event did to the dialog.
     pub const Outcome = enum {
@@ -33,6 +34,7 @@ pub const Dialog = union(enum) {
     pub fn feed(d: *Dialog, ev: input.Event) Outcome {
         return switch (d.*) {
             .rename => |*r| r.feed(ev),
+            .directory => |*d_| d_.feed(ev),
             .confirm => switch (ev) {
                 .key => |k| Confirm.key(k),
                 else => .none,
@@ -43,6 +45,7 @@ pub const Dialog = union(enum) {
     pub fn box(d: *const Dialog, area: Rect) Rect {
         return switch (d.*) {
             .rename => centered(area, rename_cols, 4),
+            .directory => centered(area, 72, 6),
             .confirm => |*c| blk: {
                 var buf: Confirm.Buf = undefined;
                 const cols = @max(chrome.textCols(c.message(&buf)), confirm_hint.len) + 4;
@@ -65,6 +68,16 @@ pub const Dialog = union(enum) {
                 _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), chrome.box_border);
                 _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
                 const col = try drawField(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
+                return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
+            },
+            .directory => |*d_| {
+                _ = chrome.put(top[0 .. top.len - 1], 2, if (d_.workspace == null) " new workspace " else " change directory ", chrome.box_border);
+                const col = try drawField(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &d_.field);
+                _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel  ctrl+u clear", hint);
+                if (b.rows >= 6) {
+                    _ = chrome.put(f.rowMut(b.y + 3)[b.x + 2 ..][0..inner], 0, "Directory for workspace and new tabs", hint);
+                    _ = chrome.put(f.rowMut(b.y + 4)[b.x + 2 ..][0..inner], 0, d_.message orelse "Absolute path, ~/path, or relative path", if (d_.message != null) .{ .fg_color = .palette(1) } else hint);
+                }
                 return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
             },
             .confirm => |*c| {
@@ -131,45 +144,73 @@ pub const Rename = struct {
     }
 
     fn feed(r: *Rename, ev: input.Event) Dialog.Outcome {
-        switch (ev) {
-            .paste => |p| r.field.insertText(p.data),
-            .key => |k| return r.key(k),
-            else => return .none,
-        }
-        return .changed;
-    }
-
-    fn key(r: *Rename, k: input.Key) Dialog.Outcome {
-        if (k.action == .release) return .none;
-        const mods = k.mods.binding();
-        const plain = !mods.ctrl and !mods.alt and !mods.super;
-        const f = &r.field;
-        switch (k.code) {
-            .named => |n| {
-                if (!plain) return .none;
-                switch (n) {
-                    .enter, .numpad_enter => return .save,
-                    .escape => return .cancel,
-                    .backspace => f.backspace(),
-                    .arrow_left, .numpad_left => f.left(),
-                    .arrow_right, .numpad_right => f.right(),
-                    .home, .numpad_home => f.home(),
-                    .end, .numpad_end => f.end(),
-                    else => return .none,
-                }
-            },
-            .char => |c| if (plain) {
-                f.insert(typedChar(k, c));
-            } else if (mods.ctrl and !mods.alt and !mods.super and !mods.shift) switch (c) {
-                'u' => f.clear(),
-                // What legacy terminals send for backspace.
-                'h' => f.backspace(),
-                else => return .none,
-            } else return .none,
-        }
-        return .changed;
+        return editField(&r.field, ev);
     }
 };
+
+pub const Directory = struct {
+    workspace: ?session.WorkspaceId,
+    field: TextField,
+    base: [4096]u8 = undefined,
+    base_len: usize,
+    message: ?[]const u8 = null,
+
+    pub fn init(workspace: ?session.WorkspaceId, base: []const u8) Directory {
+        var d: Directory = .{ .workspace = workspace, .field = .init(base), .base_len = @min(base.len, 4096) };
+        @memcpy(d.base[0..d.base_len], base[0..d.base_len]);
+        var buf: TextField.Utf8Buf = undefined;
+        if (!std.mem.eql(u8, d.field.utf8(&buf), base)) {
+            d.field.clear();
+            d.message = "Path cannot fit; enter a shorter directory path";
+        }
+        return d;
+    }
+
+    fn feed(d: *Directory, ev: input.Event) Dialog.Outcome {
+        const outcome = editField(&d.field, ev);
+        if (outcome == .changed) d.message = null;
+        return outcome;
+    }
+};
+
+fn editField(field: *TextField, ev: input.Event) Dialog.Outcome {
+    switch (ev) {
+        .paste => |p| field.insertText(p.data),
+        .key => |k| return editKey(field, k),
+        else => return .none,
+    }
+    return .changed;
+}
+
+fn editKey(f: *TextField, k: input.Key) Dialog.Outcome {
+    if (k.action == .release) return .none;
+    const mods = k.mods.binding();
+    const plain = !mods.ctrl and !mods.alt and !mods.super;
+    switch (k.code) {
+        .named => |n| {
+            if (!plain) return .none;
+            switch (n) {
+                .enter, .numpad_enter => return .save,
+                .escape => return .cancel,
+                .backspace => f.backspace(),
+                .arrow_left, .numpad_left => f.left(),
+                .arrow_right, .numpad_right => f.right(),
+                .home, .numpad_home => f.home(),
+                .end, .numpad_end => f.end(),
+                else => return .none,
+            }
+        },
+        .char => |c| if (plain) {
+            f.insert(typedChar(k, c));
+        } else if (mods.ctrl and !mods.alt and !mods.super and !mods.shift) switch (c) {
+            'u' => f.clear(),
+            // What legacy terminals send for backspace.
+            'h' => f.backspace(),
+            else => return .none,
+        } else return .none,
+    }
+    return .changed;
+}
 
 /// The character a plain or shifted key types. Encodings that leave out
 /// the text of a shifted key get the ASCII uppercase.
