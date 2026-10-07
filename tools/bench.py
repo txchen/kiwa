@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""CPU, memory, and outer-byte benchmark: Kiwa against tmux.
+"""CPU, memory, and outer-byte benchmark: Kiwa against tmux, Zellij, and Herdr.
 
 PROGRAMS lists the multiplexers. Each runs every scenario at 100x40 with
 `/bin/sh` in every pane, in its default UI except that tmux's status line is
-off. A Kiwa tab is a tmux window; each holds one pane, and the last one is
-focused. An attached scenario runs the client in a PTY that this script
-drains; a detached one sets the session up through a client, detaches it,
-and measures what stays.
+off. A Kiwa tab is a tmux window, a Zellij tab, and a Herdr tab; each holds
+one pane, and the last one is focused. An attached scenario runs the client
+in a PTY that this script drains; a detached one sets the session up through
+a client, detaches it, and measures what stays.
 
 Per scenario and run, the bench reports CPU (run time from
 /proc/<pid>/task/*/schedstat, plus utime + stime ticks from /proc/<pid>/stat
@@ -19,13 +19,16 @@ Producer programs run inside panes and are not counted.
 
 Kiwa runs against an outer side that answers its attach probes like a
 terminal with left and right margins (DECLRMM); in the scrolling scenario it
-also runs against one without them. tmux's queries go unanswered.
+also runs against one without them. The other programs' queries go
+unanswered.
 
 Every program runs with a private HOME, XDG directories, config, and socket
 under the run's work directory, so the user's own sessions are never
 contacted. tmux runs only as `tmux -L kiwa-bench-<pid>-<n> -f /dev/null`.
-SIGTERM and SIGHUP unwind like ctrl+c, so an interrupted run still stops its
-servers and removes their sockets.
+Zellij and Herdr come from the pinned release assets in PINS, checked
+against their SHA-256 and cached under ~/.cache/kiwa-bench. SIGTERM and
+SIGHUP unwind like ctrl+c, so an interrupted run still stops its servers and
+removes their sockets.
 
 After the results table comes a table of each program's processes. With
 --check, the v1 budgets in GATES are checked against the medians after the
@@ -39,6 +42,8 @@ Usually run through `zig build bench -Doptimize=ReleaseFast`, or
 
 import argparse
 import fcntl
+import hashlib
+import json
 import os
 import platform
 import select
@@ -48,9 +53,11 @@ import statistics
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import termios
 import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -524,6 +531,114 @@ class Kiwa(ThroughClient):
         self.cli_quietly(self.binary, "kill-server")
 
 
+class Zellij(ThroughClient):
+    """Zellij in its default layout, with the tab bar and the status bar. Its
+    private config only turns off the startup tips and the release notes.
+    `zellij action new-tab` opens a tab. `ctrl+o d` detaches, because
+    `zellij action detach` run outside the session leaves the client
+    attached."""
+
+    SESSION = "bench"
+
+    def client(self):
+        self.env["ZELLIJ_SOCKET_DIR"] = os.path.join(self.work, "zellij-sockets")
+        config = os.path.join(self.work, "zellij.kdl")
+        with open(config, "w") as f:
+            f.write("show_startup_tips false\nshow_release_notes false\n")
+        self.base = [self.binary, "--config", config,
+                     "--config-dir", os.path.join(self.env["XDG_CONFIG_HOME"], "zellij"),
+                     "--data-dir", os.path.join(self.env["XDG_DATA_HOME"], "zellij")]
+        self.tab = 0
+        return self.base + ["--session", self.SESSION]
+
+    def action(self, *args):
+        return self.cli(*self.base, "--session", self.SESSION, "action", *args)
+
+    def wait_for_prompt(self):
+        # Zellij drops or misroutes keys typed while a tab opens, and one of
+        # its startup queries contains "$", so the bench writes to the tab's
+        # pane through the CLI once that pane's screen shows only the prompt.
+        end = time.monotonic() + 10
+        while True:
+            try:
+                self.pane = next(f"terminal_{pane['id']}"
+                                 for pane in json.loads(self.action("list-panes", "--json"))
+                                 if not pane["is_plugin"] and pane["tab_id"] == self.tab)
+                if self.action("dump-screen", "--pane-id", self.pane).strip() == "$":
+                    return
+            except (subprocess.CalledProcessError, json.JSONDecodeError, StopIteration):
+                pass
+            if time.monotonic() > end:
+                raise RuntimeError(f"Zellij's tab {self.tab} never showed the shell's prompt")
+            self.outer.pump(0.05)
+
+    def type(self, text):
+        self.action("write-chars", "--pane-id", self.pane, text + "\r")
+
+    def new_tab(self):
+        self.tab = int(self.action("new-tab", "--cwd", self.work))
+
+    def detach(self):
+        self.outer.send(b"\x0f")
+        self.outer.pump(0.3)
+        self.outer.send(b"d")
+
+    def tab_count(self):
+        return len(self.action("query-tab-names").splitlines())
+
+    def shut_down(self):
+        self.cli_quietly(*self.base, "kill-session", self.SESSION)
+
+
+class Herdr(ThroughClient):
+    """Herdr with a private HERDR_SOCKET_PATH and HERDR_CONFIG_PATH. The
+    config turns off onboarding and the background version and manifest
+    checks against herdr.dev. `herdr tab create --focus` opens a tab, and
+    `ctrl+b q` detaches."""
+
+    def client(self):
+        self.env["HERDR_SOCKET_PATH"] = os.path.join(self.work, "herdr.sock")
+        self.env["HERDR_CONFIG_PATH"] = os.path.join(self.work, "herdr.toml")
+        with open(self.env["HERDR_CONFIG_PATH"], "w") as f:
+            f.write("onboarding = false\n\n[update]\nversion_check = false\nmanifest_check = false\n")
+        self.pane = None
+        return [self.binary]
+
+    def wait_for_prompt(self):
+        # Herdr redraws only changed cells, so a new tab's prompt in the
+        # same cell as the last tab's never reaches the outer side; the bench
+        # reads the pane's screen and writes to the pane through the CLI.
+        end = time.monotonic() + 10
+        while True:
+            try:
+                if self.pane is None:
+                    panes = json.loads(self.cli(self.binary, "pane", "list"))["result"]["panes"]
+                    self.pane = panes[0]["pane_id"]
+                if self.cli(self.binary, "pane", "read", self.pane, "--source", "visible").strip() == "$":
+                    return
+            except subprocess.CalledProcessError:
+                pass
+            if time.monotonic() > end:
+                raise RuntimeError(f"Herdr's pane {self.pane} never showed the shell's prompt")
+            self.outer.pump(0.05)
+
+    def type(self, text):
+        self.cli(self.binary, "pane", "run", self.pane, text)
+
+    def new_tab(self):
+        created = json.loads(self.cli(self.binary, "tab", "create", "--focus", "--cwd", self.work))
+        self.pane = created["result"]["root_pane"]["pane_id"]
+
+    def detach(self):
+        self.outer.send(PREFIX + b"q")
+
+    def tab_count(self):
+        return len(json.loads(self.cli(self.binary, "tab", "list"))["result"]["tabs"])
+
+    def shut_down(self):
+        self.cli_quietly(self.binary, "server", "stop")
+
+
 class Tmux(Driver):
     """Sets the scenario up with tmux commands: one window per Kiwa tab,
     the last one current, and attaches only an attached scenario. The
@@ -572,6 +687,84 @@ class Tmux(Driver):
 
 
 @dataclass(frozen=True)
+class Pin:
+    url: str
+    sha256: str
+    # The binary's name inside a .tar.gz asset; None when the asset is the binary.
+    member: str | None = None
+
+
+ZELLIJ_RELEASE = "https://github.com/zellij-org/zellij/releases/download/v0.45.1"
+HERDR_RELEASE = "https://github.com/herdrdev/herdr/releases/download/v0.9.3"
+PINS = {
+    ("zellij", "x86_64"): Pin(f"{ZELLIJ_RELEASE}/zellij-x86_64-unknown-linux-musl.tar.gz",
+                              "40bcc2e03f5d5ae8e054e39f676081fe12ab70871506996ba595834c3718eefc", "zellij"),
+    ("zellij", "aarch64"): Pin(f"{ZELLIJ_RELEASE}/zellij-aarch64-unknown-linux-musl.tar.gz",
+                               "05f0802afadd53f8db9514e7cae53c9ae8432fed1b35b8294aa816ee3044a16b", "zellij"),
+    ("herdr", "x86_64"): Pin(f"{HERDR_RELEASE}/herdr-linux-x86_64",
+                             "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7"),
+    ("herdr", "aarch64"): Pin(f"{HERDR_RELEASE}/herdr-linux-aarch64",
+                              "4de7aa3e25678812e92960de64f7c2aaa1bca1f0f80a3c5e559837e231e1f5c0"),
+}
+ARCH = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(
+    platform.machine().lower())
+CACHE = os.path.join(os.path.expanduser("~"), ".cache", "kiwa-bench")
+
+
+def check_sha256(path, pin):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != pin.sha256:
+        raise RuntimeError(f"{path}, downloaded from {pin.url}, has SHA-256 {digest.hexdigest()}, "
+                           f"not the pinned {pin.sha256}")
+
+
+def pinned_asset(name):
+    """The cached path of `name`'s pinned asset for this machine, downloaded
+    and checked first if needed, or None when there is no pin for it."""
+    pin = PINS.get((name, ARCH))
+    if pin is None:
+        return None
+    folder = os.path.join(CACHE, pin.sha256[:16])
+    path = os.path.join(folder, os.path.basename(pin.url))
+    if not os.path.exists(path):
+        os.makedirs(folder, exist_ok=True)
+        print(f"downloading {pin.url}", flush=True)
+        part = path + ".part"
+        with urllib.request.urlopen(pin.url, timeout=60) as response, open(part, "wb") as f:
+            shutil.copyfileobj(response, f)
+        try:
+            check_sha256(part, pin)
+        except RuntimeError:
+            os.unlink(part)
+            raise
+        os.replace(part, path)
+    check_sha256(path, pin)
+    return path
+
+
+def pinned_binary(name):
+    asset = pinned_asset(name)
+    if asset is None:
+        return None
+    pin = PINS[(name, ARCH)]
+    if pin.member is None:
+        os.chmod(asset, 0o755)
+        return asset
+    folder = os.path.dirname(asset)
+    binary = os.path.join(folder, pin.member)
+    if not os.path.exists(binary):
+        unpacked = tempfile.mkdtemp(dir=folder)
+        with tarfile.open(asset) as archive:
+            archive.extract(pin.member, unpacked, filter="data")
+        os.replace(os.path.join(unpacked, pin.member), binary)
+        os.rmdir(unpacked)
+    return binary
+
+
+@dataclass(frozen=True)
 class Variant:
     name: str
     # Appended to the program's label in the tables.
@@ -583,7 +776,8 @@ class Variant:
 @dataclass(frozen=True)
 class Program:
     name: str
-    # The binary to run; None when this machine has none.
+    # The binary to run, from the options or the pins; None when this
+    # machine has none.
     binary: Callable[[argparse.Namespace], str | None]
     # The flag that prints the binary's version.
     version_flag: str
@@ -600,6 +794,10 @@ PROGRAMS = [
             lambda version, args: f"Kiwa ({args.build})"),
     Program("tmux", lambda args: args.tmux or shutil.which("tmux"), "-V", Tmux,
             (Variant("tmux"),)),
+    Program("zellij", lambda args: args.zellij or pinned_binary("zellij"), "--version", Zellij,
+            (Variant("zellij"),)),
+    Program("herdr", lambda args: args.herdr or pinned_binary("herdr"), "--version", Herdr,
+            (Variant("herdr"),)),
 ]
 
 def wait(v, seconds):
@@ -771,6 +969,8 @@ def main():
     ap.add_argument("kiwa")
     ap.add_argument("--build", default="unknown", help="Kiwa's optimize mode, for the report")
     ap.add_argument("--tmux", help="tmux binary (default: tmux on PATH)")
+    ap.add_argument("--zellij", help="Zellij binary (default: the pinned release)")
+    ap.add_argument("--herdr", help="Herdr binary (default: the pinned release)")
     ap.add_argument("--programs", default=",".join(p.name for p in PROGRAMS),
                     help="comma-separated programs to run (default: all)")
     ap.add_argument("--runs", type=int, default=3)
