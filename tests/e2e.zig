@@ -2183,7 +2183,9 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitText("Host");
     try o.waitText("test-user@");
-    try o.waitText(hostname());
+    // The sidebar clips long CI hostnames after the user prefix.
+    const host = hostname();
+    try waitTextIn(o, host[0..@min(host.len, 12)], .{ .x = 11, .y = 18, .cols = 12, .rows = 1 });
     try o.waitText("1 tab · 1 pane");
     try o.click(3, 20);
     try o.waitText(" change directory ");
