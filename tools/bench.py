@@ -30,9 +30,10 @@ against their SHA-256 and cached under ~/.cache/kiwa-bench. SIGTERM and
 SIGHUP unwind like ctrl+c, so an interrupted run still stops its servers and
 removes their sockets.
 
-After the results table comes a table of each program's processes. With
---check, the v1 budgets in GATES are checked against the medians after the
-tables, and the exit status is 1 if Kiwa misses any of them.
+After the results table come a table of each program's processes and a table
+of its size. With --check, the v1 budgets in GATES are checked against the
+medians after the tables, and the exit status is 1 if Kiwa misses any of
+them.
 
 Usage: tools/bench.py KIWA_BINARY [--build MODE] [--programs LIST] [--runs N]
        [--warmup S] [--sample S] [--only TEXT] [--check]
@@ -764,6 +765,26 @@ def pinned_binary(name):
     return binary
 
 
+def pinned_archive(name):
+    """The release archive of a pinned binary, if the run uses it."""
+    def archive(binary, scratch):
+        pin = PINS.get((name, ARCH))
+        if pin is None or not binary.startswith(os.path.join(CACHE, pin.sha256[:16]) + "/"):
+            return None
+        return pinned_asset(name)
+    return archive
+
+
+def kiwa_archive(binary, scratch):
+    """Packs the binary as the release workflow does."""
+    folder = os.path.join(scratch, "kiwa-release")
+    os.makedirs(folder)
+    shutil.copy2(binary, os.path.join(folder, "kiwa"))
+    archive = os.path.join(scratch, f"kiwa-{ARCH}-linux-musl.tar.gz")
+    subprocess.run(["tar", "-czf", archive, "-C", folder, "kiwa"], check=True)
+    return archive
+
+
 @dataclass(frozen=True)
 class Variant:
     name: str
@@ -783,6 +804,9 @@ class Program:
     version_flag: str
     driver: type
     variants: tuple[Variant, ...]
+    # The release archive users download: (binary, scratch directory) to
+    # its path, or None when there is none.
+    archive: Callable[[str, str], str | None] = lambda binary, scratch: None
     label: Callable[[str, argparse.Namespace], str] = lambda version, args: version
 
 
@@ -791,14 +815,51 @@ PROGRAMS = [
             (Variant("kiwa-margins", ", outer with margins", {"margins": True}),
              Variant("kiwa-plain", ", outer without margins", {"margins": False},
                      lambda scenario: scenario.plain)),
-            lambda version, args: f"Kiwa ({args.build})"),
+            kiwa_archive, lambda version, args: f"Kiwa ({args.build})"),
     Program("tmux", lambda args: args.tmux or shutil.which("tmux"), "-V", Tmux,
             (Variant("tmux"),)),
     Program("zellij", lambda args: args.zellij or pinned_binary("zellij"), "--version", Zellij,
-            (Variant("zellij"),)),
+            (Variant("zellij"),), pinned_archive("zellij")),
     Program("herdr", lambda args: args.herdr or pinned_binary("herdr"), "--version", Herdr,
-            (Variant("herdr"),)),
+            (Variant("herdr"),), pinned_archive("herdr")),
 ]
+
+PT_DYNAMIC, PT_INTERP = 2, 3
+# Shared libraries that are part of the C library itself, left out of the
+# size table.
+LIBC = ("linux-vdso.so", "ld-linux", "ld-musl", "libc.so", "libm.so", "libpthread.so", "libdl.so",
+        "librt.so", "libresolv.so", "libutil.so")
+
+
+def linking(path):
+    """Returns "dynamic" for an ELF executable with an interpreter, and
+    "static" or "static PIE" for one without."""
+    with open(path, "rb") as f:
+        header = f.read(64)
+        if header[:4] != b"\x7fELF" or header[4] != 2:
+            return "not a 64-bit ELF file"
+        order = "<" if header[5] == 1 else ">"
+        offset = struct.unpack_from(order + "Q", header, 0x20)[0]
+        size, count = struct.unpack_from(order + "HH", header, 0x36)
+        f.seek(offset)
+        table = f.read(size * count)
+    types = {struct.unpack_from(order + "I", table, i * size)[0] for i in range(count)}
+    if PT_INTERP in types:
+        return "dynamic"
+    return "static PIE" if PT_DYNAMIC in types else "static"
+
+
+def shared_libraries(path):
+    """The resolved paths of the libraries a dynamic executable loads,
+    beyond the C library."""
+    found = []
+    for line in subprocess.run(["ldd", path], capture_output=True, text=True, check=True).stdout.splitlines():
+        parts = line.split()
+        if "=>" not in parts or os.path.basename(parts[0]).startswith(LIBC):
+            continue
+        found.append((parts[0], os.path.realpath(parts[parts.index("=>") + 1])))
+    return found
+
 
 def wait(v, seconds):
     if v.outer:
@@ -964,6 +1025,23 @@ def print_processes(programs, results):
         print(f"| {label} | {cells[0]} | {cells[1]} |")
 
 
+def print_sizes(programs, scratch):
+    print("| Program | Executable bytes | Linking | Shared libraries beyond libc, bytes "
+          "| Executable and libraries bytes | Release archive bytes |")
+    print("|---|---|---|---|---|---|")
+    for program, binary, label, _ in programs:
+        size = os.path.getsize(binary)
+        kind = linking(binary)
+        libraries = [(name, os.path.getsize(path)) for name, path in shared_libraries(binary)] \
+            if kind == "dynamic" else []
+        total = sum(n for _, n in libraries)
+        listed = "; ".join(f"{name} {n:,}" for name, n in libraries)
+        listed = f"{listed}; total {total:,}" if libraries else "-"
+        archive = program.archive(binary, scratch)
+        packed = f"{os.path.getsize(archive):,} (`{os.path.basename(archive)}`)" if archive else "-"
+        print(f"| {label} | {size:,} | {kind} | {listed} | {size + total:,} | {packed} |")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("kiwa")
@@ -1050,6 +1128,8 @@ def run(args, scenarios, programs, scratch):
     print_results(scenarios, variants, results, args.sample)
     print()
     print_processes(programs, results)
+    print()
+    print_sizes(programs, scratch)
     if not args.check:
         return 0
     print()
