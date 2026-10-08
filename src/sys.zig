@@ -149,6 +149,16 @@ pub fn unixAddr(path: []const u8) error{NameTooLong}!c.sockaddr.un {
     return addr;
 }
 
+/// Takes an exclusive lock on `fd` without waiting. False when another
+/// process holds it.
+pub fn tryLock(fd: fd_t) Error!bool {
+    _ = check(c.flock(fd, c.LOCK.EX | c.LOCK.NB)) catch |e| switch (e) {
+        error.WouldBlock => return false,
+        else => return e,
+    };
+    return true;
+}
+
 /// A close-on-exec Unix stream socket. Kiwa has one thread, so no fork
 /// runs between the `socket` and the `fcntl`.
 pub fn unixSocket(nonblocking: bool) Error!fd_t {

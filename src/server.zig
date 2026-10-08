@@ -1759,6 +1759,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, pa
     const configuration = try config.load(gpa, io, config_path, &config_line);
 
     if (paths.socket_dir) |dir| try paths_mod.ensurePrivateDir(dir, sys.getuid());
+    // Held until exit, so that a second server cannot take the socket of
+    // one that has bound it but not yet listens.
+    const lock_path = try std.fmt.allocPrintSentinel(gpa, "{s}.lock", .{paths.socket}, 0);
+    defer gpa.free(lock_path);
+    const lock = try sys.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o600);
+    defer sys.close(lock);
+    if (!try sys.tryLock(lock)) return error.ServerAlreadyRunning;
     try removeStaleSocket(paths.socket);
 
     sys.ignoreSignal(.PIPE, true);

@@ -158,13 +158,22 @@ fn awaitRelease(sock: sys.fd_t) void {
     while ((sys.read(sock, &buf) catch 0) > 0) {}
 }
 
+/// Connects to this user's server, starting one if none runs. The
+/// terminal goes only to a server that runs as this user.
 fn connectOrStart(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths: paths_mod.Paths) !sys.fd_t {
-    if (sys.connectUnix(paths.socket)) |fd| return fd else |e| switch (e) {
-        error.ConnectionRefused, error.FileNotFound => {},
-        else => return e,
-    }
-    try startServer(gpa, env, paths);
-    return sys.connectUnix(paths.socket);
+    const fd = connected: {
+        if (sys.connectUnix(paths.socket)) |fd| break :connected fd else |e| switch (e) {
+            error.ConnectionRefused, error.FileNotFound => {},
+            else => return e,
+        }
+        // Another client may have started the server first; then this one
+        // exits, and that server answers.
+        startServer(gpa, env, paths) catch |e| break :connected sys.connectUnix(paths.socket) catch return e;
+        break :connected try sys.connectUnix(paths.socket);
+    };
+    errdefer sys.close(fd);
+    if ((try sys.peerCred(fd)).uid != sys.getuid()) return error.ServerBelongsToAnotherUser;
+    return fd;
 }
 
 /// Starts `kiwa __server` in its own session and blocks until it listens.
