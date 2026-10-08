@@ -95,7 +95,7 @@ pub const Menu = struct {
 
     pub fn draw(m: Menu, f: *Frame, zoomed: bool) void {
         const b = m.box(f.cols, f.rows);
-        for (b.y..b.y + b.rows) |y| @memset(f.rowMut(y)[b.x..][0..b.cols], .blank);
+        f.clearRect(b);
         f.drawBox(b, chrome.box_border);
         if (b.cols < 3 or b.rows < 3) return;
         for (m.items()[0..@min(m.items().len, b.rows - 2)], b.y + 1.., 0..) |item, y, i| {

@@ -543,7 +543,7 @@ pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const pre
     const cols: u16 = @intCast(@min(want_cols, area.cols));
     const rows: u16 = @intCast(@min(want_rows, area.rows));
     const box: Rect = .{ .x = area.x + (area.cols - cols) / 2, .y = area.y + (area.rows - rows) / 2, .cols = cols, .rows = rows };
-    for (box.y..box.y + box.rows) |y| @memset(f.rowMut(y)[box.x..][0..box.cols], .blank);
+    f.clearRect(box);
     f.drawBox(box, box_border);
     if (box.cols < 4 or box.rows < 3) return;
     const top = f.rowMut(box.y)[box.x..][0..box.cols];

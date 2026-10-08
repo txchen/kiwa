@@ -252,6 +252,19 @@ pub const Frame = struct {
         return f.dirty.iterator(.{});
     }
 
+    /// Blanks `r`, and the outside half of any wide character its edges
+    /// split, so that every row keeps each wide head next to its tail.
+    pub fn clearRect(f: *Frame, r: Rect) void {
+        if (r.cols == 0) return;
+        for (r.y..r.y + r.rows) |y| {
+            const cells = f.rowMut(y);
+            if (r.x > 0 and cells[r.x].width == .tail) cells[r.x - 1] = .blank;
+            const end = r.x + r.cols;
+            if (end < cells.len and cells[end - 1].width == .wide) cells[end] = .blank;
+            @memset(cells[r.x..end], .blank);
+        }
+    }
+
     /// Draws a single-line box on `r`'s edge cells. A box too small to
     /// have corners is blanked instead.
     pub fn drawBox(f: *Frame, r: Rect, style: Style) void {
@@ -826,4 +839,17 @@ test "drawn rows tell how far a pane scrolled" {
     try testing.expectEqual(1, try d.update(testing.allocator, &t, &rs));
     s.nextSlice("\r\n1\r\n2\r\n3\r\n4");
     try testing.expectEqual(null, try d.update(testing.allocator, &t, &rs));
+}
+
+test "clearing a rect blanks the outer half of each wide character its edges split" {
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 6, 1);
+    const row = f.rowMut(0);
+    for (0..3) |i| {
+        row[2 * i] = .{ .cp = 0x4e2d, .width = .wide };
+        row[2 * i + 1] = .{ .cp = 0, .width = .tail };
+    }
+    f.clearRect(.{ .x = 1, .y = 0, .cols = 4, .rows = 1 });
+    for (f.row(0)) |c| try testing.expect(c.width == .narrow);
 }

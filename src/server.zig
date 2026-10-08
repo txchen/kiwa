@@ -1505,10 +1505,14 @@ const Server = struct {
             const same = !moved;
             const shift = try p.drawn_rows.update(s.gpa, &p.terminal, &p.render);
             var which: frame_mod.Frame.Which = if (same) .changed else .all;
-            if (shift) |n| if (same and p.render.rows == pl.inner.rows) {
+            // A scroll would also move the overlay cells drawn over the pane.
+            const overlaid = c.drawn_menu != null or c.drawn_help or c.drawn_dialog;
+            if (shift) |n| if (same and !overlaid and p.render.rows == pl.inner.rows) {
                 try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n, .confined = s.geometry.effective == .framed });
                 c.frame.scrollRows(pl.inner, n);
                 which = .{ .except = &p.drawn_rows.carried };
+            } else {
+                which = .all;
             };
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, which);
             if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);

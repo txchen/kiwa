@@ -63,7 +63,7 @@ pub const Dialog = union(enum) {
     /// Draws the dialog over `area` and returns where the outer cursor goes.
     pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect) !frame_mod.Cursor {
         const b = d.box(area);
-        for (b.y..b.y + b.rows) |y| @memset(f.rowMut(y)[b.x..][0..b.cols], .blank);
+        f.clearRect(b);
         f.drawBox(b, chrome.box_border);
         const hidden: frame_mod.Cursor = .{ .visible = false };
         if (b.cols < 6 or b.rows < 4) return hidden;
