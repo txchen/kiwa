@@ -50,9 +50,12 @@ pub const Pane = struct {
     /// written to the PTY yet. Until it has, it may still be between
     /// `fork` and its `chdir`, where it is in the server's directory.
     start_dir: []u8,
-    /// The basename of the shell this pane started, to tell it from a
-    /// program that replaced it with `exec`.
-    shell_name: []u8,
+    /// The shell's process name, read at its first output, to tell it from
+    /// a program that later replaced it with `exec`. Read then rather than
+    /// taken from `$SHELL`, because a shell such as macOS's `/bin/sh` runs
+    /// another one under its own name.
+    shell_name: Comm = undefined,
+    shell_name_len: ?usize = null,
     wrote: bool = false,
     /// The OSC 52 sequence for the program's last clipboard write, waiting
     /// to go to the outer terminal; empty when there is none.
@@ -83,13 +86,10 @@ pub const Pane = struct {
             }),
             .stream = undefined,
             .start_dir = &.{},
-            .shell_name = &.{},
         };
         errdefer p.terminal.deinit(gpa);
         p.start_dir = try gpa.dupe(u8, opts.cwd);
         errdefer gpa.free(p.start_dir);
-        p.shell_name = try gpa.dupe(u8, std.fs.path.basename(opts.shell));
-        errdefer gpa.free(p.shell_name);
 
         var handler: Handler = .init(&p.terminal);
         handler.effects.write_pty = &writePty;
@@ -129,7 +129,6 @@ pub const Pane = struct {
         self.stream.deinit();
         self.terminal.deinit(self.gpa);
         self.gpa.free(self.start_dir);
-        self.gpa.free(self.shell_name);
         self.gpa.destroy(self);
     }
 
@@ -145,7 +144,10 @@ pub const Pane = struct {
             self.stream.nextSlice(buf[0..n]);
             total += n;
         } else false;
-        if (total > 0) self.wrote = true;
+        if (total > 0 and !self.wrote) {
+            self.wrote = true;
+            if (sys.processName(self.pid, &self.shell_name)) |name| self.shell_name_len = name.len;
+        }
         defer {
             self.rang = false;
             self.moved = false;
@@ -177,7 +179,10 @@ pub const Pane = struct {
     pub fn busy(self: *const Pane, buf: *Comm) ?[]const u8 {
         const pgrp = self.foregroundGroup() orelse return null;
         const name = sys.processName(pgrp, buf) orelse return if (pgrp == self.pid) null else "a program";
-        if (pgrp == self.pid and isShell(name, self.shell_name)) return null;
+        if (pgrp == self.pid) {
+            const shell = self.shell_name[0 .. self.shell_name_len orelse return null];
+            if (isShell(name, shell)) return null;
+        }
         return name;
     }
 
