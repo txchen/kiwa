@@ -446,6 +446,13 @@ fn content(box: Rect, area: Rect) Rect {
     return .{ .x = box.x, .y = box.y, .cols = box.cols -| @intFromBool(box.right() < area.right()), .rows = box.rows -| @intFromBool(box.bottom() < area.bottom()) };
 }
 
+/// A framed pane's box: one gutter column before a pane to its right, but
+/// no gutter row, because a blank row between stacked frames reads as a
+/// much wider gap than a blank column between side-by-side ones.
+fn framedBox(box: Rect, area: Rect) Rect {
+    return .{ .x = box.x, .y = box.y, .cols = box.cols -| @intFromBool(box.right() < area.right()), .rows = box.rows };
+}
+
 fn fits(n: *const Node, area: Rect) bool {
     return fitsNode(n, area, area);
 }
@@ -477,7 +484,7 @@ fn placeNode(gpa: std.mem.Allocator, n: *const Node, box: Rect, area: Rect, out:
 fn fitsFramed(n: *const Node, box: Rect, area: Rect) bool {
     return switch (n.*) {
         .pane => blk: {
-            const frame = content(box, area);
+            const frame = framedBox(box, area);
             break :blk frame.cols >= min_cols + 2 and frame.rows >= min_rows + 2;
         },
         .split => |s| blk: {
@@ -490,15 +497,18 @@ fn fitsFramed(n: *const Node, box: Rect, area: Rect) bool {
 fn resolveNode(n: *const Node, allocation: Rect, path: ?SplitPath, out: *Geometry) void {
     switch (n.*) {
         .pane => |id| {
-            const box = if (out.effective == .framed) content(allocation, out.area) else allocation;
+            const box = if (out.effective == .framed) framedBox(allocation, out.area) else allocation;
             const inner = if (out.effective == .framed) box.shrink() else content(box, out.area);
             out.panes.appendAssumeCapacity(.{ .pane = id, .box = box, .inner = inner });
         },
         .split => |s| {
             const parts = divide(allocation, s.axis, s.ratio);
             const at = if (s.axis == .right) parts[1].x else parts[1].y;
-            const start = at -| @as(u16, if (out.effective == .framed) 2 else 1);
-            const end = @as(u32, at) + @as(u16, if (out.effective == .framed) 1 else 0);
+            // Framed: the border before the cut, a gutter column for a
+            // right split, and the border after it.
+            const framed = out.effective == .framed;
+            const start = at -| @as(u16, if (framed and s.axis == .right) 2 else 1);
+            const end = @as(u32, at) + @as(u16, if (framed) 1 else 0);
             var band = allocation;
             if (s.axis == .right) {
                 band.x = @max(allocation.x, start);
@@ -575,7 +585,7 @@ test "framed nested allocations preserve exact cuts, offset rectangles, and whol
     try testing.expectEqual(.framed, g.effective);
     try testing.expectEqualDeep(&[_]Placement{
         .{ .pane = pid(1), .box = .{ .x = 3, .y = 2, .cols = 9, .rows = 9 }, .inner = .{ .x = 4, .y = 3, .cols = 7, .rows = 7 } },
-        .{ .pane = pid(2), .box = .{ .x = 13, .y = 2, .cols = 9, .rows = 4 }, .inner = .{ .x = 14, .y = 3, .cols = 7, .rows = 2 } },
+        .{ .pane = pid(2), .box = .{ .x = 13, .y = 2, .cols = 9, .rows = 5 }, .inner = .{ .x = 14, .y = 3, .cols = 7, .rows = 3 } },
         .{ .pane = pid(3), .box = .{ .x = 13, .y = 7, .cols = 9, .rows = 4 }, .inner = .{ .x = 14, .y = 8, .cols = 7, .rows = 2 } },
     }, g.panes.items);
     try testing.expectEqual(@as(u16, 13), g.boundaries.items[0].divider.at);
@@ -597,7 +607,7 @@ test "framed nested allocations preserve exact cuts, offset rectangles, and whol
     try testing.expectEqual(pid(1), g.at(12, 4).decoration.pane);
     try testing.expectEqual(@as(u16, 13), g.at(12, 6).decoration.divider.?.at);
     try testing.expect(g.at(3, 2).decoration.divider == null);
-    for ([_]Rect{ .{ .cols = 9, .rows = 7 }, .{ .cols = 9, .rows = 6 }, .{ .cols = 9, .rows = 7 } }, 0..) |r, i| {
+    for ([_]Rect{ .{ .cols = 9, .rows = 7 }, .{ .cols = 9, .rows = 5 }, .{ .cols = 9, .rows = 7 } }, 0..) |r, i| {
         try f.l.resolve(alloc, r, .framed, null, &g);
         try testing.expectEqual(if (i == 1) Effective.compact else .framed, g.effective);
         try testing.expectEqual(@as(u16, 5), g.boundaries.items[0].divider.at);

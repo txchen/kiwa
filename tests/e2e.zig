@@ -2285,7 +2285,7 @@ fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
 const framed_config = "[ui]\npane_style = 'framed'\n";
 const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 23 };
 const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
-const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 11 };
+const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
 const framed_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
 
 fn framesDrawn(o: *Outer, boxes: []const Box) !bool {
@@ -2364,12 +2364,12 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try prefixed(o, "-");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 65, 11, 'M');
+    try o.mouseReport(0, 65, 12, 'M');
     try o.mouseReport(32, 65, 2, 'M');
-    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 3 }, .{ .x = 53, .y = 4, .cols = 27, .rows = 20 } });
-    try o.mouseReport(32, 65, 11, 'M');
+    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 2 }, .{ .x = 53, .y = 3, .cols = 27, .rows = 21 } });
+    try o.mouseReport(32, 65, 12, 'M');
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 65, 11, 'm');
+    try o.mouseReport(0, 65, 12, 'm');
     try o.mouseReport(0, 53, 5, 'M');
     try o.mouseReport(32, 77, 5, 'M');
     try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 51, .rows = 23 }, .{ .x = 77, .y = 1, .cols = 3, .rows = 12 }, .{ .x = 77, .y = 13, .cols = 3, .rows = 11 } });
@@ -2390,7 +2390,7 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try o.resize(100, 24);
     const wider = [_]Box{
         .{ .x = 26, .y = 1, .cols = 35, .rows = 23 },
-        .{ .x = 62, .y = 1, .cols = 38, .rows = 11 },
+        .{ .x = 62, .y = 1, .cols = 38, .rows = 12 },
         .{ .x = 62, .y = 13, .cols = 38, .rows = 11 },
     };
     try waitFrames(o, &wider);
