@@ -256,13 +256,11 @@ test "pane styles are typed, optional, unique, and the default toggle can be ove
     try std.testing.expectEqual(.compact, (try parse("[ui]\npane_style = 'compact'", &line)).pane_style);
     const c = try parse("[ui]\npane_style = 'framed'\n[bindings]\n'prefix+f' = 'new_tab'", &line);
     try std.testing.expectEqual(.framed, c.pane_style);
-    try std.testing.expectEqualDeep(prefix.Action.new_tab, c.keys.lookup(.typed('f'), true).?);
     const prefix_key: @import("input.zig").Event = .{ .key = .{ .code = .{ .char = 'b' }, .mods = .{ .ctrl = true } } };
     var overridden: prefix.Prefix = .{ .keymap = c.keys };
     _ = overridden.feed(prefix_key);
     try std.testing.expectEqualDeep(prefix.Outcome{ .action = .new_tab }, overridden.feed(.{ .key = .typed('f') }));
     const disabled = try parse("[bindings]\n'prefix+f' = 'none'", &line);
-    try std.testing.expect(disabled.keys.lookup(.typed('f'), true) == null);
     var unbound: prefix.Prefix = .{ .keymap = disabled.keys };
     _ = unbound.feed(prefix_key);
     try std.testing.expectEqualDeep(prefix.Outcome.none, unbound.feed(.{ .key = .typed('f') }));

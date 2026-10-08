@@ -367,7 +367,6 @@ test "a session survives the JSON round trip with its names, layouts, focus, zoo
     var new_dirs: FakeDirs = .{};
     for (restored.items) |r| if (r.cwd) |cwd| try new_dirs.map.put(arena, r.pane, cwd);
     try testing.expectEqualStrings(json, try encode(arena, &t, true, &new_dirs));
-    try testing.expectEqualStrings(try listOf(arena, &s), try listOf(arena, &t));
     try testing.expectEqualStrings(
         \\1: main (active)
         \\  1: editor, 3 panes (active)

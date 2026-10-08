@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
     const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
     const vt = ghostty.module("ghostty-vt");
 
-    const fuzz = b.option(u8, "fuzz", "Percent of each randomized unit test's cases to run (default 10; CI runs 100)") orelse 10;
+    const fuzz = b.option(u8, "fuzz", "Percent of each randomized unit test's cases to run (default 10; full coverage 100)") orelse 10;
     const options = kiwaOptions(b, 0, fuzz);
     const mod = kiwaModule(b, target, optimize, vt, options);
     const exe = b.addExecutable(.{ .name = "kiwa", .root_module = mod });

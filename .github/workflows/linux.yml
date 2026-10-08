@@ -2,6 +2,11 @@ name: Linux builds
 
 on:
   workflow_call:
+    inputs:
+      full_randomized:
+        description: Run the full randomized budget on every target and build mode
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -11,6 +16,8 @@ jobs:
     name: ${{ matrix.platform.target }} / ${{ matrix.optimize }}
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
+    env:
+      FUZZ_PERCENT: ${{ (inputs.full_randomized || matrix.optimize == 'Debug') && 100 || 10 }}
     strategy:
       fail-fast: false
       matrix:
@@ -46,13 +53,13 @@ jobs:
         run: >-
           mise exec -- zig build test e2e
           -Dtarget=${{ matrix.platform.target }}
-          -Dcpu=baseline -Doptimize=${{ matrix.optimize }} -Dfuzz=100
+          -Dcpu=baseline -Doptimize=${{ matrix.optimize }} -Dfuzz="$FUZZ_PERCENT"
       - name: Build release binary
         if: matrix.optimize == 'ReleaseFast'
         run: >-
           mise exec -- zig build
           -Dtarget=${{ matrix.platform.target }}
-          -Dcpu=baseline -Doptimize=ReleaseFast
+          -Dcpu=baseline -Doptimize=ReleaseFast -Dfuzz="$FUZZ_PERCENT"
       - name: Package release binary
         if: matrix.optimize == 'ReleaseFast'
         env:

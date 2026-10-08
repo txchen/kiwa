@@ -578,12 +578,6 @@ fn attachedWithPrompt(ctx: *Ctx) !*Outer {
     return o;
 }
 
-fn echoHello(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
-    try o.send("echo hello\r");
-    try o.waitLine("hello");
-}
-
 fn detachRestoresTerminal(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try expect(o.term.screens.active_key == .alternate, "the client uses the alternate screen");
@@ -628,25 +622,34 @@ fn detachKeepsFileStatusFlags(ctx: *Ctx) !void {
     try expect(try o.waitExit() == 0, "the client exits 0");
 }
 
-fn terminalHangupDetaches(ctx: *Ctx) !void {
+fn terminalHangup(ctx: *Ctx, measure: bool) !void {
     // Not the client's controlling terminal, so no SIGHUP tells the client;
     // only the server's handle sees the hangup.
     const o = try ctx.attachWith(.{ .keep_slave = true, .controlling = false });
     try o.waitLine("$");
     try o.waitKitty();
-    // Past the prompt's last dynamic-name check, one interval after it.
-    _ = try o.pump(1200);
-    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    if (measure) _ = try o.pump(1200);
     o.hangUp();
     try expect(try o.waitExit() == 0, "the client exits 0 once the server detaches it");
-    sleepMs(100);
-    const before = try sample(ctx, pid);
-    sleepMs(1000);
-    const after = try sample(ctx, pid);
-    try expect(after.switches - before.switches <= 2, "the server does not spin on the hung-up terminal");
+    if (measure) {
+        const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+        sleepMs(100);
+        const before = try sample(ctx, pid);
+        sleepMs(1000);
+        const after = try sample(ctx, pid);
+        try expect(after.switches - before.switches <= 2, "the server does not spin on the hung-up terminal");
+    }
     const b = try attachedWithPrompt(ctx);
     try b.send("echo after hangup\r");
     try b.waitLine("after hangup");
+}
+
+fn terminalHangupDetaches(ctx: *Ctx) !void {
+    try terminalHangup(ctx, false);
+}
+
+fn terminalHangupDoesNotSpin(ctx: *Ctx) !void {
+    try terminalHangup(ctx, true);
 }
 
 fn legacyKeyboardGetsNoKittyFlags(ctx: *Ctx) !void {
@@ -741,16 +744,6 @@ fn takeover(ctx: *Ctx) !void {
     try b.waitLine("still here");
 }
 
-fn childExitStopsServer(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
-    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
-    try o.send("exit\r");
-    try expect(try o.waitExit() == 0, "the client exits 0");
-    try expect(try o.hasLine("exited"), "the client prints \"exited\"");
-    try ctx.waitServerGone(pid);
-    try expect(!ctx.socketExists(), "the socket path is removed");
-}
-
 fn killServer(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
@@ -813,25 +806,6 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
     try expect(raw[6].content.codepoint.data == '|', "the next character follows the wide one");
 }
 
-fn fullScreenPrograms(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
-    try o.send("seq 1 200 > nums; less nums\r");
-    try o.waitLine("21");
-    try expect(!try o.hasLine("200"), "less shows only the first screen");
-    try o.send("G");
-    try o.waitLine("200");
-    try o.send("q");
-    try o.waitLine("$");
-    try o.send("clear; vim -u NONE -N nums\r");
-    try o.waitText("\"nums\" 200L");
-    try o.send("G");
-    try o.waitLine("200");
-    try o.send(":q!\r");
-    try o.waitLine("$");
-    try o.send("echo back\r");
-    try o.waitLine("back");
-}
-
 fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
     const o = try ctx.attachWith(.{ .keyboard = .legacy });
     try o.waitLine("$");
@@ -866,8 +840,17 @@ fn vimEscape(o: *Outer) !void {
 
 fn vimEdits(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
     const o = try attachedAs(ctx, keyboard);
-    try o.send("printf 'one\\ntwo\\nthree\\n' > f; vim -u NONE -N -c 'set showmode' f\r");
-    try o.waitText("\"f\" 3L");
+    if (keyboard == .kitty) {
+        try o.send("printf 'one\\ntwo\\nthree\\n' > f; seq 4 200 >> f; vim -u NONE -N -c 'set showmode' f\r");
+        try o.waitText("\"f\" 200L");
+        try o.send("G");
+        try o.waitLine("200");
+        try o.press(named(.home, ctrl));
+        try o.waitLine("one");
+    } else {
+        try o.send("printf 'one\\ntwo\\nthree\\n' > f; vim -u NONE -N -c 'set showmode' f\r");
+        try o.waitText("\"f\" 3L");
+    }
     try o.press(named(.arrow_down, .{}));
     try o.press(named(.arrow_down, .{}));
     try o.press(named(.end, .{}));
@@ -885,10 +868,11 @@ fn vimEdits(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
     try typeText(o, ":wq");
     try o.press(named(.enter, .{}));
     try o.waitLine("$");
-    try o.send("clear; cat f\r");
+    try o.send("clear; head -3 f; echo back\r");
     try o.waitLine(">two");
     try o.waitLine("three!");
     try o.waitLine("ne");
+    try o.waitLine("back");
 }
 
 fn vimEditsKitty(ctx: *Ctx) !void {
@@ -917,6 +901,7 @@ fn pasteIntoVimIsBracketed(ctx: *Ctx) !void {
 fn lessPages(o: *Outer) !void {
     try o.send("seq 1 200 > nums; less nums\r");
     try o.waitLine("21");
+    try expect(!try o.hasLine("200"), "less shows only the first screen");
     try o.press(named(.page_down, .{}));
     try o.waitLine("42");
     try o.press(named(.arrow_down, .{}));
@@ -1694,6 +1679,7 @@ fn exitCascadesToTheServer(ctx: *Ctx) !void {
     try expect(try o.waitExit() == 0, "the client exits 0");
     try expect(try o.hasLine("exited"), "the client prints \"exited\"");
     try ctx.waitServerGone(pid);
+    try expect(!ctx.socketExists(), "the socket path is removed");
 }
 
 fn workspaceDirectoriesCanChange(ctx: *Ctx) !void {
@@ -1804,33 +1790,6 @@ fn processRuns(ctx: *Ctx, cmdline: []const u8) !bool {
     return false;
 }
 
-fn closingAPaneHangsUpItsProgram(ctx: *Ctx) !void {
-    const o = try attachedWithPrompt(ctx);
-    try prefixed(o, "v");
-    try waitBoxes(o, &.{ left_half, right_half });
-    const arg = try std.fmt.allocPrint(ctx.gpa, "{d}", .{4_000_000 + @as(u32, @intCast(sys.getpid()))});
-    defer ctx.gpa.free(arg);
-    const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{s}\x00", .{arg});
-    defer ctx.gpa.free(cmdline);
-    var cmd: [64]u8 = undefined;
-    try o.send(try std.fmt.bufPrint(&cmd, "sleep {s}\r", .{arg}));
-    const deadline = now() + 5 * std.time.ns_per_s;
-    while (!try processRuns(ctx, cmdline)) {
-        if (now() > deadline) return error.SleepDidNotStart;
-        sleepMs(20);
-    }
-    try prefixed(o, "x");
-    try o.waitText("close pane? sleep is running");
-    try o.send("y");
-    try waitNoBorders(o);
-    while (try processRuns(ctx, cmdline)) {
-        if (now() > deadline + 3 * std.time.ns_per_s) return error.SleepSurvivedClose;
-        sleepMs(20);
-    }
-    try o.send("echo still$((1+1))\r");
-    try o.waitLine("still2");
-}
-
 /// Starts `sleep <unique number>` in the focused pane and waits until it runs.
 /// Returns its command line for `processRuns`.
 fn startSleep(ctx: *Ctx, o: *Outer) ![]u8 {
@@ -1871,6 +1830,13 @@ fn closingARunningProgramAsks(ctx: *Ctx) !void {
     try o.waitText("close pane?");
     try o.send("y");
     try waitNoBorders(o);
+    const closed = now() + 3 * std.time.ns_per_s;
+    while (try processRuns(ctx, cmdline)) {
+        if (now() > closed) return error.SleepSurvivedClose;
+        sleepMs(20);
+    }
+    try o.send("echo still$((1+1))\r");
+    try o.waitLine("still2");
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane (active)\n", .{name});
 
     // An idle shell closes without asking.
@@ -1943,25 +1909,25 @@ fn producerCounts(o: *Outer) ![10]u32 {
     return best;
 }
 
-const Ahead = struct { base: [10]u32, by: u32 };
+const Ahead = struct { base: [10]u32, by: u32, count: usize = 10 };
 
 fn producersAhead(o: *Outer, a: Ahead) !bool {
     const now_counts = try producerCounts(o);
-    for (now_counts, a.base) |n, b| if (n < b + a.by) return false;
+    for (now_counts[0..a.count], a.base[0..a.count]) |n, b| if (n < b + a.by) return false;
     return true;
 }
 
-fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
+fn hiddenProducers(ctx: *Ctx, count: usize, duration_ms: u32, advance: u32) !void {
     // A 240x64 tab area, beside the sidebar and under the tab row.
     const o = try ctx.attachSized(266, 65);
     try o.waitLine("$");
     try prefixed(o, "c");
-    for (0..10) |i| {
+    for (0..count) |i| {
         if (i > 0) try o.send(if (i % 2 == 1) "\x02v" else "\x02-");
         var cmd: [96]u8 = undefined;
         try o.send(try std.fmt.bufPrint(&cmd, "clear; i=0; while :; do echo {d}:$i; i=$((i+1)); sleep 0.033; done\r", .{i}));
     }
-    try o.waitFor("every producer", Ahead{ .base = @splat(0), .by = 5 }, producersAhead);
+    try o.waitFor("every producer", Ahead{ .base = @splat(0), .by = 5, .count = count }, producersAhead);
     // The loops' foreground flips between the shell and `sleep`; a fixed
     // name keeps that out of the tab row.
     try prefixed(o, "T");
@@ -1975,14 +1941,22 @@ fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
     try o.waitLine("$");
     const renders = try ctx.counter("renders");
     _ = try o.pump(300);
-    const bytes = try o.pump(3000);
+    const bytes = try o.pump(duration_ms);
     const hidden_renders = try ctx.counter("renders") - renders;
-    std.debug.print("    10 hidden producers, 3 s: {d} outer bytes, {d} renders\n", .{ bytes, hidden_renders });
+    std.debug.print("    {d} hidden producers, {d} ms: {d} outer bytes, {d} renders\n", .{ count, duration_ms, bytes, hidden_renders });
     try expect(bytes == 0, "hidden producers send no outer bytes");
     // The activity marker may still be drawn, once, after the switch.
     try expect(hidden_renders <= 1, "hidden producers cause at most one render");
     try prefixed(o, "2");
-    try o.waitFor("the producers' latest output", Ahead{ .base = before, .by = 50 }, producersAhead);
+    try o.waitFor("the producers' latest output", Ahead{ .base = before, .by = advance, .count = count }, producersAhead);
+}
+
+fn hiddenProducersDrawNothing(ctx: *Ctx) !void {
+    try hiddenProducers(ctx, 1, 300, 5);
+}
+
+fn tenHiddenProducersDrawNothing(ctx: *Ctx) !void {
+    try hiddenProducers(ctx, 10, 3000, 50);
 }
 
 const Mark = struct { x: usize, y: usize, cp: u21 };
@@ -2754,6 +2728,7 @@ fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     try o.waitText("scroll-079");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.wheel(true, framed_bottom.x + 7, framed_bottom.y + 3);
+    try o.waitGone("scroll-079");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.send("clear; echo SCROLL-$((40+2))\r");
     try o.waitText("SCROLL-42");
@@ -2847,7 +2822,7 @@ fn keyboardCopyWritesClipboard(ctx: *Ctx) !void {
     try o.press(char('e', ctrl));
     try o.send("y");
     try o.waitGone(" COPY ");
-    const deadline = now() + 3000;
+    const deadline = now() + 3 * std.time.ns_per_s;
     while (o.clipboard.items.len == 0 and now() < deadline) _ = try o.pump(50);
     try expect(std.mem.eql(u8, o.clipboard.items, "hello \u{4e2d}\u{6587}"), "keyboard copy writes Unicode text to the system clipboard");
     try prefixed(o, "\x0b");
@@ -3173,8 +3148,10 @@ fn dynamicNamesFollowTheForegroundCommand(ctx: *Ctx) !void {
     try waitCursor(o, area.x + 2, area.y + 1);
     try o.send("mkdir src other; cd src\r");
     try o.waitText(" 1 src ");
-    try o.send("sleep 3\r");
+    const running = try startSleep(ctx, o);
+    defer ctx.gpa.free(running);
     try o.waitText(" 1 sleep · src ");
+    try o.press(char('c', ctrl));
     try o.waitText(" 1 src ");
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
@@ -3186,7 +3163,13 @@ fn dynamicNamesFollowTheForegroundCommand(ctx: *Ctx) !void {
     try o.waitText(" 1 other ");
     try prefixed(o, "T");
     try renameTo(o, " rename tab ", "server");
-    try o.send("cd ..; sleep 1; echo FIXED-$((1+1))\r");
+    try o.send("cd ..\r");
+    const fixed = try startSleep(ctx, o);
+    defer ctx.gpa.free(fixed);
+    _ = try o.pump(700);
+    try expect(try o.contains(" 1 server "), "the manual name stays fixed while the foreground program runs");
+    try o.press(char('c', ctrl));
+    try o.send("echo FIXED-$((1+1))\r");
     try o.waitText("FIXED-2");
     try expect(try o.contains(" 1 server "), "manual names survive commands and directory changes");
     try prefixed(o, "T");
@@ -3282,25 +3265,35 @@ fn branchLinesBelongToRepositoryWorkspaces(ctx: *Ctx) !void {
     try waitSidebarRow(o, 3, "   next");
 }
 
-fn quietRepositoryReadsHeadOnlyAfterEvents(ctx: *Ctx) !void {
+fn quietRepository(ctx: *Ctx, measure: bool) !void {
     ctx.gpa.free(try ctx.sh("git init -q -b main"));
     const o = try attachedWithPrompt(ctx);
     try waitSidebarRow(o, 2, "   main");
-    _ = try o.pump(1200);
     const reads = try ctx.counter("head_reads");
     try expect(reads == 1, "HEAD was read once, when the workspace was created");
-    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
-    const before = try sample(ctx, pid);
-    const bytes = try o.pump(3000);
-    const after = try sample(ctx, pid);
-    const switches = after.switches - before.switches;
-    std.debug.print("    quiet 3 s in a repository: server context switches={d}, outer bytes={d}\n", .{ switches, bytes });
+    if (measure) {
+        _ = try o.pump(1200);
+        const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+        const before = try sample(ctx, pid);
+        const bytes = try o.pump(3000);
+        const after = try sample(ctx, pid);
+        const switches = after.switches - before.switches;
+        std.debug.print("    quiet 3 s in a repository: server context switches={d}, outer bytes={d}\n", .{ switches, bytes });
+        try expect(switches <= 2, "at most 2 server context switches in 3 s");
+        try expect(bytes == 0, "no output reaches the outer terminal");
+    } else _ = try o.pump(1200);
     try expect(try ctx.counter("head_reads") == reads, "a quiet repository's HEAD is not read again");
-    try expect(switches <= 2, "at most 2 server context switches in 3 s");
-    try expect(bytes == 0, "no output reaches the outer terminal");
     ctx.gpa.free(try ctx.sh("git switch -q -c outside"));
     try waitSidebarRow(o, 2, "   outside");
     try expect(try ctx.counter("head_reads") > reads, "a switch outside the pane reads HEAD again");
+}
+
+fn quietRepositoryReadsHeadOnlyAfterEvents(ctx: *Ctx) !void {
+    try quietRepository(ctx, false);
+}
+
+fn quietRepositoryDoesNotSpin(ctx: *Ctx) !void {
+    try quietRepository(ctx, true);
 }
 
 /// A file in this case's state directory.
@@ -3537,7 +3530,6 @@ fn typingDoesNotSave(ctx: *Ctx) !void {
     try waitTextIn(o, "reported", right_half);
     const moved = try waitSaved(ctx, "\"cwd\": \"/tmp\"");
     defer ctx.gpa.free(moved.text);
-    sleepMs(1200);
     try o.send("clear; printf '\\033]7;file://localhost/tmp\\007'; echo again\r");
     try waitTextIn(o, "again", right_half);
     sleepMs(1500);
@@ -3601,10 +3593,10 @@ fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
 pub const Kind = enum { functional, perf };
 
 const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void, kind: Kind = .functional }{
-    .{ .name = "attach and echo", .run = echoHello },
     .{ .name = "ctrl+b q restores the outer terminal and pops the kitty flags", .run = detachRestoresTerminal },
     .{ .name = "detach leaves the outer terminal's file status flags as they were", .run = detachKeepsFileStatusFlags },
     .{ .name = "a hangup on the server's terminal handle detaches the client", .run = terminalHangupDetaches },
+    .{ .name = "a hung-up terminal does not spin the server", .run = terminalHangupDoesNotSpin, .kind = .perf },
     .{ .name = "a terminal without the kitty protocol gets no kitty flags", .run = legacyKeyboardGetsNoKittyFlags },
     .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },
@@ -3612,12 +3604,10 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "kiwa __stats counts renders and wakes", .run = statsCountRendersAndWakes },
     .{ .name = "resize reaches the pane", .run = resizeReachesPane },
     .{ .name = "second client takes over", .run = takeover },
-    .{ .name = "child exit stops the server", .run = childExitStopsServer },
     .{ .name = "kill-server stops the server", .run = killServer },
     .{ .name = "kill-server gives up on a server that survives SIGTERM after 5 s", .run = killServerGivesUpOnAServerThatStays },
     .{ .name = "the pane starts in the client's directory with Kiwa's environment", .run = paneStartsWithClientDirAndEnv },
     .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
-    .{ .name = "less and vim draw", .run = fullScreenPrograms },
     .{ .name = "a lone esc reaches vim and leaves insert mode", .run = loneEscLeavesInsertMode },
     .{ .name = "vim navigates, edits, and quits (kitty outer)", .run = vimEditsKitty },
     .{ .name = "vim navigates, edits, and quits (legacy outer)", .run = vimEditsLegacy },
@@ -3642,8 +3632,8 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "workspace directories can be chosen, changed, and restored", .run = workspaceDirectoriesCanChange },
     .{ .name = "new panes start in the focused pane's directory", .run = newPanesStartInTheFocusedDirectory },
     .{ .name = "hidden producers draw nothing until their tab shows", .run = hiddenProducersDrawNothing },
+    .{ .name = "ten hidden producers draw nothing for three seconds", .run = tenHiddenProducersDrawNothing, .kind = .perf },
     .{ .name = "a split survives a client shrunk below the minimum pane size", .run = tinyClientKeepsTheSplit },
-    .{ .name = "prefix x closes the pane and hangs up its foreground program", .run = closingAPaneHangsUpItsProgram },
     .{ .name = "closing a pane, tab, or workspace asks only while a program other than the shell runs", .run = closingARunningProgramAsks },
     .{ .name = "a fresh attach shows the sidebar, the tab row, and the prompt", .run = freshAttachShowsTheChrome },
     .{ .name = "output and bells mark unseen tabs until viewed", .run = activityMarksUnseenTabs },
@@ -3685,6 +3675,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "the branch line follows git switch and shows a detached commit's short id", .run = branchLineFollowsHead },
     .{ .name = "only workspaces in a repository get a branch line, and a shared watch outlives a closed workspace", .run = branchLinesBelongToRepositoryWorkspaces },
     .{ .name = "a quiet repository's HEAD is read only after an inotify event", .run = quietRepositoryReadsHeadOnlyAfterEvents },
+    .{ .name = "a quiet repository does not spin the server", .run = quietRepositoryDoesNotSpin, .kind = .perf },
     .{ .name = "kill-server and kiwa restore the workspaces, tabs, names, layout, and directories", .run = restoreRebuildsTheSession },
     .{ .name = "a restored pane whose directory is gone starts in the workspace root", .run = restoreFallsBackToTheWorkspaceRoot },
     .{ .name = "a restored workspace in a repository shows its branch and follows switches", .run = restoredWorkspaceShowsItsBranch },

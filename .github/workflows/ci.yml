@@ -5,6 +5,13 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_randomized:
+        description: Run the full randomized budget on every target and build mode
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: read
@@ -16,5 +23,9 @@ concurrency:
 jobs:
   linux:
     uses: ./.github/workflows/linux.yml
+    with:
+      full_randomized: ${{ github.event_name == 'schedule' || inputs.full_randomized == true }}
   macos:
     uses: ./.github/workflows/macos.yml
+    with:
+      full_randomized: ${{ github.event_name == 'schedule' || inputs.full_randomized == true }}

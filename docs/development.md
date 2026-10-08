@@ -112,10 +112,11 @@ mise exec -- zig build e2e        # functional end-to-end tests against the buil
 mise exec -- zig build e2e-perf   # end-to-end tests that measure cost; run on demand
 ```
 
-`e2e-perf` holds the cases that measure wakes, context switches, or outer
-bytes, or that load the machine on purpose, such as the stalled-client
-overflow. Their results depend on the machine, so CI does not run them.
-Run them before a change that could affect the event loop or the renderer.
+`e2e-perf` holds sustained-load and machine-cost checks, including idle
+context switches, bytes per frame, and stalled-client overflow. Their
+results depend on the machine, so CI does not run them. Functional cases
+retain lightweight checks for hidden output and unnecessary HEAD reads.
+Run `e2e-perf` before a change that could affect the event loop or the renderer.
 Both steps take a name filter, as in `zig build e2e -- vim`.
 
 Functional cases run in parallel, one per CPU by default, because each has
@@ -123,8 +124,14 @@ its own socket, state, and directories. Set `KIWA_E2E_JOBS=1` to run them
 one at a time. Perf cases always run one at a time.
 
 The randomized unit tests run a tenth of their cases by default, so a local
-`zig build test` stays fast. CI runs all of them with `-Dfuzz=100`; pass the
-same flag locally after changing the frame diff or the renderer.
+`zig build test` stays fast. On each push and pull request, Linux x86_64
+Debug runs the full budget with `-Dfuzz=100`; the other target and build-mode
+jobs use `-Dfuzz=10`. Every job still runs all deterministic unit tests and
+functional end-to-end tests.
+
+The Monday CI schedule runs `-Dfuzz=100` across the whole matrix. You can
+also enable `full_randomized` when you dispatch CI manually. Pass
+`-Dfuzz=100` locally after changing the frame diff or the renderer.
 
 The end-to-end tests require git, Python 3, less, Vim, htop, fzf, and ncurses
 utilities/terminfo (CI installs these explicitly).

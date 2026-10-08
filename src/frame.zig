@@ -503,18 +503,21 @@ const testing = std.testing;
 const fuzz = @import("fuzz.zig");
 
 test "a full grapheme table hands out no id instead of wrapping" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
     var g: Graphemes = .{};
-    defer g.deinit(testing.allocator);
+    defer g.deinit(gpa);
     var last: Graphemes.Id = .none;
     for (0..Graphemes.max_ids) |i| {
-        last = try g.intern(testing.allocator, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) });
+        last = try g.intern(gpa, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) });
     }
     try testing.expectEqual(Graphemes.max_ids, @intFromEnum(last));
     try testing.expectEqual(Graphemes.max_ids, g.count());
-    try testing.expectEqual(.none, try g.intern(testing.allocator, &.{0x301}));
+    try testing.expectEqual(.none, try g.intern(gpa, &.{0x301}));
     try testing.expectEqual(Graphemes.max_ids, g.count());
     // A known grapheme still has its id.
-    try testing.expectEqual(last, try g.intern(testing.allocator, &.{ 0x300 + @as(u21, (Graphemes.max_ids - 1) % 0x100), @intCast(0x1000 + (Graphemes.max_ids - 1) / 0x100) }));
+    try testing.expectEqual(last, try g.intern(gpa, &.{ 0x300 + @as(u21, (Graphemes.max_ids - 1) % 0x100), @intCast(0x1000 + (Graphemes.max_ids - 1) / 0x100) }));
 }
 
 test "composing copies dirty rows and keeps clean ones" {
