@@ -8,9 +8,13 @@ permissions:
 
 jobs:
   test:
-    name: aarch64-macos.13.0
+    name: aarch64-macos.13.0 / ${{ matrix.optimize }}
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseFast]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -18,20 +22,19 @@ jobs:
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
       - name: Install end-to-end test dependencies
         run: brew install htop fzf
-      - name: Check formatting
-        run: mise exec -- zig fmt --check build.zig build.zig.zon src tests
-      - name: Build and run unit and end-to-end tests (Debug)
-        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Doptimize=Debug
-      - name: Build and run unit and end-to-end tests (ReleaseFast)
-        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=ReleaseFast
+      - name: Build and run unit and end-to-end tests
+        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=${{ matrix.optimize }}
       - name: Build release binary
+        if: matrix.optimize == 'ReleaseFast'
         run: mise exec -- zig build -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=ReleaseFast
       - name: Package release binary
+        if: matrix.optimize == 'ReleaseFast'
         run: |
           zig-out/bin/kiwa --version
           mkdir -p dist
           tar -czf dist/kiwa-aarch64-macos.tar.gz -C zig-out/bin kiwa
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.optimize == 'ReleaseFast'
         with:
           name: kiwa-aarch64-macos
           path: dist/*.tar.gz

@@ -20,6 +20,13 @@ jobs:
             target: x86_64-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-linux-musl
+        # Debug runs safety checks, which do not depend on the CPU, so one
+        # architecture is enough. Every shipped binary is tested ReleaseFast.
+        exclude:
+          - optimize: Debug
+            platform:
+              runner: ubuntu-24.04-arm
+              target: aarch64-linux-musl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -30,12 +37,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends git python3 less vim htop fzf ncurses-bin ncurses-term
       - name: Check formatting
+        if: matrix.optimize == 'Debug'
         run: mise exec -- zig fmt --check build.zig build.zig.zon src tests
       - name: Check that only src/os and tests/os use OS-specific APIs
+        if: matrix.optimize == 'Debug'
         run: tools/check-os-layer.sh
-      - name: Compile for macOS
-        if: matrix.platform.target == 'x86_64-linux-musl' && matrix.optimize == 'Debug'
-        run: mise exec -- zig build check -Dtarget=aarch64-macos.13.0
       - name: Build and run unit and end-to-end tests
         run: >-
           mise exec -- zig build test e2e

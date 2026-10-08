@@ -14,6 +14,11 @@ concurrency:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ci_run: ${{ steps.ci.outputs.run }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -33,26 +38,62 @@ jobs:
           if tag != f'v{version}':
               raise SystemExit(f'Tag {tag!r} must match package version v{version}')
           PY
+      # A tag on a commit that already passed CI on master reuses that
+      # run's tested binaries instead of building and testing again.
+      - name: Find a passing CI run for this commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          run=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&status=success" \
+            --jq '.workflow_runs[0].id // empty')
+          if [ -n "$run" ]; then
+            count=$(gh api "repos/$GH_REPO/actions/runs/$run/artifacts" \
+              --jq '[.artifacts[] | select(.expired | not) | select(.name | startswith("kiwa-"))] | length')
+            [ "$count" -eq 3 ] || run=
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "reusing CI run: ${run:-none, building}"
 
   linux:
     needs: version
+    if: needs.version.outputs.ci_run == ''
     uses: ./.github/workflows/linux.yml
 
   macos:
     needs: version
+    if: needs.version.outputs.ci_run == ''
     uses: ./.github/workflows/macos.yml
 
   publish:
-    needs: [linux, macos]
+    needs: [version, linux, macos]
+    if: >-
+      always() && needs.version.result == 'success' &&
+      (needs.version.outputs.ci_run != '' ||
+      (needs.linux.result == 'success' && needs.macos.result == 'success'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           path: src
+      - name: Download the CI run's binaries
+        if: needs.version.outputs.ci_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ needs.version.outputs.ci_run }}
+        run: |
+          gh run download "$RUN" --pattern 'kiwa-*' --dir artifacts
+          mkdir -p dist
+          mv artifacts/*/*.tar.gz dist/
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.version.outputs.ci_run == ''
         with:
           pattern: kiwa-*
           merge-multiple: true
