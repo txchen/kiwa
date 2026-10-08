@@ -1,6 +1,6 @@
 .{
     .name = .kiwa,
-    .version = "0.2.3",
+    .version = "0.2.4",
     .fingerprint = 0xd0aee14efdeba142,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
