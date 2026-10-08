@@ -2313,7 +2313,7 @@ fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
 }
 
 const framed_config = "[ui]\npane_style = 'framed'\n";
-const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 23 };
+const framed_left: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
 const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
 const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
 const framed_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
@@ -2419,7 +2419,7 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try o.mouseReport(0, 52, 5, 'M');
     try o.resize(100, 24);
     const wider = [_]Box{
-        .{ .x = 26, .y = 1, .cols = 35, .rows = 23 },
+        .{ .x = 26, .y = 1, .cols = 36, .rows = 23 },
         .{ .x = 62, .y = 1, .cols = 38, .rows = 12 },
         .{ .x = 62, .y = 13, .cols = 38, .rows = 11 },
     };
@@ -2448,7 +2448,7 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     var g: Grid = try .load(o);
     defer g.deinit();
     try expect(g.fg(79, 15) == .palette and g.fg(79, 15).palette == 6, "focused frame owns its accent");
-    try expect(g.fg(51, 15) == .palette and g.fg(51, 15).palette == 8, "neighbor frame is not accented");
+    try expect(g.fg(52, 15) == .palette and g.fg(52, 15).palette == 8, "neighbor frame is not accented");
     try o.rightClick(52, 5);
     try o.waitText("Close pane");
     try o.press(named(.escape, .{}));

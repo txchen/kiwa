@@ -192,7 +192,7 @@ pub const Layout = struct {
         out.panes.clearRetainingCapacity();
         out.boundaries.clearRetainingCapacity();
         out.area = area;
-        out.effective = if (visible == 1) .bare else if (style == .framed and fitsFramed(l.root, area, area)) .framed else .compact;
+        out.effective = if (visible == 1) .bare else if (style == .framed and fitsFramed(l.root, area)) .framed else .compact;
         if (zoom) |pane| {
             out.panes.appendAssumeCapacity(.{ .pane = pane, .box = area, .inner = area });
         } else resolveNode(l.root, area, SplitPath{}, out);
@@ -446,13 +446,6 @@ fn content(box: Rect, area: Rect) Rect {
     return .{ .x = box.x, .y = box.y, .cols = box.cols -| @intFromBool(box.right() < area.right()), .rows = box.rows -| @intFromBool(box.bottom() < area.bottom()) };
 }
 
-/// A framed pane's box: one gutter column before a pane to its right, but
-/// no gutter row, because a blank row between stacked frames reads as a
-/// much wider gap than a blank column between side-by-side ones.
-fn framedBox(box: Rect, area: Rect) Rect {
-    return .{ .x = box.x, .y = box.y, .cols = box.cols -| @intFromBool(box.right() < area.right()), .rows = box.rows };
-}
-
 fn fits(n: *const Node, area: Rect) bool {
     return fitsNode(n, area, area);
 }
@@ -481,15 +474,16 @@ fn placeNode(gpa: std.mem.Allocator, n: *const Node, box: Rect, area: Rect, out:
     }
 }
 
-fn fitsFramed(n: *const Node, box: Rect, area: Rect) bool {
+fn fitsFramed(n: *const Node, box: Rect) bool {
     return switch (n.*) {
         .pane => blk: {
-            const frame = framedBox(box, area);
-            break :blk frame.cols >= min_cols + 2 and frame.rows >= min_rows + 2;
+            // A framed pane takes its whole allocation, so neighboring
+            // frames touch with no gutter between them.
+            break :blk box.cols >= min_cols + 2 and box.rows >= min_rows + 2;
         },
         .split => |s| blk: {
             const parts = divide(box, s.axis, s.ratio);
-            break :blk fitsFramed(s.a, parts[0], area) and fitsFramed(s.b, parts[1], area);
+            break :blk fitsFramed(s.a, parts[0]) and fitsFramed(s.b, parts[1]);
         },
     };
 }
@@ -497,17 +491,16 @@ fn fitsFramed(n: *const Node, box: Rect, area: Rect) bool {
 fn resolveNode(n: *const Node, allocation: Rect, path: ?SplitPath, out: *Geometry) void {
     switch (n.*) {
         .pane => |id| {
-            const box = if (out.effective == .framed) framedBox(allocation, out.area) else allocation;
+            const box = allocation;
             const inner = if (out.effective == .framed) box.shrink() else content(box, out.area);
             out.panes.appendAssumeCapacity(.{ .pane = id, .box = box, .inner = inner });
         },
         .split => |s| {
             const parts = divide(allocation, s.axis, s.ratio);
             const at = if (s.axis == .right) parts[1].x else parts[1].y;
-            // Framed: the border before the cut, a gutter column for a
-            // right split, and the border after it.
+            // Framed: the borders on both sides of the cut.
             const framed = out.effective == .framed;
-            const start = at -| @as(u16, if (framed and s.axis == .right) 2 else 1);
+            const start = at -| 1;
             const end = @as(u32, at) + @as(u16, if (framed) 1 else 0);
             var band = allocation;
             if (s.axis == .right) {
@@ -584,7 +577,7 @@ test "framed nested allocations preserve exact cuts, offset rectangles, and whol
     try f.l.resolve(alloc, area, .framed, null, &g);
     try testing.expectEqual(.framed, g.effective);
     try testing.expectEqualDeep(&[_]Placement{
-        .{ .pane = pid(1), .box = .{ .x = 3, .y = 2, .cols = 9, .rows = 9 }, .inner = .{ .x = 4, .y = 3, .cols = 7, .rows = 7 } },
+        .{ .pane = pid(1), .box = .{ .x = 3, .y = 2, .cols = 10, .rows = 9 }, .inner = .{ .x = 4, .y = 3, .cols = 8, .rows = 7 } },
         .{ .pane = pid(2), .box = .{ .x = 13, .y = 2, .cols = 9, .rows = 5 }, .inner = .{ .x = 14, .y = 3, .cols = 7, .rows = 3 } },
         .{ .pane = pid(3), .box = .{ .x = 13, .y = 7, .cols = 9, .rows = 4 }, .inner = .{ .x = 14, .y = 8, .cols = 7, .rows = 2 } },
     }, g.panes.items);
@@ -633,7 +626,7 @@ test "same-axis nested framing keeps compact cuts and mutations allow fallback" 
     try testing.expectEqual(.framed, g.effective);
     try testing.expectEqual(@as(u16, 18), g.boundaries.items[0].divider.at);
     try testing.expectEqual(@as(u16, 23), g.boundaries.items[1].divider.at);
-    try testing.expectEqual(Rect{ .x = 18, .y = 3, .cols = 4, .rows = 5 }, g.panes.items[1].box);
+    try testing.expectEqual(Rect{ .x = 18, .y = 3, .cols = 5, .rows = 5 }, g.panes.items[1].box);
     const nested: SplitPath = .{ .bits = 1, .len = 1 };
     try testing.expect(f.l.moveDivider(area, nested, 25));
     try f.l.resolve(alloc, area, .framed, null, &g);
@@ -650,9 +643,9 @@ test "same-axis nested framing keeps compact cuts and mutations allow fallback" 
     var pair: Fixture = try .init();
     defer pair.deinit();
     try pair.l.split(alloc, .{ .cols = 5, .rows = 1 }, pid(1), .right, pid(2));
-    for ([_]u16{ 9, 8, 9 }) |cols| {
+    for ([_]u16{ 8, 7, 8 }) |cols| {
         try pair.l.resolve(alloc, .{ .cols = cols, .rows = 3 }, .framed, null, &g);
-        try testing.expectEqual(if (cols == 9) Effective.framed else .compact, g.effective);
+        try testing.expectEqual(if (cols == 8) Effective.framed else .compact, g.effective);
     }
 }
 
