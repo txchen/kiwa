@@ -68,7 +68,8 @@ fn printable(text: []const u8) bool {
 }
 
 fn readFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
-    const fd = sys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+    // Nonblocking, so that a FIFO in place of HEAD cannot stall the server.
+    const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch return null;
     defer sys.close(fd);
     const n = sys.read(fd, buf) catch return null;
     return buf[0..n];

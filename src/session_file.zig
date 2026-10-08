@@ -23,7 +23,7 @@ pub const Loaded = union(enum) {
 };
 
 /// Reads the saved session. A file that cannot be read or parsed is renamed
-/// to `session.json.bad-<unix seconds>`.
+/// to `session.json.bad-<unix nanoseconds>`.
 pub fn load(io: std.Io, arena: std.mem.Allocator, dir: Dir) error{OutOfMemory}!Loaded {
     const bytes = dir.readFileAlloc(io, name, arena, .limited(max_bytes)) catch |e| switch (e) {
         error.FileNotFound => return .none,
@@ -40,7 +40,8 @@ pub fn load(io: std.Io, arena: std.mem.Allocator, dir: Dir) error{OutOfMemory}!L
 fn moveAside(io: std.Io, arena: std.mem.Allocator, dir: Dir, why: anyerror) !Loaded {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
-    const bad = try std.fmt.allocPrint(arena, bad_prefix ++ "{d}", .{ts.sec});
+    const ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    const bad = try std.fmt.allocPrint(arena, bad_prefix ++ "{d}", .{ns});
     dir.rename(name, dir, bad, io) catch return .{ .unusable = .{ .why = why, .moved_to = null } };
     // Old files only cost disk space, so a failure here is not worth reporting.
     pruneBad(io, arena, dir) catch {};
@@ -70,7 +71,12 @@ fn pruneBad(io: std.Io, arena: std.mem.Allocator, dir: Dir) !void {
 /// syncs it, and renames it into place, so a crash leaves either the old
 /// file or the new one.
 pub fn save(io: std.Io, dir: Dir, doc: persist.Doc) !void {
-    const file = try dir.createFile(io, tmp_name, .{ .permissions = .fromMode(0o600) });
+    // Exclusive creation never follows a link left at the temporary name.
+    dir.deleteFile(io, tmp_name) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return e,
+    };
+    const file = try dir.createFile(io, tmp_name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     defer file.close(io);
     var buf: [4096]u8 = undefined;
     var w = file.writer(io, &buf);
@@ -141,4 +147,31 @@ test "an unusable file is moved aside, and only the newest three are kept" {
     _ = try tmp.dir.statFile(testing.io, bad_prefix ++ "9999999999", .{});
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, bad_prefix ++ "1", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, bad_prefix ++ "2", .{}));
+}
+
+test "a save replaces a link at the temporary name instead of writing through it" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "target", .data = "keep" });
+    try tmp.dir.symLink(testing.io, "target", tmp_name, .{});
+    try save(testing.io, tmp.dir, try persist.parse(arena, one_pane));
+    const kept = try tmp.dir.readFileAlloc(testing.io, "target", arena, .limited(64));
+    try testing.expectEqualStrings("keep", kept);
+    _ = (try load(testing.io, arena, tmp.dir)).doc;
+}
+
+test "two files moved aside in the same second keep separate names" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (0..2) |_| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = "{" });
+        _ = try load(testing.io, arena, tmp.dir);
+    }
+    try testing.expectEqual(2, try countBad(tmp.dir));
 }

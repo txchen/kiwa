@@ -381,6 +381,8 @@ fn pwdPath(url: []const u8, buf: []u8) ?[]const u8 {
         if (n == buf.len) return null;
         if (path[i] == '%' and i + 2 < path.len) {
             if (std.fmt.parseInt(u8, path[i + 1 ..][0..2], 16)) |b| {
+                // No real directory holds a NUL, and a saved one breaks restore.
+                if (b == 0) return null;
                 buf[n] = b;
                 i += 3;
                 continue;
@@ -408,6 +410,7 @@ test "OSC 7 paths are taken from file URLs and percent-decoded" {
     try std.testing.expectEqualStrings("/tmp", pwdPath("file:///tmp", &buf).?);
     try std.testing.expectEqualStrings("/a/%zz/%", pwdPath("/a/%zz/%", &buf).?);
     try std.testing.expectEqual(null, pwdPath("file://host", &buf));
+    try std.testing.expectEqual(null, pwdPath("file://host/tmp%00x", &buf));
     try std.testing.expectEqual(null, pwdPath("kitty-shell-cwd://host/x", &buf));
     var tiny: [3]u8 = undefined;
     try std.testing.expectEqual(null, pwdPath("/abcd", &tiny));
