@@ -1,4 +1,4 @@
-"""Generates src/theme.zig's built-in table from Herdr's palettes.
+"""Generates src/theme_table.zig, the built-in theme table, from Herdr's palettes.
 
 Usage: python3 tools/gen-themes.py path/to/herdr/src/app/state.rs > src/theme_table.zig
        zig fmt src/theme_table.zig
