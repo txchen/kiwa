@@ -131,7 +131,7 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
     }
     // The prefix always wins; reject unreachable bindings instead of hiding them.
     for (out.keys.overrides[0..out.keys.len]) |b| {
-        if (b.trigger.eql(out.keys.prefix_key)) return error.BindingConflictsWithPrefix;
+        if (b.action != null and b.trigger.eql(out.keys.prefix_key)) return error.BindingConflictsWithPrefix;
     }
     const k: @import("input.zig").Key = .{ .code = out.keys.prefix_key.code, .mods = out.keys.prefix_key.mods };
     if (out.keys.lookup(k, false) != null) return error.BindingConflictsWithPrefix;
@@ -176,6 +176,8 @@ test "configuration validates duplicates, unknown settings, and ranges" {
     try std.testing.expectError(error.SidebarWidthOutOfRange, parse("[ui]\nsidebar_width = 0", &line));
     try std.testing.expectError(error.UnknownAction, parse("[bindings]\n'prefix+c' = 'typo'", &line));
     try std.testing.expectError(error.BindingConflictsWithPrefix, parse("[keys]\nprefix = 'alt+h'", &line));
+    try std.testing.expectError(error.BindingConflictsWithPrefix, parse("[keys]\nprefix = 'alt+h'\n[bindings]\n'alt+h' = 'help'", &line));
+    _ = try parse("[keys]\nprefix = 'alt+h'\n[bindings]\n'alt+h' = 'none'", &line);
 }
 
 test "custom prefix, binding, unbind, and quoted comment character" {
