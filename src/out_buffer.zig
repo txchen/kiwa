@@ -29,7 +29,9 @@ pub const OutBuffer = struct {
     /// is dropped too.
     pub fn push(self: *OutBuffer, gpa: std.mem.Allocator, bytes: []const u8) error{ Overflow, OutOfMemory }!void {
         if (bytes.len == 0) return;
-        if (self.bytes.items.len + bytes.len > self.limit) {
+        // An empty buffer takes any write, so a full redraw larger than the
+        // limit still goes out instead of overflowing forever.
+        if (!self.isEmpty() and self.bytes.items.len + bytes.len > self.limit) {
             self.dropQueued();
             return error.Overflow;
         }
@@ -110,4 +112,12 @@ test "an overflow with nothing in flight empties the buffer" {
     try testing.expect(out.isEmpty());
     try out.push(alloc, "1234567890ab");
     try testing.expectEqualStrings("1234567890ab", out.bytes.items);
+}
+
+test "an empty buffer takes a write larger than the limit" {
+    var out: OutBuffer = .{ .limit = 4 };
+    defer out.deinit(alloc);
+    try out.push(alloc, "123456");
+    try testing.expectEqualStrings("123456", out.bytes.items);
+    try testing.expectError(error.Overflow, out.push(alloc, "x"));
 }
