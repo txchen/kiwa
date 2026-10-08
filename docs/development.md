@@ -19,13 +19,14 @@ this project.
 
 ## CI and binary releases
 
-GitHub Actions runs formatting checks, unit tests, and PTY end-to-end tests
-in both Debug and ReleaseFast on native Linux x86_64 and ARM64 runners and
-a `macos-15` ARM64 runner. Each successful ReleaseFast job uploads a
-downloadable archive. The same
-workflow builds and tests release artifacts, so release tests use the same
-CPU target and optimization mode as the shipped binary. Zig is installed
-from `mise.toml`; Ghostty remains pinned by `build.zig.zon`.
+GitHub Actions runs unit tests and PTY end-to-end tests in ReleaseFast on
+native Linux x86_64, Linux ARM64, and `macos-15` ARM64 runners, and in Debug
+on Linux x86_64 and macOS. Debug keeps runtime safety checks, which do not
+depend on the CPU, so one Linux architecture runs it. The Linux Debug job
+also checks formatting and the OS layer. Each successful ReleaseFast job
+uploads a downloadable archive, so the tested binary is the one a release
+ships. Zig is installed from `mise.toml`; Ghostty remains pinned by
+`build.zig.zon`.
 
 To publish a release:
 
@@ -41,11 +42,14 @@ To publish a release:
    ```
 
 3. The Release workflow rejects a tag that differs from the package
-   version, runs all CI checks, and publishes a GitHub Release containing
+   version. If CI already passed on the tagged commit and its archives
+   have not expired, it publishes those archives. Otherwise it runs all CI
+   checks first. Either way it publishes a GitHub Release containing
    `kiwa-x86_64-linux-musl.tar.gz`, `kiwa-aarch64-linux-musl.tar.gz`,
    `kiwa-aarch64-macos.tar.gz`, `install.sh`, and `SHA256SUMS`. Tags
    containing a hyphen are marked as prereleases. Publishing requires every
-   platform and both test modes to pass.
+   CI job to pass. Push the version commit to `master` and wait for CI
+   before tagging, so the release takes about a minute.
 
 Download the archive for your architecture and `SHA256SUMS` from the same
 release. Verify it with `sha256sum --ignore-missing -c SHA256SUMS`, then
@@ -96,8 +100,8 @@ behave, because Zig compiles `std.os.linux` calls for macOS too.
 `tools/check-os-layer.sh` fails when Zig code outside the per-OS files
 names Linux syscalls or a macOS-only API.
 
-CI runs the unit tests and the functional end-to-end tests natively on a
-`macos-15` runner, in Debug and ReleaseFast. A pass there does not show
+CI runs the unit tests and the functional end-to-end tests natively on
+`macos-15` runners, in Debug and ReleaseFast as two parallel jobs. A pass there does not show
 that macOS 13 or 14 works, and `zig build e2e-perf` has not run on a Mac.
 
 ## Test
