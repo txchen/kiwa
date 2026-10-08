@@ -746,6 +746,10 @@ const Server = struct {
             s.exit = .{ .reason = msg.exited, .hangup_child = false };
             return;
         }
+        // Workspace and tab menus name their subject by position, which a close shifts.
+        if (s.client) |c| if (c.mouse == .menu_open) {
+            c.mouse = .idle;
+        };
         if (closed == .workspace) s.git.prune(s.gpa, s.session.workspaces.items);
         try s.relayout(false);
         try s.markStale();
@@ -808,6 +812,8 @@ const Server = struct {
                     if (s.exit != null) return;
                     continue;
                 },
+                // An open menu owns the keyboard, so a paste must not reach the pane under it.
+                .paste => if (c.mouse == .menu_open) continue,
                 else => {},
             }
             const mode = std.meta.activeTag(c.prefix.mode);
@@ -1271,7 +1277,7 @@ const Server = struct {
 
     fn menuKey(s: *Server, c: *Conn, k: input.Key) !void {
         const m = &c.mouse.menu_open;
-        switch (m.key(k)) {
+        switch (m.key(k, c.size.rows)) {
             .none => {},
             .close => c.mouse = .idle,
             .pick => |i| {

@@ -106,9 +106,18 @@ pub const Menu = struct {
         }
     }
 
-    pub fn key(m: *Menu, k: input.Key) KeyOutcome {
+    /// How many items a frame `rows` tall shows; the rest are clipped.
+    pub fn visible(m: Menu, rows: u16) usize {
+        return @min(m.items().len, @as(usize, @min(m.items().len + 2, rows)) -| 2);
+    }
+
+    /// Moves within the items a frame `rows` tall shows, so that `enter`
+    /// never picks one the user cannot see.
+    pub fn key(m: *Menu, k: input.Key, rows: u16) KeyOutcome {
         if (k.action == .release) return .none;
-        const last = m.items().len - 1;
+        const shown = m.visible(rows);
+        if (shown == 0) return .close;
+        const last = shown - 1;
         switch (k.code) {
             .named => |n| switch (n) {
                 .escape => return .close,
@@ -182,19 +191,26 @@ test "items hit on their rows inside the border" {
 
 test "keys move the cursor within the items, pick, and close" {
     var m: Menu = .{ .subject = .{ .tab = 0 }, .x = 0, .y = 0 };
-    try testing.expectEqual(KeyOutcome.none, m.key(.typed('k')));
+    try testing.expectEqual(KeyOutcome.none, m.key(.typed('k'), 24));
     try testing.expectEqual(0, m.cursor);
-    _ = m.key(.typed('j'));
-    _ = m.key(.named(.arrow_down, .{}));
-    _ = m.key(.typed('j'));
+    _ = m.key(.typed('j'), 24);
+    _ = m.key(.named(.arrow_down, .{}), 24);
+    _ = m.key(.typed('j'), 24);
     try testing.expectEqual(2, m.cursor);
-    try testing.expectEqual(KeyOutcome{ .pick = 2 }, m.key(.named(.enter, .{})));
-    _ = m.key(.named(.arrow_up, .{}));
-    _ = m.key(.typed('k'));
-    try testing.expectEqual(KeyOutcome{ .pick = 0 }, m.key(.named(.enter, .{})));
-    try testing.expectEqual(KeyOutcome.close, m.key(.named(.escape, .{})));
-    try testing.expectEqual(KeyOutcome.close, m.key(.typed('q')));
-    try testing.expectEqual(KeyOutcome.none, m.key(.typed('x')));
+    try testing.expectEqual(KeyOutcome{ .pick = 2 }, m.key(.named(.enter, .{}), 24));
+    _ = m.key(.named(.arrow_up, .{}), 24);
+    _ = m.key(.typed('k'), 24);
+    try testing.expectEqual(KeyOutcome{ .pick = 0 }, m.key(.named(.enter, .{}), 24));
+    try testing.expectEqual(KeyOutcome.close, m.key(.named(.escape, .{}), 24));
+    try testing.expectEqual(KeyOutcome.close, m.key(.typed('q'), 24));
+    try testing.expectEqual(KeyOutcome.none, m.key(.typed('x'), 24));
+}
+
+test "keys move only among the items a short frame shows" {
+    var m: Menu = .{ .subject = pane(1), .x = 0, .y = 0 };
+    for (0..4) |_| _ = m.key(.typed('j'), 4);
+    try testing.expectEqual(KeyOutcome{ .pick = 1 }, m.key(.named(.enter, .{}), 4));
+    try testing.expectEqual(KeyOutcome.close, m.key(.named(.enter, .{}), 2));
 }
 
 test "a drawn menu shows its items with the cursor highlighted" {
