@@ -70,7 +70,8 @@ else
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
+staged=
+trap 'rm -rf "$tmp" ${staged:+"$staged"}' EXIT INT TERM
 
 fetch "$base/$asset" "$tmp/$asset"
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
@@ -81,9 +82,11 @@ want=$(awk -v f="$asset" '$2 == f || $2 == "./" f { print $1 }' "$tmp/SHA256SUMS
 tar -xzf "$tmp/$asset" -C "$tmp" kiwa
 mkdir -p "$install_dir"
 # Replace by rename, so that a running kiwa server keeps its old binary.
-cp "$tmp/kiwa" "$install_dir/.kiwa.new"
-chmod 755 "$install_dir/.kiwa.new"
-mv -f "$install_dir/.kiwa.new" "$install_dir/kiwa"
+# Each run stages its own file, so that two installs cannot mix bytes.
+staged=$(mktemp "$install_dir/.kiwa.XXXXXX")
+cp "$tmp/kiwa" "$staged"
+chmod 755 "$staged"
+mv -f "$staged" "$install_dir/kiwa"
 
 echo "installed $("$install_dir/kiwa" --version) to $install_dir/kiwa"
 case ":$PATH:" in
@@ -91,5 +94,5 @@ case ":$PATH:" in
     *) echo "add $install_dir to your PATH to run kiwa" ;;
 esac
 if "$install_dir/kiwa" ls >/dev/null 2>&1; then
-    echo "a kiwa server is running; if it is an older version, run kiwa kill-server to restart it (the layout is restored)"
+    echo "a kiwa server is running; if it is an older version, run kiwa kill-server to restart it; this stops its pane programs, and the next kiwa restores the layout with new shells"
 fi
