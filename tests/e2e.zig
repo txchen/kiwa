@@ -726,9 +726,10 @@ fn resizeReachesPane(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.resize(90, 30);
     _ = try o.pump(300);
+    const resized = comptime tabArea(90, 30);
     try o.send("tput cols; tput lines\r");
-    try o.waitLine("64");
-    try o.waitLine("29");
+    try o.waitLine(decimal(resized.cols));
+    try o.waitLine(decimal(resized.rows));
 }
 
 fn takeover(ctx: *Ctx) !void {
@@ -1184,6 +1185,33 @@ fn paneStartsWithClientDirAndEnv(ctx: *Ctx) !void {
     try o.waitLine(ctx.socket);
 }
 
+// The geometry model: where Kiwa puts the chrome and the panes, restated as
+// plain arithmetic so that every expected box, pane size, and divider cell
+// below derives from it. A change to a layout rule needs one edit here.
+// It does not import src/layout.zig or src/chrome.zig, so a layout bug
+// cannot confirm itself.
+//
+// - Chrome (chrome.zig `Geometry.sized`): the expanded sidebar is
+//   `sidebar_cols` wide, its divider included, and `collapsed_sidebar_cols`
+//   collapsed. The tab row is row `tab_row`. The tab area is the rest of
+//   the screen, down to the last row.
+// - Splits (layout.zig `divide`): a split gives its first box
+//   ratio/`ratio_full` of the extent, rounded half up. A new split is even;
+//   a resize step moves the ratio by `resize_step`; a drag stores the ratio
+//   `ratioFor` the dragged size.
+// - Compact panes (layout.zig `content`): a box's last column or row is the
+//   divider it shares with the box after it, so a pane's content loses that
+//   column or row unless the box reaches the tab area's edge. Content has
+//   at least `min_pane_cols` columns.
+// - Framed panes (layout.zig `resolveNode`): a frame fills its pane's
+//   whole allocation, so neighbouring frames touch with no gutter, see
+//   `framed`. Its content is one cell inside the border.
+// - Divider drags (mouse.zig): the divider keeps its offset from the
+//   pointer, see `dragAt`.
+//
+// A pane program sees its content's size: `tput cols` prints `cols`,
+// `tput lines` prints `rows`, and `stty size` prints both, see `sttySize`.
+
 /// A cell rectangle on the modeled outer screen.
 const Box = struct {
     x: u16,
@@ -1194,7 +1222,137 @@ const Box = struct {
     fn contains(b: Box, x: usize, y: usize) bool {
         return x >= b.x and x < b.x + b.cols and y >= b.y and y < b.y + b.rows;
     }
+
+    /// The first column right of the box.
+    fn right(b: Box) u16 {
+        return b.x + b.cols;
+    }
+
+    /// The first row below the box.
+    fn bottom(b: Box) u16 {
+        return b.y + b.rows;
+    }
+
+    /// The box's last column: a compact pane's divider, or a frame's right border.
+    fn lastCol(b: Box) u16 {
+        return b.right() - 1;
+    }
+
+    /// The box's last row: a compact pane's divider, or a frame's bottom border.
+    fn lastRow(b: Box) u16 {
+        return b.bottom() - 1;
+    }
+
+    /// An even split into a left and a right box.
+    fn splitRight(b: Box) [2]Box {
+        return b.splitRightBy(even);
+    }
+
+    fn splitRightBy(b: Box, ratio: u16) [2]Box {
+        return b.splitRightAt(b.x + share(b.cols, ratio));
+    }
+
+    /// A split whose right box starts at column `at`.
+    fn splitRightAt(b: Box, at: u16) [2]Box {
+        return .{
+            .{ .x = b.x, .y = b.y, .cols = at - b.x, .rows = b.rows },
+            .{ .x = at, .y = b.y, .cols = b.right() - at, .rows = b.rows },
+        };
+    }
+
+    /// An even split into a top and a bottom box.
+    fn splitDown(b: Box) [2]Box {
+        return b.splitDownAt(b.y + share(b.rows, even));
+    }
+
+    /// A split whose bottom box starts at row `at`.
+    fn splitDownAt(b: Box, at: u16) [2]Box {
+        return .{
+            .{ .x = b.x, .y = b.y, .cols = b.cols, .rows = at - b.y },
+            .{ .x = b.x, .y = at, .cols = b.cols, .rows = b.bottom() - at },
+        };
+    }
+
+    /// A compact pane's content inside the tab area `in`.
+    fn content(b: Box, in: Box) Box {
+        return .{
+            .x = b.x,
+            .y = b.y,
+            .cols = b.cols - @intFromBool(b.right() < in.right()),
+            .rows = b.rows - @intFromBool(b.bottom() < in.bottom()),
+        };
+    }
+
+    /// The frame drawn for the pane laid out in `b`, inside the tab area
+    /// `in`. A gutter rule would shrink `b` where it ends before `in` does.
+    fn framed(b: Box, in: Box) Box {
+        _ = in;
+        return b;
+    }
+
+    /// A frame's content, inside its border.
+    fn inner(b: Box) Box {
+        return .{ .x = b.x + 1, .y = b.y + 1, .cols = b.cols - 2, .rows = b.rows - 2 };
+    }
+
+    /// What `stty size` prints in a pane whose content is `b`.
+    fn sttySize(comptime b: Box) []const u8 {
+        return std.fmt.comptimePrint("{d} {d}", .{ b.rows, b.cols });
+    }
 };
+
+const sidebar_cols: u16 = 26;
+const collapsed_sidebar_cols: u16 = 4;
+const tab_row: u16 = 0;
+const min_pane_cols: u16 = 2;
+const ratio_full: u32 = 1000;
+const even: u16 = 500;
+const resize_step: u16 = 50;
+
+/// The first box's share of `extent` cells at `ratio`.
+fn share(extent: u16, ratio: u16) u16 {
+    return @intCast((@as(u32, extent) * ratio + ratio_full / 2) / ratio_full);
+}
+
+/// The ratio a drag stores when it leaves the first box `a` of `extent` cells.
+fn ratioFor(a: u16, extent: u16) u16 {
+    return @intCast((@as(u32, a) * ratio_full - ratio_full / 2 + extent - 1) / extent);
+}
+
+/// Where a divider whose second box starts at `at` moves when a press at
+/// `grab` drags to `to`: the press keeps its offset from the divider.
+fn dragAt(at: u16, grab: u16, to: u16) u16 {
+    return at + to - grab;
+}
+
+/// The tab area of a `cols` x `rows` outer terminal beside a `sidebar`-column sidebar.
+fn tabAreaBeside(sidebar: u16, cols: u16, rows: u16) Box {
+    return .{ .x = sidebar, .y = tab_row + 1, .cols = cols - sidebar, .rows = rows - tab_row - 1 };
+}
+
+/// The tab area beside the expanded sidebar.
+fn tabArea(cols: u16, rows: u16) Box {
+    return tabAreaBeside(sidebar_cols, cols, rows);
+}
+
+/// What `tput cols` or `tput lines` prints for `n` cells.
+fn decimal(comptime n: u16) []const u8 {
+    return std.fmt.comptimePrint("{d}", .{n});
+}
+
+/// The tab area of the default 80x24 outer terminal, and the boxes of its
+/// usual splits: one split right, then the right pane split down.
+const area = tabArea(80, 24);
+const left_half = area.splitRight()[0];
+const right_half = area.splitRight()[1];
+const right_top = right_half.splitDown()[0];
+const right_bottom = right_half.splitDown()[1];
+const framed_left = left_half.framed(area);
+const framed_right = right_half.framed(area);
+const framed_top = right_top.framed(area);
+const framed_bottom = right_bottom.framed(area);
+/// The tab row above the default tab area.
+const tab_row_box: Box = .{ .x = area.x, .y = tab_row, .cols = area.cols, .rows = 1 };
 
 /// The modeled outer screen's cells, read through a render state.
 const Grid = struct {
@@ -1377,14 +1535,6 @@ fn caseName(ctx: *Ctx) []const u8 {
     return std.fs.path.basename(ctx.dir);
 }
 
-/// The tab area of an 80x24 outer terminal: right of the 26-column sidebar
-/// and below the tab row.
-const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
-const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
-const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
-const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
-const right_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
-
 fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "v");
@@ -1446,8 +1596,8 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try waitNoBorders(o);
     try o.waitText("left11");
     try o.send("clear; tput cols; tput lines\r");
-    try o.waitLine("54");
-    try o.waitLine("23");
+    try o.waitLine(decimal(area.cols));
+    try o.waitLine(decimal(area.rows));
     want.clearRetainingCapacity();
     try want.print(ctx.gpa, "1: {s} (active)\n  1: ~, 1 pane (active)\n  2: two, 1 pane\n2: two\n  1: two, 1 pane\n  2: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
@@ -1488,15 +1638,15 @@ fn zoomAndUnzoom(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "27", right_half);
+    try waitTextIn(o, decimal(right_half.content(area).cols), right_half);
     try prefixed(o, "z");
     try waitNoBorders(o);
     try o.send("clear; tput cols\r");
-    try o.waitLine("54");
+    try o.waitLine(decimal(area.cols));
     try prefixed(o, "z");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "27", right_half);
+    try waitTextIn(o, decimal(right_half.content(area).cols), right_half);
 }
 
 fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
@@ -1507,14 +1657,13 @@ fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
     // An unambiguous escape: a raw ESC followed at once by typing would read as alt+c.
     try o.waitKitty();
     try o.press(named(.escape, .{}));
-    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 23 };
-    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 23 };
+    const resized_left, const resized_right = comptime area.splitRightBy(even - 2 * resize_step);
     try waitBoxes(o, &.{ resized_left, resized_right });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "32", resized_right);
+    try waitTextIn(o, decimal(resized_right.content(area).cols), resized_right);
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "21", resized_left);
+    try waitTextIn(o, decimal(resized_left.content(area).cols), resized_left);
 }
 
 fn exitCascadesToTheServer(ctx: *Ctx) !void {
@@ -1626,8 +1775,7 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     try o.send("mkdir sub && cd sub && echo in-$(basename $PWD)\r");
     try o.waitLine("in-sub");
     try prefixed(o, "v");
-    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 23 };
-    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 23 };
+    const left, const right = tabArea(120, 24).splitRight();
     try waitBoxes(o, &.{ left, right });
     try o.send("clear; pwd\r");
     const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
@@ -1739,7 +1887,7 @@ fn closingARunningProgramAsks(ctx: *Ctx) !void {
     try prefixed(o, "1");
     try o.waitLine("$");
     // The tab menu's Close asks about a program in a tab the user is not viewing.
-    try o.rightClick(33, 0);
+    try o.rightClick(area.x + 7, tab_row);
     try o.waitText("New tab");
     try o.click(35, 3);
     try o.waitText("close tab? sleep is running");
@@ -1773,8 +1921,8 @@ fn tinyClientKeepsTheSplit(ctx: *Ctx) !void {
     try o.resize(80, 24);
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
     try o.send("clear; tput cols; tput lines\r");
-    try waitTextIn(o, "27", right_bottom);
-    try waitTextIn(o, "11", right_bottom);
+    try waitTextIn(o, decimal(right_bottom.content(area).cols), right_bottom);
+    try waitTextIn(o, decimal(right_bottom.content(area).rows), right_bottom);
 }
 
 /// The highest counter each producer `N:` shows on screen.
@@ -1909,16 +2057,17 @@ fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
     defer buf.deinit(ctx.gpa);
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " Workspaces "), "the sidebar header is on the top row");
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 ws "), "workspace 1 is listed under the header");
-    try expect(g.highlighted(0, 1) and g.highlighted(24, 1), "workspace 1 is highlighted across the sidebar");
-    const controls = g.findIn("+ new", .{ .x = 0, .y = 1, .cols = 25, .rows = 23 }) orelse return error.MissingSidebarControl;
-    const host = g.findIn("Host", .{ .x = 0, .y = 1, .cols = 25, .rows = 23 }) orelse return error.MissingSidebarDetails;
+    try expect(g.highlighted(0, 1) and g.highlighted(sidebar_cols - 2, 1), "workspace 1 is highlighted across the sidebar");
+    const sidebar_body: Box = .{ .x = 0, .y = area.y, .cols = sidebar_cols - 1, .rows = area.rows };
+    const controls = g.findIn("+ new", sidebar_body) orelse return error.MissingSidebarControl;
+    const host = g.findIn("Host", sidebar_body) orelse return error.MissingSidebarDetails;
     try expect(controls[1] < host[1], "new is above the information section");
-    try expect(g.cp(24, controls[1]) == 0x00ab, "the collapse control sits before the divider");
-    for (0..24) |y| try expect(g.cp(25, y) == 0x2502, "the divider runs down the sidebar's right edge");
-    try expect(std.mem.eql(u8, try g.rowText(&buf, 0, 26), " 1 ~  +"), "the tab row shows tab 1 and +");
-    try expect(g.highlighted(26, 0) and g.highlighted(30, 0) and !g.highlighted(31, 0), "the active tab is highlighted");
-    try expect(g.cp(26, 1) == '$', "the prompt starts the tab area");
-    try waitCursor(o, 28, 1);
+    try expect(g.cp(sidebar_cols - 2, controls[1]) == 0x00ab, "the collapse control sits before the divider");
+    for (0..area.bottom()) |y| try expect(g.cp(sidebar_cols - 1, y) == 0x2502, "the divider runs down the sidebar's right edge");
+    try expect(std.mem.eql(u8, try g.rowText(&buf, tab_row, area.x), " 1 ~  +"), "the tab row shows tab 1 and +");
+    try expect(g.highlighted(area.x, tab_row) and g.highlighted(area.x + 4, tab_row) and !g.highlighted(area.x + 5, tab_row), "the active tab is highlighted");
+    try expect(g.cp(area.x, area.y) == '$', "the prompt starts the tab area");
+    try waitCursor(o, area.x + 2, area.y);
 }
 
 fn activityMarksOtherWorkspaces(ctx: *Ctx) !void {
@@ -1927,18 +2076,19 @@ fn activityMarksOtherWorkspaces(ctx: *Ctx) !void {
     try o.waitText("printf");
     try createWorkspace(o);
     try waitHighlighted(o, 2);
-    try waitCell(o, "the output marker on workspace 1", 23, 1, 0x2022);
+    const marker = sidebar_cols - 3;
+    try waitCell(o, "the output marker on workspace 1", marker, 1, 0x2022);
     {
         var g: Grid = try .load(o);
         defer g.deinit();
-        const fg = g.fg(23, 1);
+        const fg = g.fg(marker, 1);
         try expect(fg == .palette and fg.palette == 3, "the marker is drawn in palette color 3");
-        try expect(g.cp(23, 2) == ' ', "the viewed workspace has no marker");
+        try expect(g.cp(marker, 2) == ' ', "the viewed workspace has no marker");
     }
-    try waitCell(o, "the bell marker on workspace 1", 23, 1, '!');
+    try waitCell(o, "the bell marker on workspace 1", marker, 1, '!');
     try prefixed(o, "w1\r");
     try waitHighlighted(o, 1);
-    try waitCell(o, "no marker on the viewed workspace", 23, 1, ' ');
+    try waitCell(o, "no marker on the viewed workspace", marker, 1, ' ');
 }
 
 fn activityMarksUnseenTabs(ctx: *Ctx) !void {
@@ -1949,11 +2099,11 @@ fn activityMarksUnseenTabs(ctx: *Ctx) !void {
     try o.waitText("printf");
     try prefixed(o, "c");
     try o.waitText(" 2 ~ ");
-    try waitCell(o, "the output marker on tab 1", 36, 0, 0x2022);
-    try waitTextIn(o, "worker !", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 });
+    try waitCell(o, "the output marker on tab 1", area.x + 10, tab_row, 0x2022);
+    try waitTextIn(o, "worker !", tab_row_box);
     try createWorkspace(o);
     try prefixed(o, "w1\r");
-    try waitTextIn(o, "worker !", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 });
+    try waitTextIn(o, "worker !", tab_row_box);
     try prefixed(o, "1");
     try o.waitGone("worker !");
     try o.waitText("tab-output");
@@ -1962,27 +2112,27 @@ fn activityMarksUnseenTabs(ctx: *Ctx) !void {
 fn sidebarCollapsesAndExpands(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "b");
-    try waitSidebar(o, 4);
+    try waitSidebar(o, collapsed_sidebar_cols);
     {
         var g: Grid = try .load(o);
         defer g.deinit();
         try expect(g.cp(1, 0) == '1' and g.highlighted(0, 0) and g.highlighted(2, 0), "workspace 1 is highlighted in the collapsed sidebar");
-        try expect(g.cp(2, 23) == 0x00bb, "the expand control is on the last row");
+        try expect(g.cp(2, area.lastRow()) == 0x00bb, "the expand control is on the last row");
     }
     try o.send("clear; tput cols\r");
-    try o.waitLine("76");
+    try o.waitLine(decimal(tabAreaBeside(collapsed_sidebar_cols, 80, 24).cols));
     try prefixed(o, "b");
-    try waitSidebar(o, 26);
+    try waitSidebar(o, sidebar_cols);
     try o.send("clear; tput cols\r");
-    try o.waitLine("54");
+    try o.waitLine(decimal(area.cols));
     try o.resize(50, 24);
-    try waitSidebar(o, 4);
+    try waitSidebar(o, collapsed_sidebar_cols);
     try o.send("clear; tput cols\r");
-    try o.waitLine("46");
+    try o.waitLine(decimal(tabAreaBeside(collapsed_sidebar_cols, 50, 24).cols));
     try o.resize(100, 24);
-    try waitSidebar(o, 26);
+    try waitSidebar(o, sidebar_cols);
     try o.send("clear; tput cols\r");
-    try o.waitLine("74");
+    try o.waitLine(decimal(tabArea(100, 24).cols));
 }
 
 fn navigateModeSwitchesWorkspaces(ctx: *Ctx) !void {
@@ -2114,19 +2264,19 @@ fn clicksSwitchWorkspacesAndTabs(ctx: *Ctx) !void {
     try waitHighlighted(o, 1);
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane (active)\n2: {s}\n  1: ~, 1 pane (active)\n", .{ name, name });
     try o.waitLine("$");
-    try o.click(33, 0);
+    try o.click(area.x + 7, tab_row);
     try o.waitText(" 2 ~ ");
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane\n  2: ~, 1 pane (active)\n2: {s}\n  1: ~, 1 pane (active)\n", .{ name, name });
-    try o.click(28, 0);
+    try o.click(area.x + 2, tab_row);
     try listWith(ctx, "1: {s} (active)\n  1: ~, 1 pane (active)\n  2: ~, 1 pane\n2: {s}\n  1: ~, 1 pane (active)\n", .{ name, name });
     try clickSidebarText(o, "menu", 8);
-    try waitSidebar(o, 4);
+    try waitSidebar(o, collapsed_sidebar_cols);
     try o.send("clear; tput cols\r");
-    try o.waitLine("76");
-    try o.click(2, 23);
-    try waitSidebar(o, 26);
+    try o.waitLine(decimal(tabAreaBeside(collapsed_sidebar_cols, 80, 24).cols));
+    try o.click(2, area.lastRow());
+    try waitSidebar(o, sidebar_cols);
     try o.send("clear; tput cols\r");
-    try o.waitLine("54");
+    try o.waitLine(decimal(area.cols));
 }
 
 fn clickFocusesPanes(ctx: *Ctx) !void {
@@ -2148,29 +2298,28 @@ fn dragMovesTheBorder(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
-    try o.drag(.{ left_half.x + left_half.cols - 1, 10 }, .{ 42, 12 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 23 };
-    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 23 };
+    try o.drag(.{ left_half.lastCol(), 10 }, .{ 42, 12 });
+    const left, const right = comptime area.splitRightAt(dragAt(right_half.x, left_half.lastCol(), 42));
     try waitBoxes(o, &.{ left, right });
     try waitAccent(o, &.{ right, left });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "37", right);
+    try waitTextIn(o, decimal(right.content(area).cols), right);
     // A second drag on the shared divider stops at the minimum content size.
-    try o.drag(.{ right.x - 1, 3 }, .{ 2, 3 });
-    const narrow: Box = .{ .x = 26, .y = 1, .cols = 3, .rows = 23 };
-    try waitBoxes(o, &.{ narrow, .{ .x = 29, .y = 1, .cols = 51, .rows = 23 } });
+    try o.drag(.{ left.lastCol(), 3 }, .{ 2, 3 });
+    const narrow, const wide = comptime area.splitRightAt(area.x + min_pane_cols + 1);
+    try waitBoxes(o, &.{ narrow, wide });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "51", .{ .x = 29, .y = 1, .cols = 51, .rows = 23 });
+    try waitTextIn(o, decimal(wide.content(area).cols), wide);
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "2", narrow);
+    try waitTextIn(o, decimal(narrow.content(area).cols), narrow);
 }
 
 fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitKitty();
     try expect(!try o.contains("ctrl+b ? help"), "normal mode has no persistent help hint");
-    const bottom_row: Box = .{ .x = 26, .y = 23, .cols = 54, .rows = 1 };
+    const bottom_row: Box = .{ .x = area.x, .y = area.lastRow(), .cols = area.cols, .rows = 1 };
     try o.send("clear; i=1; while [ $i -le 30 ]; do echo LINE-$i; i=$((i+1)); done; printf LAST-ROW\r");
     try waitTextIn(o, "LAST-ROW", bottom_row);
     try o.send("\x02");
@@ -2178,7 +2327,7 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     {
         var g: Grid = try .load(o);
         defer g.deinit();
-        try expect(g.findIn("1 ~", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 }) != null, "prefix keeps the tab row visible");
+        try expect(g.findIn("1 ~", tab_row_box) != null, "prefix keeps the tab row visible");
         try expect(g.findIn("PREFIX", bottom_row) != null, "prefix help covers the bottom row");
         try expect(g.findIn("LAST-ROW", bottom_row) == null, "the help hides the pane's bottom row while it shows");
     }
@@ -2313,10 +2462,6 @@ fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
 }
 
 const framed_config = "[ui]\npane_style = 'framed'\n";
-const framed_left: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
-const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
-const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
-const framed_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
 
 fn framesDrawn(o: *Outer, boxes: []const Box) !bool {
     var g: Grid = try .load(o);
@@ -2352,7 +2497,7 @@ fn paneStyleLifecycle(ctx: *Ctx) !void {
     try prefixed(o, "f");
     try waitFrames(o, &.{ framed_left, framed_right });
     try o.send("printf '\\033[0m'; stty size; test \"$$\" = \"$(cat pane.pid)\" && echo ID-$PANE_TOKEN\r");
-    try o.waitText("21 25");
+    try o.waitText(comptime framed_right.inner().sttySize());
     try o.waitText("ID-kept");
     try prefixed(o, "c");
     try waitNoBorders(o);
@@ -2394,70 +2539,84 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try prefixed(o, "-");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 65, 12, 'M');
-    try o.mouseReport(32, 65, 2, 'M');
-    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 2 }, .{ .x = 53, .y = 3, .cols = 27, .rows = 21 } });
-    try o.mouseReport(32, 65, 12, 'M');
+    // The top frame's bottom border and both borders between the columns
+    // grab dividers; `across` and `down` are a column and a row along them.
+    const h_border = framed_top.lastRow();
+    const v_border = framed_right.x;
+    const left_border = framed_left.lastCol();
+    const across = right_half.x + 12;
+    const down = area.y + 4;
+    try o.mouseReport(0, across, h_border, 'M');
+    try o.mouseReport(32, across, 2, 'M');
+    const raised = right_half.splitDownAt(dragAt(right_bottom.y, h_border, 2));
+    try waitBoxes(o, &.{ left_half, raised[0], raised[1] });
+    try o.mouseReport(32, across, h_border, 'M');
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 65, 12, 'm');
-    try o.mouseReport(0, 53, 5, 'M');
-    try o.mouseReport(32, 77, 5, 'M');
-    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 51, .rows = 23 }, .{ .x = 77, .y = 1, .cols = 3, .rows = 12 }, .{ .x = 77, .y = 13, .cols = 3, .rows = 11 } });
-    try o.mouseReport(32, 53, 5, 'M');
+    try o.mouseReport(0, across, h_border, 'm');
+    try o.mouseReport(0, v_border, down, 'M');
+    try o.mouseReport(32, 77, down, 'M');
+    const pushed = area.splitRightAt(dragAt(right_half.x, v_border, 77));
+    const pushed_right = pushed[1].splitDown();
+    try waitBoxes(o, &.{ pushed[0], pushed_right[0], pushed_right[1] });
+    try o.mouseReport(32, v_border, down, 'M');
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 53, 5, 'm');
-    try o.mouseReport(0, 52, 5, 'M');
+    try o.mouseReport(0, v_border, down, 'm');
+    try o.mouseReport(0, left_border, down, 'M');
     try prefixed(o, "f");
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
-    try o.mouseReport(32, 65, 5, 'M');
-    try o.mouseReport(0, 65, 5, 'm');
+    try o.mouseReport(32, across, down, 'M');
+    try o.mouseReport(0, across, down, 'm');
     try o.send("echo STYLE-$((40+2))\r");
     try o.waitText("STYLE-42");
     try waitBoxes(o, &.{ left_half, right_top, right_bottom });
     try prefixed(o, "f");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 52, 5, 'M');
+    try o.mouseReport(0, left_border, down, 'M');
     try o.resize(100, 24);
-    const wider = [_]Box{
-        .{ .x = 26, .y = 1, .cols = 36, .rows = 23 },
-        .{ .x = 62, .y = 1, .cols = 38, .rows = 12 },
-        .{ .x = 62, .y = 13, .cols = 38, .rows = 11 },
-    };
+    // Dragging the divider back to where it was stored the ratio for the
+    // left half's columns, which need not be even.
+    const wide_area = tabArea(100, 24);
+    const wide = wide_area.splitRightBy(ratioFor(left_half.cols, area.cols));
+    const wide_right = wide[1].splitDown();
+    const wider = [_]Box{ wide[0].framed(wide_area), wide_right[0].framed(wide_area), wide_right[1].framed(wide_area) };
     try waitFrames(o, &wider);
-    try o.mouseReport(32, 70, 5, 'M');
-    try o.mouseReport(0, 70, 5, 'm');
+    try o.mouseReport(32, 70, down, 'M');
+    try o.mouseReport(0, 70, down, 'm');
     try o.send("echo SIZE-$((40+2))\r");
     try o.waitText("SIZE-42");
     try waitFrames(o, &wider);
     try o.resize(80, 24);
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 52, 5, 'M');
+    try o.mouseReport(0, left_border, down, 'M');
     try prefixed(o, "c");
     try prefixed(o, "v");
     try waitFrames(o, &.{ framed_left, framed_right });
-    try o.mouseReport(32, 65, 5, 'M');
-    try o.mouseReport(0, 65, 5, 'm');
+    try o.mouseReport(32, across, down, 'M');
+    try o.mouseReport(0, across, down, 'm');
     try o.send("echo TAB-$((40+2))\r");
     try o.waitText("TAB-42");
     try waitFrames(o, &.{ framed_left, framed_right });
     try prefixed(o, "1");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.click(79, 15);
+    const lower = framed_bottom.y + 2;
+    try o.click(framed_bottom.lastCol(), lower);
     try o.send("echo LOWER-$((40+2))\r");
     try waitTextIn(o, "LOWER-42", framed_bottom);
     var g: Grid = try .load(o);
     defer g.deinit();
-    try expect(g.fg(79, 15) == .palette and g.fg(79, 15).palette == 6, "focused frame owns its accent");
-    try expect(g.fg(52, 15) == .palette and g.fg(52, 15).palette == 8, "neighbor frame is not accented");
-    try o.rightClick(52, 5);
+    const focused = g.fg(framed_bottom.lastCol(), lower);
+    try expect(focused == .palette and focused.palette == 6, "focused frame owns its accent");
+    const neighbor = g.fg(framed_left.lastCol(), lower);
+    try expect(neighbor == .palette and neighbor.palette == 8, "neighbor frame is not accented");
+    try o.rightClick(left_border, down);
     try o.waitText("Close pane");
     try o.press(named(.escape, .{}));
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.mouseReport(0, 52, 5, 'M');
+    try o.mouseReport(0, left_border, down, 'M');
     try o.send("exit\r");
     try waitFrames(o, &.{ framed_left, framed_right });
-    try o.mouseReport(32, 65, 5, 'M');
-    try o.mouseReport(0, 65, 5, 'm');
+    try o.mouseReport(32, across, down, 'M');
+    try o.mouseReport(0, across, down, 'm');
     try o.send("echo EXIT-$((40+2))\r");
     try o.waitText("EXIT-42");
     try waitFrames(o, &.{ framed_left, framed_right });
@@ -2508,12 +2667,17 @@ fn paneStyleMouseCapture(ctx: *Ctx) !void {
     try waitFrames(o, &.{ framed_left, framed_right });
     try o.send("clear; python3 framed-mouse.py\r");
     try o.waitText("ready");
-    try o.mouseReport(0, 56, 5, 'M');
-    try o.mouseReport(32, 52, 5, 'M');
-    try o.wheel(true, 52, 5);
-    try o.mouseReport(0, 52, 5, 'm');
-    try o.mouseReport(32, 53, 5, 'M');
-    try o.wheel(false, 53, 5);
+    // A press at (3, 4) of the right pane's content, then a release and wheels
+    // over the left frame's right border and this frame's left border.
+    const content = framed_right.inner();
+    const y = content.y + 3;
+    const left_border = framed_left.lastCol();
+    try o.mouseReport(0, content.x + 2, y, 'M');
+    try o.mouseReport(32, left_border, y, 'M');
+    try o.wheel(true, left_border, y);
+    try o.mouseReport(0, left_border, y, 'm');
+    try o.mouseReport(32, framed_right.x, y, 'M');
+    try o.wheel(false, framed_right.x, y);
     try o.send("!");
     try o.waitText("received-end");
     const path = try std.fmt.allocPrint(ctx.gpa, "{s}/mouse-input", .{ctx.dir});
@@ -2521,7 +2685,7 @@ fn paneStyleMouseCapture(ctx: *Ctx) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(4096));
     defer ctx.gpa.free(bytes);
     try expect(std.mem.eql(u8, bytes, "\x1b[<0;3;4M\x1b[<0;1;4m!"), "only the content press and captured release reach the program");
-    try o.rightClick(79, 6);
+    try o.rightClick(framed_right.lastCol(), y + 1);
     try o.waitText("Close pane");
     try o.press(named(.escape, .{}));
     try waitFrames(o, &.{ framed_left, framed_right });
@@ -2542,7 +2706,7 @@ fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     try o.send("python3 -c 'import time; [(print(\"scroll-%03d\" % i, flush=True), time.sleep(0.01)) for i in range(80)]'\r");
     try o.waitText("scroll-079");
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.wheel(true, 60, 16);
+    try o.wheel(true, framed_bottom.x + 7, framed_bottom.y + 3);
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.send("clear; echo SCROLL-$((40+2))\r");
     try o.waitText("SCROLL-42");
@@ -2642,7 +2806,7 @@ fn keyboardCopyWritesClipboard(ctx: *Ctx) !void {
     try prefixed(o, "\x0b");
     try o.waitText(" COPY ");
     try o.wheel(true, 40, 10);
-    try waitCursor(o, 28, 1);
+    try waitCursor(o, area.x + 2, area.y);
     try o.paste("must-not-reach-shell");
     try o.press(named(.escape, .{}));
     try o.waitGone(" COPY ");
@@ -2656,13 +2820,13 @@ fn sidebarDragPersists(ctx: *Ctx) !void {
     try o.drag(.{ 25, 10 }, .{ 37, 10 });
     try waitSidebar(o, 38);
     try o.send("clear; tput cols\r");
-    try o.waitLine("42");
+    try o.waitLine(decimal(tabAreaBeside(38, 80, 24).cols));
     try prefixed(o, "b");
-    try waitSidebar(o, 4);
+    try waitSidebar(o, collapsed_sidebar_cols);
     try prefixed(o, "b");
     try waitSidebar(o, 38);
     try o.resize(50, 24);
-    try waitSidebar(o, 4);
+    try waitSidebar(o, collapsed_sidebar_cols);
     try o.resize(80, 24);
     try waitSidebar(o, 38);
     const saved = try waitSaved(ctx, "\"sidebar_width\": 38");
@@ -2676,18 +2840,17 @@ fn sidebarDragPersists(ctx: *Ctx) !void {
 fn horizontalSplitUsesOneRow(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "-");
-    const top: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 12 };
-    const bottom: Box = .{ .x = 26, .y = 13, .cols = 54, .rows = 11 };
+    const top, const bottom = comptime area.splitDown();
     try waitBoxes(o, &.{ top, bottom });
     try o.send("clear; tput lines\r");
-    try waitTextIn(o, "11", bottom);
+    try waitTextIn(o, decimal(bottom.content(area).rows), bottom);
     try o.press(char('k', .{ .alt = true }));
     try o.send("clear; tput lines\r");
-    try waitTextIn(o, "11", top);
+    try waitTextIn(o, decimal(top.content(area).rows), top);
     var g: Grid = try .load(o);
     defer g.deinit();
-    for (26..80) |x| try expect(g.cp(x, 12) == 0x2500, "one shared horizontal divider");
-    try expect(g.cp(26, 1) != 0x250c and g.cp(79, 23) != 0x2518, "no outer pane borders");
+    for (area.x..area.right()) |x| try expect(g.cp(x, top.lastRow()) == 0x2500, "one shared horizontal divider");
+    try expect(g.cp(area.x, area.y) != 0x250c and g.cp(area.lastCol(), area.lastRow()) != 0x2518, "no outer pane borders");
 }
 
 fn wheelScrollsTheScrollback(ctx: *Ctx) !void {
@@ -2746,17 +2909,18 @@ fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
     try waitHighlighted(o, 2);
     try o.send("clear; python3 mouse.py\r");
     try o.waitLine("ready");
-    try o.mouseReport(0, 40, 10, 'M');
+    // The program sees 1-based coordinates from the tab area's corner.
+    try o.mouseReport(0, area.x + 14, area.y + 9, 'M');
     try o.waitLine("b'\\x1b[<0;15;10M'");
-    try o.mouseReport(32, 42, 11, 'M');
+    try o.mouseReport(32, area.x + 16, area.y + 10, 'M');
     try o.waitLine("b'\\x1b[<32;17;11M'");
-    try o.mouseReport(0, 42, 11, 'm');
+    try o.mouseReport(0, area.x + 16, area.y + 10, 'm');
     try o.waitLine("b'\\x1b[<0;17;11m'");
-    try o.wheel(true, 30, 5);
+    try o.wheel(true, area.x + 4, area.y + 4);
     try o.waitLine("b'\\x1b[<64;5;5M'");
-    try o.mouseReport(2, 31, 6, 'M');
+    try o.mouseReport(2, area.x + 5, area.y + 5, 'M');
     try o.waitLine("b'\\x1b[<2;6;6M'");
-    try o.mouseReport(2, 31, 6, 'm');
+    try o.mouseReport(2, area.x + 5, area.y + 5, 'm');
     try o.waitLine("b'\\x1b[<2;6;6m'");
     try expect(!try o.contains("Split right"), "a right click in a tracking pane opens no menu");
     try o.click(10, 1);
@@ -2823,9 +2987,9 @@ fn rightClickMenus(ctx: *Ctx) !void {
     try waitBoxes(o, &.{ left_half, right_half });
     try o.waitGone("Split right");
 
-    try o.rightClick(left_half.x + left_half.cols - 1, 5);
+    try o.rightClick(left_half.lastCol(), 5);
     try o.waitText("Zoom");
-    try o.rightClick(left_half.x + left_half.cols - 1, 5);
+    try o.rightClick(left_half.lastCol(), 5);
     try o.waitGone("Zoom");
     try o.rightClick(30, 20);
     try o.waitText("Zoom");
@@ -2839,7 +3003,7 @@ fn rightClickMenus(ctx: *Ctx) !void {
 
     try prefixed(o, "c");
     try o.waitText(" 2 ~ ");
-    try o.rightClick(28, 0);
+    try o.rightClick(area.x + 2, tab_row);
     try o.waitText("New tab");
     try o.click(30, 3);
     try o.waitGone("New tab");
@@ -3197,20 +3361,20 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try o.waitKitty();
     try o.send("mkdir -p one/left one/top one/bottom two/x && cd one/left && echo in-$(basename $PWD)\r");
     try o.waitLine("in-left");
-    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 29 };
-    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 29 };
+    const full = tabArea(160, 30);
+    const halves = full.splitRight();
+    const half = halves[1];
     try prefixed(o, "v");
-    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 29 }, half });
+    try waitBoxes(o, &halves);
     try o.send("cd ../top && echo in-$(basename $PWD)\r");
     try waitTextIn(o, "in-top", half);
     try prefixed(o, "-");
-    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 15 }, .{ .x = 93, .y = 16, .cols = 67, .rows = 14 } });
+    try waitBoxes(o, &half.splitDown());
     try o.send("cd ../bottom && echo in-$(basename $PWD)\r");
     try o.waitText("in-bottom");
-    try o.drag(.{ 92, 5 }, .{ 75, 5 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 29 };
-    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 15 };
-    const bottom: Box = .{ .x = 76, .y = 16, .cols = 84, .rows = 14 };
+    try o.drag(.{ halves[0].lastCol(), 5 }, .{ 75, 5 });
+    const left, const right = full.splitRightAt(dragAt(half.x, halves[0].lastCol(), 75));
+    const top, const bottom = right.splitDown();
     try waitBoxes(o, &.{ left, top, bottom });
     try prefixed(o, "k");
     try waitAccent(o, &.{ top, left, bottom });
