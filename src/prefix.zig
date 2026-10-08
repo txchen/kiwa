@@ -43,6 +43,7 @@ pub const Action = union(enum) {
     navigate,
     toggle_sidebar,
     toggle_pane_style,
+    choose_theme,
     help,
 };
 
@@ -608,7 +609,8 @@ test "the sidebar toggle and resize mode are prefix keys" {
 
 test "key help describes every action" {
     for (std.meta.tags(std.meta.Tag(Action))) |tag| {
-        if (tag == .resize or tag == .reload_config) continue;
+        // The sidebar menu offers these; a binding can add a key.
+        if (tag == .resize or tag == .reload_config or tag == .choose_theme) continue;
         for (bindings ++ direct_bindings) |b| {
             if (b.action == tag) break;
         } else {

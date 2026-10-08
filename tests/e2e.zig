@@ -2400,7 +2400,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[bindings]\n'prefix+g' = 'new_tab'\n" });
     try clickSidebarText(o, "menu", 0);
     try o.waitText("Reload config");
-    try o.send("j\r");
+    try o.send("jj\r");
     try o.waitText("Configuration reloaded");
     try o.waitGone("Configuration reloaded");
     try prefixed(o, "g");
@@ -2413,7 +2413,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "invalid config\n" });
     try clickSidebarText(o, "menu", 0);
     try o.waitText("Reload config");
-    try o.send("j\r");
+    try o.send("jj\r");
     try o.waitText("Reload config failed");
     try o.waitText("unchanged");
     try o.press(named(.enter, .{}));
@@ -2423,7 +2423,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try o.waitText("MENU_TOKEN");
     try clickSidebarText(o, "menu", 0);
     try o.waitText("Detach");
-    try o.send("jj\r");
+    try o.send("jjj\r");
     try expect(try o.waitExit() == 0, "menu detaches without stopping the session");
     // A fresh client validates the file before connecting to the existing server.
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "" });
@@ -2431,6 +2431,53 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try again.waitText("MENU_TOKEN");
     try again.send("echo kept-$MENU_TOKEN\r");
     try again.waitLine("kept-alive");
+}
+
+/// Whether the cell at (`x`, `y`) has background color `r`, `g`, `b`.
+const BgAt = struct { x: usize, y: usize, rgb: [3]u8 };
+
+fn bgIs(o: *Outer, at: BgAt) !bool {
+    var g: Grid = try .load(o);
+    defer g.deinit();
+    const bg = g.style(at.x, at.y).bg_color;
+    return bg == .rgb and bg.rgb.r == at.rgb[0] and bg.rgb.g == at.rgb[1] and bg.rgb.b == at.rgb[2];
+}
+
+fn themePickerPreviewsAndSaves(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    defer ctx.gpa.free(path);
+    // The tab row's empty right end shows the theme's panel color.
+    const panel_x = area.right() - 1;
+    const kiwa_panel = [3]u8{ 22, 24, 33 };
+    const catppuccin_panel = [3]u8{ 24, 24, 37 };
+    try o.waitFor("the default tab row", BgAt{ .x = panel_x, .y = tab_row, .rgb = kiwa_panel }, bgIs);
+    try clickSidebarText(o, "menu", 0);
+    try o.waitText("Theme");
+    try o.send("j\r");
+    try o.waitText(" theme ");
+    try o.send("j");
+    try o.waitFor("catppuccin previewed", BgAt{ .x = panel_x, .y = tab_row, .rgb = catppuccin_panel }, bgIs);
+    try o.press(named(.escape, .{}));
+    try o.waitFor("cancel restores the theme", BgAt{ .x = panel_x, .y = tab_row, .rgb = kiwa_panel }, bgIs);
+    const untouched = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
+    defer ctx.gpa.free(untouched);
+    try expect(std.mem.indexOf(u8, untouched, "\ntheme = ") == null, "cancel writes nothing");
+    try clickSidebarText(o, "menu", 0);
+    try o.waitText("Theme");
+    try o.send("j\r");
+    try o.waitText(" theme ");
+    try o.send("j\r");
+    try o.waitFor("enter keeps catppuccin", BgAt{ .x = panel_x, .y = tab_row, .rgb = catppuccin_panel }, bgIs);
+    const saved = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
+    defer ctx.gpa.free(saved);
+    try expect(std.mem.indexOf(u8, saved, "[ui]\ntheme = \"catppuccin\"\n") != null, "the theme is saved under [ui]");
+    try expect(std.mem.indexOf(u8, saved, "Configuration reference") != null, "the rest of the file is kept");
+    try expect(try ctx.run("kill-server") == 0, "the server stops");
+    _ = try o.waitExit();
+    const again = try ctx.attach();
+    try again.waitLine("$");
+    try again.waitFor("a restart keeps the saved theme", BgAt{ .x = panel_x, .y = tab_row, .rgb = catppuccin_panel }, bgIs);
 }
 
 fn configStartupAndRestore(ctx: *Ctx) !void {
@@ -3631,6 +3678,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "a pane's OSC 52 clipboard write reaches the outer terminal", .run = paneClipboardWritesReachTheOuterTerminal },
     .{ .name = "a dynamic tab name follows the foreground command", .run = dynamicNamesFollowTheForegroundCommand },
     .{ .name = "alt+shift+h and l move the tab and keep it active", .run = movingATabReordersTheTabRow },
+    .{ .name = "the theme picker previews, cancels, and saves to the configuration file", .run = themePickerPreviewsAndSaves },
     .{ .name = "quiet tabs trigger no name checks", .run = quietTabsAreNotChecked },
     .{ .name = "prefix shift+t renames the tab, esc and an outside click cancel, and an empty name restores it", .run = renameTabWithPrefix },
     .{ .name = "a workspace is renamed from its menu, to a Chinese name and back", .run = renameWorkspaceFromItsMenu },

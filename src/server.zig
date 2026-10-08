@@ -17,6 +17,7 @@ const mouse = @import("mouse.zig");
 const Menu = @import("menu.zig").Menu;
 const dialog_mod = @import("dialog.zig");
 const Dialog = dialog_mod.Dialog;
+const theme_mod = @import("theme.zig");
 const TextField = @import("text_field.zig").TextField;
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
@@ -65,9 +66,6 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
 const probe_seq = "\x1b[?u\x1b[?69$p\x1b[c";
 /// Pushes the kitty "disambiguate escape codes" flag.
 const kitty_push_seq = "\x1b[>1u";
-
-const border_style: frame_mod.Style = .{ .fg_color = .palette(8) };
-const focused_border_style: frame_mod.Style = .{ .fg_color = .palette(6) };
 
 const msg = struct {
     const detached = "detached";
@@ -150,6 +148,8 @@ const Conn = struct {
     mouse: mouse.State = .idle,
     /// The menu `frame` holds over the panes and chrome.
     drawn_menu: ?Menu = null,
+    /// The theme the last frame was drawn with.
+    drawn_theme: ?*const theme_mod.Theme = null,
     /// Whether `frame` holds a dialog over the panes.
     drawn_dialog: bool = false,
     /// Whether the last frame showed the mode bar over the panes' bottom row.
@@ -932,6 +932,7 @@ const Server = struct {
                 const ws = ss.activeWorkspace();
                 return s.openDialog(c, .{ .rename = .{ .target = .{ .workspace = ws.id }, .field = .init(ws.name.text()) } });
             },
+            .choose_theme => return s.openDialog(c, .{ .theme = .init(s.configuration.theme) }),
             .toggle_pane_style => {
                 s.pane_style = if (s.pane_style == .compact) .framed else .compact;
                 try s.relayout(false);
@@ -989,6 +990,26 @@ const Server = struct {
         try s.closePanes(s.closed.items, closed);
     }
 
+    /// The theme `c` sees: the one the picker highlights while it is open.
+    fn theme(s: *const Server, c: *const Conn) *const theme_mod.Theme {
+        if (c.prefix.mode == .dialog and c.prefix.mode.dialog == .theme) return c.prefix.mode.dialog.theme.preview();
+        return s.configuration.theme;
+    }
+
+    /// Keeps the theme the picker highlights: writes it to the
+    /// configuration file, then uses it. A failed write keeps the old theme.
+    fn keepTheme(s: *Server, c: *Conn, picked: *const theme_mod.Theme) !void {
+        c.prefix.mode = .normal;
+        config.saveTheme(s.gpa, s.io, s.config_path, picked.name) catch |e| {
+            var message: dialog_mod.Message = .{};
+            const text = std.fmt.bufPrint(&message.text, "Saving the theme to {s} failed: {t}. The theme is unchanged.", .{ s.config_path, e }) catch "Saving the theme failed. The theme is unchanged.";
+            if (text.ptr != &message.text) @memcpy(message.text[0..text.len], text);
+            message.len = text.len;
+            return s.openDialog(c, .{ .message = message });
+        };
+        s.configuration.theme = picked;
+    }
+
     fn openDialog(s: *Server, c: *Conn, d: Dialog) !void {
         c.prefix.mode = .{ .dialog = d };
         try s.markStale();
@@ -1001,7 +1022,9 @@ const Server = struct {
             .changed => {},
             .cancel => c.prefix.mode = .normal,
             .save => {
-                if (d.* == .directory) {
+                if (d.* == .theme) {
+                    try s.keepTheme(c, d.theme.preview());
+                } else if (d.* == .directory) {
                     if (!try s.applyDirectory(c, &d.directory)) return s.markStale();
                 } else {
                     try s.rename(&d.rename);
@@ -1087,8 +1110,16 @@ const Server = struct {
     fn dialogMouse(s: *Server, c: *Conn, ev: input.Mouse) !void {
         const button = ev.button == .left or ev.button == .middle or ev.button == .right;
         if (ev.action != .press or !button) return;
-        const b = c.prefix.mode.dialog.box(s.tabArea(c.size));
-        if (ev.x >= b.x and ev.x - b.x < b.cols and ev.y >= b.y and ev.y - b.y < b.rows) return;
+        const d = &c.prefix.mode.dialog;
+        const b = d.box(s.tabArea(c.size));
+        if (ev.x >= b.x and ev.x - b.x < b.cols and ev.y >= b.y and ev.y - b.y < b.rows) {
+            if (d.* == .theme and ev.button == .left) if (d.theme.itemAt(b, ev.y)) |i| {
+                d.theme.cursor = i;
+                try s.keepTheme(c, d.theme.preview());
+                try s.markStale();
+            };
+            return;
+        }
         c.prefix.mode = .normal;
         try s.markStale();
     }
@@ -1440,6 +1471,11 @@ const Server = struct {
             compose_all = true;
             c.redraw_pending = true;
         }
+        // A new theme recolors every border and the whole chrome.
+        const drawn_theme = s.theme(c);
+        if (c.drawn_theme != drawn_theme) compose_all = true;
+        c.drawn_theme = drawn_theme;
+        const st: chrome.Styles = .of(drawn_theme);
         const help = c.prefix.mode == .help;
         const menu: ?Menu = if (c.mouse == .menu_open) c.mouse.menu_open else null;
         const dialog: ?*const Dialog = if (c.prefix.mode == .dialog) &c.prefix.mode.dialog else null;
@@ -1456,17 +1492,17 @@ const Server = struct {
         if (bar and c.frame.cursor.y + 1 == c.frame.rows) c.frame.cursor.visible = false;
         if (help) {
             if (s.configuration.keys.len == 0 and std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key)) {
-                chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset);
+                chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset, &st);
             } else {
                 var key_help: prefix.HelpList = .{};
                 key_help.build(&s.configuration.keys);
-                chrome.drawHelpRows(&c.frame, s.tabArea(c.size), c.prefix.help_offset, key_help.rows[0..key_help.len]);
+                chrome.drawHelpRows(&c.frame, s.tabArea(c.size), c.prefix.help_offset, key_help.rows[0..key_help.len], &st);
             }
         }
         c.drawn_help = help;
-        if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size));
+        if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size), &st);
         c.drawn_dialog = dialog != null;
-        if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed);
+        if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed, &st);
         c.drawn_menu = menu;
         if (help or menu != null or c.prefix.mode == .navigate) c.frame.cursor.visible = false;
         if (c.redraw_pending) c.frame.markAll();
@@ -1503,6 +1539,7 @@ const Server = struct {
 
     fn compose(s: *Server, c: *Conn, all: bool) !void {
         const focus = s.session.focused();
+        const st: chrome.Styles = .of(s.theme(c));
         var moved = all or c.drawn.items.len != s.geometry.panes.items.len;
         for (s.geometry.panes.items) |pl| {
             if (!c.drewAt(pl)) moved = true;
@@ -1530,7 +1567,7 @@ const Server = struct {
                 which = .all;
             };
             try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, which);
-            if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history);
+            if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history, &st);
             if (pl.pane == focus) {
                 c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
                 if (p.copy) |*copy| {
@@ -1549,18 +1586,18 @@ const Server = struct {
             const focused = s.placementOf(focus);
             for (s.geometry.panes.items) |pl| {
                 if (s.geometry.effective == .framed) {
-                    c.frame.drawBox(pl.box, if (pl.pane == focus) focused_border_style else border_style);
+                    c.frame.drawBox(pl.box, if (pl.pane == focus) st.focused_border else st.border);
                     continue;
                 }
                 const right = pl.box.x + pl.box.cols;
                 const bottom = pl.box.y + pl.box.rows;
                 if (pl.inner.cols < pl.box.cols) for (pl.box.y..bottom) |y| {
                     const active = pl.pane == focus or if (focused) |f| f.box.x == right and y >= f.box.y and y < f.box.y + f.box.rows else false;
-                    c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = if (active) focused_border_style else border_style };
+                    c.frame.rowMut(y)[right - 1] = .{ .cp = 0x2502, .style = if (active) st.focused_border else st.border };
                 };
                 if (pl.inner.rows < pl.box.rows) for (pl.box.x..right) |x| {
                     const active = pl.pane == focus or if (focused) |f| f.box.y == bottom and x >= f.box.x and x < f.box.x + f.box.cols else false;
-                    c.frame.rowMut(bottom - 1)[x] = .{ .cp = if (pl.inner.cols < pl.box.cols and x == right - 1) @as(u21, 0x253c) else 0x2500, .style = if (active) focused_border_style else border_style };
+                    c.frame.rowMut(bottom - 1)[x] = .{ .cp = if (pl.inner.cols < pl.box.cols and x == right - 1) @as(u21, 0x253c) else 0x2500, .style = if (active) st.focused_border else st.border };
                 };
             }
         }
@@ -1606,6 +1643,7 @@ const Server = struct {
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,
             .sidebar_width = s.sidebar_width,
+            .styles = .of(s.theme(c)),
             .custom_keys = s.configuration.keys.len != 0 or !std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key),
             .mode = switch (c.prefix.mode) {
                 .normal => .normal,

@@ -35,6 +35,7 @@ pub const Item = struct {
 pub const tables = std.EnumArray(std.meta.Tag(Subject), []const Item).init(.{
     .application = &.{
         .{ .label = "Show keybindings", .action = .help },
+        .{ .label = "Theme", .action = .choose_theme },
         .{ .label = "Reload config", .action = .reload_config },
         .{ .label = "Detach", .action = .detach },
     },
@@ -93,14 +94,14 @@ pub const Menu = struct {
         return if (i < m.items().len) i else null;
     }
 
-    pub fn draw(m: Menu, f: *Frame, zoomed: bool) void {
+    pub fn draw(m: Menu, f: *Frame, zoomed: bool, st: *const chrome.Styles) void {
         const b = m.box(f.cols, f.rows);
         f.clearRect(b);
-        f.drawBox(b, chrome.box_border);
+        f.drawBox(b, st.box_border);
         if (b.cols < 3 or b.rows < 3) return;
         for (m.items()[0..@min(m.items().len, b.rows - 2)], b.y + 1.., 0..) |item, y, i| {
             const line = f.rowMut(y)[b.x + 1 ..][0 .. b.cols - 2];
-            const style = if (i == m.cursor) chrome.highlight else frame_mod.Cell.blank.style;
+            const style = if (i == m.cursor) st.highlight else frame_mod.Cell.blank.style;
             for (line) |*c| c.style = style;
             _ = chrome.put(line, 1, item.text(zoomed), style);
         }
@@ -154,7 +155,7 @@ test "every subject has a table: rename and close a workspace or tab; rename, sp
         }
     };
     for ([_]struct { Subject, []const u8 }{
-        .{ .application, "Show keybindings,Reload config,Detach," },
+        .{ .application, "Show keybindings,Theme,Reload config,Detach," },
         .{ .{ .workspace = 0 }, "Rename,Change directory,Close," },
         .{ .{ .tab = 0 }, "New tab,Rename,Close," },
         .{ pane(1), "Rename tab,Split right,Split down,Zoom,Close pane," },
@@ -218,12 +219,12 @@ test "a drawn menu shows its items with the cursor highlighted" {
     defer f.deinit(testing.allocator);
     try f.resize(testing.allocator, 30, 8);
     const m: Menu = .{ .subject = pane(1), .x = 2, .y = 1, .cursor = 3 };
-    m.draw(&f, true);
+    m.draw(&f, true, &chrome.default_styles);
     try testing.expectEqual(@as(u21, 0x250c), f.row(1)[2].cp);
     try testing.expectEqual(@as(u21, 'R'), f.row(2)[4].cp);
     try testing.expectEqual(@as(u21, 'S'), f.row(3)[4].cp);
     try testing.expectEqual(@as(u21, 'U'), f.row(5)[4].cp);
-    try testing.expect(f.row(5)[3].style.eql(chrome.highlight));
-    try testing.expect(!f.row(4)[3].style.eql(chrome.highlight));
+    try testing.expect(f.row(5)[3].style.eql(chrome.default_styles.highlight));
+    try testing.expect(!f.row(4)[3].style.eql(chrome.default_styles.highlight));
     try testing.expectEqual(@as(u21, 0x2518), f.row(7)[16].cp);
 }

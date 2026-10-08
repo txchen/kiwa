@@ -2,6 +2,7 @@
 const std = @import("std");
 const prefix = @import("prefix.zig");
 const paths = @import("paths.zig");
+const theme_mod = @import("theme.zig");
 
 pub const template = @embedFile("config.example.toml");
 pub const guide = @embedFile("config-guide.txt");
@@ -10,6 +11,7 @@ pub const Config = struct {
     sidebar_width: ?u16 = null,
     pane_style: @import("layout.zig").PaneStyle = .compact,
     scrollback_lines: u32 = 50_000,
+    theme: *const theme_mod.Theme = theme_mod.default,
 };
 
 pub fn path(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const u8 {
@@ -107,12 +109,13 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
             out.keys.overrides[out.keys.len] = .{ .trigger = trigger, .prefixed = prefixed, .action = action };
             out.keys.len += 1;
         } else {
-            const bit: u8 = if (section == .keys and std.mem.eql(u8, key, "prefix")) 1 else if (section == .ui and std.mem.eql(u8, key, "sidebar_width")) 2 else if (section == .terminal and std.mem.eql(u8, key, "scrollback_lines")) 4 else if (section == .ui and std.mem.eql(u8, key, "pane_style")) 8 else return error.UnknownSetting;
+            const bit: u8 = if (section == .keys and std.mem.eql(u8, key, "prefix")) 1 else if (section == .ui and std.mem.eql(u8, key, "sidebar_width")) 2 else if (section == .terminal and std.mem.eql(u8, key, "scrollback_lines")) 4 else if (section == .ui and std.mem.eql(u8, key, "pane_style")) 8 else if (section == .ui and std.mem.eql(u8, key, "theme")) 16 else return error.UnknownSetting;
             if (seen & bit != 0) return error.DuplicateSetting;
             seen |= bit;
             switch (bit) {
                 1 => out.keys.prefix_key = try prefix.parseTrigger(try quoted(value)),
                 8 => out.pane_style = std.meta.stringToEnum(@import("layout.zig").PaneStyle, try quoted(value)) orelse return error.InvalidPaneStyle,
+                16 => out.theme = theme_mod.named(try quoted(value)) orelse return error.UnknownTheme,
                 2, 4 => {
                     if (value.len == 0) return error.ExpectedInteger;
                     for (value) |c| if (!std.ascii.isDigit(c)) return error.ExpectedInteger;
@@ -136,6 +139,113 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
     const k: @import("input.zig").Key = .{ .code = out.keys.prefix_key.code, .mods = out.keys.prefix_key.mods };
     if (out.keys.lookup(k, false) != null) return error.BindingConflictsWithPrefix;
     return out;
+}
+
+/// Returns `bytes` with `[ui] theme` set to `name`: the existing setting
+/// replaced, or a new one added under `[ui]`, which is added if missing.
+/// Every other line is kept as it was.
+pub fn withTheme(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const setting = try std.fmt.allocPrint(gpa, "theme = \"{s}\"", .{name});
+    defer gpa.free(setting);
+    var in_ui = false;
+    var done = false;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    var first = true;
+    while (lines.next()) |raw| {
+        if (!first) try out.append(gpa, '\n');
+        first = false;
+        const text = trim(raw);
+        if (text.len > 0 and text[0] == '[') {
+            in_ui = std.mem.eql(u8, trim(text[1 .. std.mem.indexOfScalar(u8, text, ']') orelse text.len]), "ui");
+            try out.appendSlice(gpa, raw);
+            if (in_ui and !done) {
+                // Added right under the header; a later `theme` line in the
+                // table is replaced below instead, so look ahead first.
+                var rest = lines;
+                const has = while (rest.next()) |next| {
+                    const t = trim(next);
+                    if (t.len > 0 and t[0] == '[') break false;
+                    if (isThemeLine(t)) break true;
+                } else false;
+                if (!has) {
+                    try out.print(gpa, "\n{s}", .{setting});
+                    done = true;
+                }
+            }
+            continue;
+        }
+        if (in_ui and !done and isThemeLine(text)) {
+            try out.appendSlice(gpa, setting);
+            done = true;
+            continue;
+        }
+        try out.appendSlice(gpa, raw);
+    }
+    if (!done) {
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
+        try out.print(gpa, "\n[ui]\n{s}\n", .{setting});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Whether trimmed line `t` sets `theme`, not just mentions it in a comment.
+fn isThemeLine(t: []const u8) bool {
+    if (t.len == 0 or t[0] == '#') return false;
+    const eq = std.mem.indexOfScalar(u8, t, '=') orelse return false;
+    return std.mem.eql(u8, trim(t[0..eq]), "theme");
+}
+
+/// Sets `[ui] theme` in the configuration file `name`, creating it from the
+/// template when missing. The result must still parse, and it replaces the
+/// file atomically.
+pub fn saveTheme(gpa: std.mem.Allocator, io: std.Io, name: []const u8, theme: []const u8) !void {
+    try ensure(gpa, io, name);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, name, gpa, .limited(64 * 1024));
+    defer gpa.free(bytes);
+    const edited = try withTheme(gpa, bytes, theme);
+    defer gpa.free(edited);
+    var line: usize = 0;
+    _ = try parse(edited, &line);
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{name});
+    defer gpa.free(tmp);
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteFile(io, tmp) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return e,
+    };
+    {
+        const file = try cwd.createFile(io, tmp, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var w = file.writer(io, &buf);
+        try w.interface.writeAll(edited);
+        try w.interface.flush();
+    }
+    try cwd.rename(tmp, cwd, name, io);
+}
+
+test "setting the theme replaces it in [ui], adds it there, or adds [ui]" {
+    const gpa = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "[ui]\ntheme = 'nord'\nsidebar_width = 30\n", "[ui]\ntheme = \"dracula\"\nsidebar_width = 30\n" },
+        .{ "[keys]\nprefix = 'ctrl+a'\n\n[ui]\n# theme = 'x'\nsidebar_width = 30\n", "[keys]\nprefix = 'ctrl+a'\n\n[ui]\ntheme = \"dracula\"\n# theme = 'x'\nsidebar_width = 30\n" },
+        .{ "[keys]\nprefix = 'ctrl+a'", "[keys]\nprefix = 'ctrl+a'\n\n[ui]\ntheme = \"dracula\"\n" },
+        .{ "", "\n[ui]\ntheme = \"dracula\"\n" },
+        .{ "[ui]\n[terminal]\ntheme_x = 1\n", "[ui]\ntheme = \"dracula\"\n[terminal]\ntheme_x = 1\n" },
+    };
+    var line: usize = 0;
+    for (cases) |c| {
+        const got = try withTheme(gpa, c[0], "dracula");
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(c[1], got);
+    }
+    const from_template = try withTheme(gpa, template, "nord");
+    defer gpa.free(from_template);
+    try std.testing.expectEqualStrings("nord", (try parse(from_template, &line)).theme.name);
+    try std.testing.expectError(error.UnknownTheme, parse("[ui]\ntheme = 'nope'", &line));
+    try std.testing.expectEqualStrings("tokyo-night", (try parse("[ui]\ntheme = 'tokyo-night'", &line)).theme.name);
 }
 
 test "pane styles are typed, optional, unique, and the default toggle can be overridden or disabled" {

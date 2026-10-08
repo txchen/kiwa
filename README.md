@@ -17,7 +17,8 @@ The name comes from the Japanese 際（きわ）, meaning "edge" or "boundary". 
 - A persistent workspace sidebar, with tabs and split panes for each project.
 - Useful defaults. Install it, run `kiwa`, and start working. No config file required.
 - Keyboard navigation and mouse controls. Click to switch, drag to resize, right-click for actions.
-- Compact dividers or [individual pane frames](docs/configuration.md#pane-style) with space between them. Zoomed tabs show `[Z]`.
+- Compact dividers or [individual pane frames](docs/configuration.md#pane-style). Zoomed tabs show `[Z]`.
+- [19 built-in themes](docs/configuration.md#theme), previewed live from the sidebar menu.
 - Detach without stopping your programs. Reattach when you need them.
 - Layout restore after a server restart, including workspace directories, splits, names, and zoom. Restored panes start new shells, not the old programs.
 - Scrollback, keyboard selection, and clipboard copy through OSC 52.

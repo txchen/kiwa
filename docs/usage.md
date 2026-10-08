@@ -54,7 +54,7 @@ The pane shortcuts behave the same in every program, including Neovim.
 Directional pane focus remains available with `prefix h/j/k/l` or arrows.
 Cycling panes while zoomed keeps the newly focused pane zoomed. The tab row shows `[Z]` after a zoomed tab's name.
 
-Pane borders default to compact internal dividers. The optional [framed pane style](configuration.md#pane-style) gives each pane its own border and a blank gutter.
+Pane borders default to compact internal dividers. The optional [framed pane style](configuration.md#pane-style) gives each pane its own border.
 
 ## Workspaces and panes
 
@@ -67,8 +67,8 @@ columns, with at least 12 for the sidebar and 20 for the panes when expanded.
 A narrow client temporarily clamps the width without changing the saved choice.
 
 The sidebar's **+ new** and **• menu** controls sit above the information
-section, or at the bottom when that section is hidden. The **menu** opens **Show keybindings**, **Reload config**, and
-**Detach**. Keybindings reflect the live configuration. Reload success appears
+section, or at the bottom when that section is hidden. The **menu** opens **Show keybindings**, **Theme**, **Reload config**,
+and **Detach**. **Theme** previews each built-in [theme](configuration.md#theme) as you move through the list; Enter keeps one and saves it to your configuration file. Keybindings reflect the live configuration. Reload success appears
 briefly in the footer; a failed reload shows an error and keeps the old settings.
 Detach leaves the session and its programs running.
 

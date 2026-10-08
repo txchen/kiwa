@@ -7,6 +7,8 @@ const vt = @import("ghostty-vt");
 const frame_mod = @import("frame.zig");
 const prefix = @import("prefix.zig");
 const Activity = @import("session.zig").Activity;
+const theme_mod = @import("theme.zig");
+const Theme = theme_mod.Theme;
 
 const Frame = frame_mod.Frame;
 const Cell = frame_mod.Cell;
@@ -61,6 +63,7 @@ pub const View = struct {
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
     sidebar_width: u16 = sidebar_cols,
+    styles: Styles = default_styles,
 
     /// Whether the mode bar shows: in a mode, or with a notice. Otherwise
     /// the panes own the bottom row.
@@ -108,22 +111,52 @@ pub const Geometry = struct {
     }
 };
 
-const accent: Style.Color = .palette(6);
 const plain: Style = .{};
 const dim: Style = .{ .flags = .{ .faint = true } };
-const divider: Style = .{ .fg_color = .rgb(66, 70, 86) };
-/// The tab row's background, darker than most dark themes' default, so the
-/// row stands apart from the panes without a separator line.
-const tab_bar: Style = .{ .bg_color = .rgb(22, 24, 33) };
-const sidebar_heading: Style = .{ .fg_color = .rgb(132, 149, 194), .flags = .{ .bold = true } };
-const workspace_selected: Style = .{ .fg_color = .rgb(230, 232, 240), .bg_color = .rgb(50, 55, 76) };
-const workspace_number: Style.Color = .rgb(139, 149, 174);
-const branch_color: Style.Color = .rgb(200, 154, 216);
-pub const highlight: Style = .{ .fg_color = .palette(0), .bg_color = accent };
-const mode_label: Style = .{ .fg_color = .palette(0), .bg_color = accent, .flags = .{ .bold = true } };
-const marker_fg: Style.Color = .palette(3);
-/// The border of the boxes drawn over panes: key help and menus.
-pub const box_border: Style = .{ .fg_color = accent };
+
+/// The styles the chrome draws with, from a theme.
+pub const Styles = struct {
+    accent: Style.Color,
+    divider: Style,
+    /// The tab row's background, so the row stands apart from the panes
+    /// without a separator line.
+    tab_bar: Style,
+    sidebar_heading: Style,
+    workspace_selected: Style,
+    workspace_number: Style.Color,
+    branch: Style.Color,
+    highlight: Style,
+    mode_label: Style,
+    marker: Style.Color,
+    /// The border of the boxes drawn over panes: key help, menus, and dialogs.
+    box_border: Style,
+    /// Pane borders, unfocused and focused.
+    border: Style,
+    focused_border: Style,
+    @"error": Style,
+
+    pub fn of(t: *const Theme) Styles {
+        return .{
+            .accent = t.accent,
+            .divider = .{ .fg_color = t.divider },
+            .tab_bar = .{ .bg_color = t.panel },
+            .sidebar_heading = .{ .fg_color = t.heading, .flags = .{ .bold = true } },
+            .workspace_selected = .{ .fg_color = t.text, .bg_color = t.selected },
+            .workspace_number = t.muted,
+            .branch = t.branch,
+            .highlight = .{ .fg_color = t.on_accent, .bg_color = t.accent },
+            .mode_label = .{ .fg_color = t.on_accent, .bg_color = t.accent, .flags = .{ .bold = true } },
+            .marker = t.marker,
+            .box_border = .{ .fg_color = t.accent },
+            .border = .{ .fg_color = t.border },
+            .focused_border = .{ .fg_color = t.accent },
+            .@"error" = .{ .fg_color = t.@"error" },
+        };
+    }
+};
+
+/// The styles of the default theme.
+pub const default_styles: Styles = .of(&theme_mod.kiwa);
 
 const ellipsis = 0x2026;
 const nav_mark = 0x25b6;
@@ -138,8 +171,8 @@ pub fn draw(f: *Frame, v: View) void {
     }
     if (!g.tab_row) return;
     const row = f.rowMut(0)[g.sidebar..];
-    @memset(row, .{ .style = tab_bar });
-    drawTabs(row, v.tabs);
+    @memset(row, .{ .style = v.styles.tab_bar });
+    drawTabs(row, v.tabs, &v.styles);
 }
 
 /// Draws the mode bar over the tab area's bottom row while `v` shows it.
@@ -153,10 +186,10 @@ pub fn drawBar(f: *Frame, v: View) void {
         .normal, .help => if (v.notice) {
             _ = put(footer, 1, "Configuration reloaded", plain);
         },
-        .copy => |failed| drawModeBar(footer, " COPY ", if (failed) "copy failed: shorten selection or retry" else "h j k l move  v select  y copy  esc back"),
-        .prefix => drawModeBar(footer, " PREFIX ", if (v.custom_keys) "custom keys: kiwa config bindings" else "c tab  \\ vsplit  - hsplit  [ copy mode  ? help"),
-        .resize => drawModeBar(footer, " RESIZE ", "h j k l resize  esc done"),
-        .navigate => drawModeBar(footer, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back"),
+        .copy => |failed| drawModeBar(footer, " COPY ", if (failed) "copy failed: shorten selection or retry" else "h j k l move  v select  y copy  esc back", &v.styles),
+        .prefix => drawModeBar(footer, " PREFIX ", if (v.custom_keys) "custom keys: kiwa config bindings" else "c tab  \\ vsplit  - hsplit  [ copy mode  ? help", &v.styles),
+        .resize => drawModeBar(footer, " RESIZE ", "h j k l resize  esc done", &v.styles),
+        .navigate => drawModeBar(footer, " NAVIGATE ", "j k move  1-9 jump  enter switch  esc back", &v.styles),
     }
 }
 
@@ -327,8 +360,8 @@ fn firstShown(v: View, height: u16, expanded: bool) usize {
     return first;
 }
 
-fn lineStyle(ws: Workspace, under_cursor: bool) Style {
-    var s = if (ws.active) workspace_selected else plain;
+fn lineStyle(ws: Workspace, under_cursor: bool, st: *const Styles) Style {
+    var s = if (ws.active) st.workspace_selected else plain;
     s.flags.inverse = under_cursor;
     return s;
 }
@@ -346,26 +379,26 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
     for (0..f.rows) |y| {
         const row = f.rowMut(y);
         @memset(row[0..width], .blank);
-        row[width] = .{ .cp = 0x2502, .style = divider };
+        row[width] = .{ .cp = 0x2502, .style = v.styles.divider };
     }
     const list = sidebarList(v, f.rows, true, sidebar_width);
-    if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " Workspaces", sidebar_heading);
+    if (list.top == 1) _ = put(f.rowMut(0)[0..width], 0, " Workspaces", v.styles.sidebar_heading);
     if (f.rows >= 2) {
         const footer = f.rowMut(list.end)[0..width];
         _ = put(footer, 0, " + new", plain);
-        footer[width - 11] = .{ .cp = 0x2022, .style = .{ .fg_color = accent } };
+        footer[width - 11] = .{ .cp = 0x2022, .style = .{ .fg_color = v.styles.accent } };
         _ = put(footer, width - 9, "menu", plain);
         footer[width - 1] = .{ .cp = 0x00ab };
     }
 
     if (infoTop(v, f.rows, sidebar_width)) |top| {
         const inner = width - 2;
-        for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = divider };
-        _ = put(f.rowMut(top + 1)[1..width], 0, "Host", sidebar_heading);
+        for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = v.styles.divider };
+        _ = put(f.rowMut(top + 1)[1..width], 0, "Host", v.styles.sidebar_heading);
         var host: Wrapped = .{ .text = v.hostname, .cols = inner };
         var y = top + 2;
         while (host.next()) |line| : (y += 1) _ = put(f.rowMut(y)[1..][0..inner], 0, line, plain);
-        _ = put(f.rowMut(y)[1..width], 0, "Workspace", sidebar_heading);
+        _ = put(f.rowMut(y)[1..width], 0, "Workspace", v.styles.sidebar_heading);
         var path_buf: [4096]u8 = undefined;
         const path = if (v.home.len > 0 and std.mem.startsWith(u8, v.directory, v.home) and
             (v.directory.len == v.home.len or v.directory[v.home.len] == '/'))
@@ -382,13 +415,13 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         const i = e.index;
         const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
-        const style = lineStyle(ws, cursor);
+        const style = lineStyle(ws, cursor, &v.styles);
         const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         var num: [24]u8 = undefined;
         var number_style = style;
-        number_style.fg_color = workspace_number;
+        number_style.fg_color = v.styles.workspace_number;
         const x = put(line, 1, std.fmt.bufPrint(&num, "{d} ", .{i + 1}) catch unreachable, number_style);
         var name_style = style;
         name_style.flags.bold = ws.active;
@@ -396,13 +429,13 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         fit(line[0 .. width - 3], x, ws.name, name_style);
         if (markerCp(ws.activity)) |cp| {
             var ms = style;
-            ms.fg_color = marker_fg;
+            ms.fg_color = v.styles.marker;
             line[width - 2] = .{ .cp = cp, .style = ms };
         }
         if (e.rows == 2) {
             const bl = f.rowMut(e.y + 1)[0..width];
             var bs = style;
-            bs.fg_color = branch_color;
+            bs.fg_color = v.styles.branch;
             bs.flags.faint = !ws.active;
             for (bl) |*c| c.style = bs;
             fit(bl, 3, ws.branch.?, bs);
@@ -415,7 +448,7 @@ fn drawCollapsed(f: *Frame, v: View) void {
     for (0..f.rows) |y| {
         const row = f.rowMut(y);
         @memset(row[0..width], .blank);
-        row[width] = .{ .cp = 0x2502, .style = divider };
+        row[width] = .{ .cp = 0x2502, .style = v.styles.divider };
     }
     const list: List = .of(f.rows, false);
     if (list.end < f.rows) f.rowMut(list.end)[width - 1] = .{ .cp = 0x00bb };
@@ -424,7 +457,7 @@ fn drawCollapsed(f: *Frame, v: View) void {
         const i = e.index;
         const ws = v.workspaces[i];
         const cursor = v.mode == .navigate and v.mode.navigate == i;
-        const style = lineStyle(ws, cursor);
+        const style = lineStyle(ws, cursor, &v.styles);
         const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
         var num: [24]u8 = undefined;
@@ -433,7 +466,7 @@ fn drawCollapsed(f: *Frame, v: View) void {
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         if (markerCp(ws.activity)) |cp| {
             var ms = style;
-            ms.fg_color = marker_fg;
+            ms.fg_color = v.styles.marker;
             line[width - 1] = .{ .cp = cp, .style = ms };
         }
     }
@@ -505,11 +538,11 @@ const TabSlots = struct {
     }
 };
 
-fn drawTabs(row: []Cell, tabs: []const Tab) void {
+fn drawTabs(row: []Cell, tabs: []const Tab, st: *const Styles) void {
     var slots: TabSlots = .init(tabs, row.len);
     while (slots.next()) |slot| {
         const t = tabs[slot.index];
-        const style = if (t.active) highlight else tab_bar;
+        const style = if (t.active) st.highlight else st.tab_bar;
         const cell = row[slot.x..][0..slot.cols];
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
@@ -524,25 +557,25 @@ fn drawTabs(row: []Cell, tabs: []const Tab) void {
         if (t.zoomed) _ = put(cell, name_end, " [Z]", style);
         if (markerCp(t.activity)) |cp| {
             var ms = style;
-            ms.fg_color = marker_fg;
+            ms.fg_color = st.marker;
             cell[slot.cols - 2] = .{ .cp = cp, .style = ms };
         }
     }
-    if (slots.plusX()) |x| _ = put(row, x, plus, tab_bar);
+    if (slots.plusX()) |x| _ = put(row, x, plus, st.tab_bar);
 }
 
-fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8) void {
-    const x = put(row, 0, label, mode_label);
+fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8, st: *const Styles) void {
+    const x = put(row, 0, label, st.mode_label);
     _ = put(row, x, "  ", plain);
     _ = put(row, x + 2, keys, plain);
 }
 
 /// The key help box, centered over `area`. It lists `prefix.help`.
-pub fn drawHelp(f: *Frame, area: Rect, offset: usize) void {
-    drawHelpRows(f, area, offset, prefix.help);
+pub fn drawHelp(f: *Frame, area: Rect, offset: usize, st: *const Styles) void {
+    drawHelpRows(f, area, offset, prefix.help, st);
 }
 
-pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const prefix.Help) void {
+pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const prefix.Help, st: *const Styles) void {
     const keys_cols = blk: {
         var w: usize = 0;
         for (help_rows) |h| w = @max(w, h.keys.len);
@@ -559,13 +592,13 @@ pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const pre
     const rows: u16 = @intCast(@min(want_rows, area.rows));
     const box: Rect = .{ .x = area.x + (area.cols - cols) / 2, .y = area.y + (area.rows - rows) / 2, .cols = cols, .rows = rows };
     f.clearRect(box);
-    f.drawBox(box, box_border);
+    f.drawBox(box, st.box_border);
     if (box.cols < 4 or box.rows < 3) return;
     const top = f.rowMut(box.y)[box.x..][0..box.cols];
-    _ = put(top[0 .. top.len - 1], 2, " keys ", box_border);
+    _ = put(top[0 .. top.len - 1], 2, " keys ", st.box_border);
     const bottom = f.rowMut(box.y + box.rows - 1)[box.x..][0..box.cols];
     const close = " j/k scroll  esc close ";
-    if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, box_border);
+    if (bottom.len >= close.len + 4) _ = put(bottom, bottom.len - close.len - 2, close, st.box_border);
     const start = @min(offset, help_rows.len -| (box.rows - 2));
     for (help_rows[start..@min(help_rows.len, start + box.rows - 2)], box.y + 1..) |h, y| {
         const line = f.rowMut(y)[box.x + 1 ..][0 .. box.cols - 2];
@@ -576,7 +609,7 @@ pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const pre
 
 /// Draws `[back/history]` over the top-right of a pane's content while
 /// its viewport is scrolled `back` lines into `history`.
-pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize) void {
+pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize, st: *const Styles) void {
     var buf: [48]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "[{d}/{d}]", .{ back, history }) catch return;
     if (inner.rows == 0 or text.len > inner.cols) return;
@@ -584,7 +617,7 @@ pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize) voi
     const x = inner.cols - text.len;
     // Half of a wide character would be left without its tail.
     if (row[x].width == .tail) row[x - 1] = .blank;
-    _ = put(row, x, text, highlight);
+    _ = put(row, x, text, st.highlight);
 }
 
 /// Writes `text` into `row` from column `x`, clipped at the row's end.
@@ -718,7 +751,7 @@ const three = [_]Workspace{
 const tabs2 = [_]Tab{ .{ .name = "sh", .active = true }, .{ .name = "vim" } };
 
 fn isHighlight(c: Cell) bool {
-    return c.style.bg_color.eql(workspace_selected.bg_color) or (c.style.bg_color.eql(.palette(6)) and c.style.fg_color.eql(.palette(0)));
+    return c.style.bg_color.eql(default_styles.workspace_selected.bg_color) or (c.style.bg_color.eql(.palette(6)) and c.style.fg_color.eql(.palette(0)));
 }
 
 test "geometry: 26 columns at 64 or more, collapsed below or when toggled, and a tab row" {
@@ -808,8 +841,8 @@ test "a branch line follows the name when a branch is known" {
     try testing.expect(s.at(3, 1).style.flags.bold);
     try testing.expect(!s.at(1, 1).style.flags.bold);
     try testing.expect(!s.at(3, 2).style.flags.bold);
-    try testing.expectEqual(branch_color, s.at(3, 2).style.fg_color);
-    try testing.expectEqual(workspace_number, s.at(1, 1).style.fg_color);
+    try testing.expectEqual(default_styles.branch, s.at(3, 2).style.fg_color);
+    try testing.expectEqual(default_styles.workspace_number, s.at(1, 1).style.fg_color);
     try testing.expect(s.at(3, 4).style.flags.faint);
 }
 
@@ -913,7 +946,7 @@ test "key help lists every prefix binding in a box centered over the tab area" {
     defer s.deinit();
     const g: Geometry = .of(120, 50, false);
     draw(&s.f, .{ .workspaces = &one, .tabs = &tabs2, .mode = .help });
-    drawHelp(&s.f, g.area, 0);
+    drawHelp(&s.f, g.area, 0, &default_styles);
     const got = try s.text();
     defer testing.allocator.free(got);
     for (prefix.help) |h| try testing.expect(std.mem.indexOf(u8, got, h.text) != null);
@@ -944,7 +977,7 @@ test "a tiny frame draws what fits without crashing" {
     for ([_][2]u16{ .{ 2, 1 }, .{ 5, 3 }, .{ 9, 2 }, .{ 70, 1 }, .{ 70, 2 } }) |size| {
         var s = try render(size[0], size[1], .{ .workspaces = &three, .tabs = &tabs2, .mode = .prefix });
         defer s.deinit();
-        drawHelp(&s.f, Geometry.of(size[0], size[1], false).area, 0);
+        drawHelp(&s.f, Geometry.of(size[0], size[1], false).area, 0, &default_styles);
     }
 }
 
@@ -1053,7 +1086,7 @@ test "the scroll marker sits at the top right of the pane content" {
     defer s.deinit();
     s.f.rowMut(1)[20] = .{ .cp = 0x4e2d, .width = .wide };
     s.f.rowMut(1)[21] = .tail;
-    drawScrollMarker(&s.f, .{ .x = 10, .y = 1, .cols = 18, .rows = 3 }, 3, 177);
+    drawScrollMarker(&s.f, .{ .x = 10, .y = 1, .cols = 18, .rows = 3 }, 3, 177, &default_styles);
     try s.expect(
         \\
         \\                     [3/177]
@@ -1063,7 +1096,7 @@ test "the scroll marker sits at the top right of the pane content" {
     );
     try testing.expect(s.at(20, 1).isDefaultBlank());
     try testing.expect(isHighlight(s.at(21, 1)) and isHighlight(s.at(27, 1)) and !isHighlight(s.at(28, 1)));
-    drawScrollMarker(&s.f, .{ .x = 0, .y = 0, .cols = 4, .rows = 1 }, 3, 177);
+    drawScrollMarker(&s.f, .{ .x = 0, .y = 0, .cols = 4, .rows = 1 }, 3, 177, &default_styles);
     try testing.expect(s.at(0, 0).isDefaultBlank());
 }
 
@@ -1164,9 +1197,20 @@ test "the tab row is a dark band: inactive tabs and the empty rest share its bac
     defer s.deinit();
     for (s.f.row(0)[26..]) |cell| {
         try testing.expectEqual(.none, cell.style.flags.underline);
-        if (!cell.style.eql(highlight)) try testing.expectEqualDeep(tab_bar.bg_color, cell.style.bg_color);
+        if (!cell.style.eql(default_styles.highlight)) try testing.expectEqualDeep(default_styles.tab_bar.bg_color, cell.style.bg_color);
     }
     const geometry = Geometry.of(80, 24, false);
     try testing.expectEqual(1, geometry.area.y);
     try testing.expectEqual(23, geometry.area.rows);
+}
+
+test "a theme recolors the tab row, the active tab, and the sidebar" {
+    const dracula: Styles = .of(theme_mod.named("dracula").?);
+    var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .styles = dracula });
+    defer s.deinit();
+    try testing.expect(!dracula.tab_bar.eql(default_styles.tab_bar));
+    try testing.expectEqualDeep(dracula.highlight, s.at(26, 0).style);
+    try testing.expectEqualDeep(dracula.tab_bar.bg_color, s.at(79, 0).style.bg_color);
+    try testing.expectEqualDeep(dracula.divider, s.at(25, 3).style);
+    try testing.expectEqualDeep(dracula.workspace_selected.bg_color, s.at(5, 1).style.bg_color);
 }

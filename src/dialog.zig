@@ -9,6 +9,7 @@ const chrome = @import("chrome.zig");
 const frame_mod = @import("frame.zig");
 const session = @import("session.zig");
 const TextField = @import("text_field.zig").TextField;
+const theme_mod = @import("theme.zig");
 
 const Frame = frame_mod.Frame;
 const Rect = frame_mod.Rect;
@@ -18,6 +19,7 @@ pub const Dialog = union(enum) {
     confirm: Confirm,
     directory: Directory,
     message: Message,
+    theme: ThemePicker,
 
     /// What an input event did to the dialog.
     pub const Outcome = enum {
@@ -44,12 +46,17 @@ pub const Dialog = union(enum) {
                 .key => |k| Confirm.key(k),
                 else => .none,
             },
+            .theme => |*p| switch (ev) {
+                .key => |k| p.key(k),
+                else => .none,
+            },
         };
     }
 
     pub fn box(d: *const Dialog, area: Rect) Rect {
         return switch (d.*) {
             .message => centered(area, 72, 7),
+            .theme => centered(area, ThemePicker.cols, theme_mod.all.len + 3),
             .rename => centered(area, rename_cols, 4),
             .directory => centered(area, 72, 6),
             .confirm => |*c| blk: {
@@ -61,17 +68,17 @@ pub const Dialog = union(enum) {
     }
 
     /// Draws the dialog over `area` and returns where the outer cursor goes.
-    pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect) !frame_mod.Cursor {
+    pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect, st: *const chrome.Styles) !frame_mod.Cursor {
         const b = d.box(area);
         f.clearRect(b);
-        f.drawBox(b, chrome.box_border);
+        f.drawBox(b, st.box_border);
         const hidden: frame_mod.Cursor = .{ .visible = false };
         if (b.cols < 6 or b.rows < 4) return hidden;
         const top = f.rowMut(b.y)[b.x..][0..b.cols];
         const inner = b.cols - 4;
         switch (d.*) {
             .message => |*m| {
-                _ = chrome.put(top[0 .. top.len - 1], 2, " Reload config failed ", chrome.box_border);
+                _ = chrome.put(top[0 .. top.len - 1], 2, " Reload config failed ", st.box_border);
                 var offset: usize = 0;
                 var y = b.y + 1;
                 while (offset < m.len and y < b.y + b.rows - 2) : (y += 1) {
@@ -87,20 +94,24 @@ pub const Dialog = union(enum) {
                 return hidden;
             },
             .rename => |*r| {
-                _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), chrome.box_border);
+                _ = chrome.put(top[0 .. top.len - 1], 2, r.title(), st.box_border);
                 _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel", hint);
                 const col = try drawField(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &r.field);
                 return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
             },
             .directory => |*d_| {
-                _ = chrome.put(top[0 .. top.len - 1], 2, if (d_.workspace == null) " new workspace " else " change directory ", chrome.box_border);
+                _ = chrome.put(top[0 .. top.len - 1], 2, if (d_.workspace == null) " new workspace " else " change directory ", st.box_border);
                 const col = try drawField(f.rowMut(b.y + 1)[b.x + 2 ..][0..inner], gpa, g, &d_.field);
                 _ = chrome.put(f.rowMut(b.y + 2)[b.x + 2 ..][0..inner], 0, "enter save  esc cancel  ctrl+u clear", hint);
                 if (b.rows >= 6) {
                     _ = chrome.put(f.rowMut(b.y + 3)[b.x + 2 ..][0..inner], 0, "Directory for workspace and new tabs", hint);
-                    _ = chrome.put(f.rowMut(b.y + 4)[b.x + 2 ..][0..inner], 0, d_.message orelse "Absolute path, ~/path, or relative path", if (d_.message != null) .{ .fg_color = .palette(1) } else hint);
+                    _ = chrome.put(f.rowMut(b.y + 4)[b.x + 2 ..][0..inner], 0, d_.message orelse "Absolute path, ~/path, or relative path", if (d_.message != null) st.@"error" else hint);
                 }
                 return .{ .x = @intCast(b.x + 2 + col), .y = b.y + 1 };
+            },
+            .theme => |*p| {
+                p.draw(f, b, st);
+                return hidden;
             },
             .confirm => |*c| {
                 var buf: Confirm.Buf = undefined;
@@ -242,6 +253,82 @@ fn typedChar(k: input.Key, c: u21) u21 {
     return c;
 }
 
+/// The theme picker: a list of the built-in themes. Moving through it
+/// previews each theme; enter keeps the highlighted one.
+pub const ThemePicker = struct {
+    /// The highlighted theme, an index into `theme.all`.
+    cursor: usize,
+    /// The theme in use when the picker opened, restored on cancel.
+    current: usize,
+
+    const cols = 30;
+
+    pub fn init(current: *const theme_mod.Theme) ThemePicker {
+        const i = theme_mod.index(current);
+        return .{ .cursor = i, .current = i };
+    }
+
+    /// The theme to draw with while the picker is open.
+    pub fn preview(p: ThemePicker) *const theme_mod.Theme {
+        return &theme_mod.all[p.cursor];
+    }
+
+    fn key(p: *ThemePicker, k: input.Key) Dialog.Outcome {
+        if (k.action == .release) return .none;
+        const last = theme_mod.all.len - 1;
+        const before = p.cursor;
+        switch (k.code) {
+            .named => |n| switch (n) {
+                .enter, .numpad_enter => return .save,
+                .escape => return .cancel,
+                .arrow_down => p.cursor = @min(p.cursor + 1, last),
+                .arrow_up => p.cursor -|= 1,
+                .home => p.cursor = 0,
+                .end => p.cursor = last,
+                else => {},
+            },
+            .char => |c| switch (c) {
+                'j' => p.cursor = @min(p.cursor + 1, last),
+                'k' => p.cursor -|= 1,
+                'q' => return .cancel,
+                else => {},
+            },
+        }
+        return if (p.cursor == before) .none else .changed;
+    }
+
+    /// The rows of the list inside box `b`, and the first theme shown so
+    /// that the cursor stays visible.
+    fn window(p: ThemePicker, b: Rect) struct { rows: usize, first: usize } {
+        const rows = b.rows -| 3;
+        return .{ .rows = rows, .first = if (rows == 0) 0 else p.cursor -| (rows - 1) };
+    }
+
+    /// The theme drawn at row `y` of box `b`, if any.
+    pub fn itemAt(p: ThemePicker, b: Rect, y: u16) ?usize {
+        const w = p.window(b);
+        if (y <= b.y or y - b.y - 1 >= w.rows) return null;
+        const i = w.first + (y - b.y - 1);
+        return if (i < theme_mod.all.len) i else null;
+    }
+
+    fn draw(p: *const ThemePicker, f: *Frame, b: Rect, st: *const chrome.Styles) void {
+        const top = f.rowMut(b.y)[b.x..][0..b.cols];
+        _ = chrome.put(top[0 .. top.len - 1], 2, " theme ", st.box_border);
+        const w = p.window(b);
+        for (0..w.rows) |row| {
+            const i = w.first + row;
+            if (i >= theme_mod.all.len) break;
+            const line = f.rowMut(b.y + 1 + row)[b.x + 1 ..][0 .. b.cols - 2];
+            const style = if (i == p.cursor) st.highlight else frame_mod.Cell.blank.style;
+            for (line) |*c| c.style = style;
+            if (i == p.current) _ = chrome.put(line, 1, "\u{25cf}", style);
+            _ = chrome.put(line, 3, theme_mod.all[i].name, style);
+        }
+        _ = chrome.put(f.rowMut(b.y + b.rows - 2)[b.x + 2 ..][0 .. b.cols - 4], 0, "enter keep  esc cancel", hint);
+    }
+};
+
 const rename_cols = 44;
 const confirm_hint = "y close  n cancel";
 const hint: frame_mod.Style = .{ .flags = .{ .faint = true } };
@@ -326,7 +413,7 @@ test "the rename box is centered over the tab area with its title, field, hint, 
     const d = renameOf("\u{4e2d}e\u{301}");
     const b = d.box(area);
     try testing.expectEqual(Rect{ .x = 31, .y = 10, .cols = 44, .rows = 4 }, b);
-    const cursor = try d.draw(&f, testing.allocator, &g, area);
+    const cursor = try d.draw(&f, testing.allocator, &g, area, &chrome.default_styles);
     try testing.expectEqual(frame_mod.Cursor{ .x = 36, .y = 11 }, cursor);
     try testing.expectEqual(@as(u21, 0x250c), f.row(10)[31].cp);
     try testing.expectEqual(@as(u21, 'r'), f.row(10)[34].cp);
@@ -338,7 +425,7 @@ test "the rename box is centered over the tab area with its title, field, hint, 
     try testing.expectEqual(@as(u21, 0x2518), f.row(13)[74].cp);
 
     const tiny: Rect = .{ .x = 0, .y = 0, .cols = 5, .rows = 3 };
-    try testing.expect(!(try d.draw(&f, testing.allocator, &g, tiny)).visible);
+    try testing.expect(!(try d.draw(&f, testing.allocator, &g, tiny, &chrome.default_styles)).visible);
 }
 
 test "a close confirmation names what runs; y confirms, and n or esc cancels" {
@@ -360,7 +447,7 @@ test "a close confirmation names what runs; y confirms, and n or esc cancels" {
     try f.resize(testing.allocator, 80, 24);
     const area: Rect = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
     try testing.expectEqual(Rect{ .x = 38, .y = 10, .cols = 29, .rows = 4 }, d.box(area));
-    try testing.expect(!(try d.draw(&f, testing.allocator, &g, area)).visible);
+    try testing.expect(!(try d.draw(&f, testing.allocator, &g, area, &chrome.default_styles)).visible);
     try testing.expectEqual(@as(u21, 'c'), f.row(11)[40].cp);
     try testing.expectEqual(@as(u21, 'y'), f.row(12)[40].cp);
 
@@ -369,3 +456,31 @@ test "a close confirmation names what runs; y confirms, and n or esc cancels" {
 }
 
 pub const Message = struct { text: [256]u8 = undefined, len: usize = 0 };
+
+test "the theme picker previews as it moves, keeps on enter, and marks the theme in use" {
+    var p: ThemePicker = .init(theme_mod.named("nord").?);
+    try testing.expectEqualStrings("nord", p.preview().name);
+    try testing.expectEqual(Dialog.Outcome.changed, p.key(.typed('j')));
+    try testing.expectEqualStrings(theme_mod.all[p.current + 1].name, p.preview().name);
+    try testing.expectEqual(Dialog.Outcome.changed, p.key(.named(.arrow_up, .{})));
+    try testing.expectEqualStrings("nord", p.preview().name);
+    try testing.expectEqual(Dialog.Outcome.changed, p.key(.named(.end, .{})));
+    try testing.expectEqual(Dialog.Outcome.none, p.key(.typed('j')));
+    try testing.expectEqual(Dialog.Outcome.save, p.key(.named(.enter, .{})));
+    try testing.expectEqual(Dialog.Outcome.cancel, p.key(.named(.escape, .{})));
+
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 40, 12);
+    var g: frame_mod.Graphemes = .{};
+    defer g.deinit(testing.allocator);
+    var d: Dialog = .{ .theme = p };
+    const area: Rect = .{ .x = 0, .y = 0, .cols = 40, .rows = 12 };
+    _ = try d.draw(&f, testing.allocator, &g, area, &chrome.default_styles);
+    const b = d.box(area);
+    // The last theme is highlighted at the bottom of the scrolled list.
+    const last_row = b.y + 1 + (b.rows - 3) - 1;
+    try testing.expect(f.row(last_row)[b.x + 1].style.eql(chrome.default_styles.highlight));
+    try testing.expectEqual(theme_mod.all.len - 1, d.theme.itemAt(b, last_row).?);
+    try testing.expectEqual(@as(?usize, null), d.theme.itemAt(b, b.y));
+}

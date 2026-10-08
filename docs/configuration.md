@@ -49,6 +49,7 @@ Arrays, inline tables, multiline strings, escaped strings, and dotted keys are n
 | `[bindings]` | A quoted key chord | Built-in action for that chord | An action below or `"none"` | Startup and reload |
 | `[ui]` | `sidebar_width` | Saved dragged width, initially `26` | `12` through `200` columns | Startup and reload |
 | `[ui]` | `pane_style` | `"compact"` | `"compact"` or `"framed"` | Startup and reload |
+| `[ui]` | `theme` | `"kiwa"` | A [built-in theme](#theme) name | Startup, reload, and the Theme menu |
 | `[terminal]` | `scrollback_lines` | `50000` | `0` through `1000000` | New panes only |
 
 ### Prefix
@@ -98,7 +99,7 @@ Some combinations require the outer terminal's extended keyboard protocol. Choos
 | Pane operations | `next_pane`, `prev_pane`, `close_pane`, `rotate_panes`, `zoom`, `resize_mode`, `toggle_pane_style` |
 | Workspaces | `new_workspace`, `close_workspace`, `rename_workspace`, `next_workspace`, `prev_workspace`, `change_workspace_directory` |
 | Sidebar | `navigate`, `toggle_sidebar` |
-| Other | `copy_mode`, `help`, `reload_config`, `detach` |
+| Other | `copy_mode`, `help`, `reload_config`, `choose_theme`, `detach` |
 | Disable a binding | `none` |
 
 The [usage guide](usage.md) describes default shortcuts and action behavior. `kiwa config bindings` includes your file's overrides.
@@ -114,6 +115,17 @@ An explicit value applies at startup and on every reload. Without one, Kiwa pres
 
 Dragging still works with an explicit width, but the next reload or startup reapplies that width. Narrow terminals temporarily clamp or collapse the sidebar to leave room for panes without changing the saved width.
 
+### Theme
+
+```toml
+[ui]
+theme = "tokyo-night"
+```
+
+A theme colors the sidebar, the tab row, pane borders, menus, and dialogs. Pane content keeps its program's colors. The built-in themes are `kiwa` (the default), `catppuccin`, `catppuccin-latte`, `terminal`, `tokyo-night`, `tokyo-night-day`, `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`, `solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`, `rose-pine-dawn`, and `vesper`. Names ignore case, and `_` or a space counts as `-`. `terminal` uses your terminal's ANSI palette. All themes except `kiwa` use [Herdr](https://github.com/herdrdev/herdr)'s palettes, under its Apache-2.0 license.
+
+The sidebar menu's **Theme** item lists the themes and previews each one as you move through it. Enter keeps the highlighted theme and writes `theme` under `[ui]` in your configuration file, adding the table if needed and keeping every other line. Esc or a click outside the list restores the previous theme. A theme set this way survives restarts like any other setting.
+
 ### Pane style
 
 ```toml
@@ -121,7 +133,7 @@ Dragging still works with an explicit width, but the next reload or startup reap
 pane_style = "framed"
 ```
 
-Compact is the default and uses single internal dividers. Framed draws an independent one-cell border around each pane, with a one-cell blank gutter between frames. Only the focused pane's frame is highlighted. Single panes and zoomed panes have no border or gutter. A zoomed tab shows `[Z]` after its name, even when the name is truncated.
+Compact is the default and uses single internal dividers. Framed draws an independent one-cell border around each pane, and neighboring borders touch. Only the focused pane's frame is highlighted. Single panes and zoomed panes have no border. A zoomed tab shows `[Z]` after its name, even when the name is truncated.
 
 The style applies to all tabs in the server. Toggling keeps panes, running programs, focus, and split ratios intact, while resizing pane content. `prefix+f` toggles the pane style by default. Override or disable it under `[bindings]`.
 
@@ -129,7 +141,7 @@ The runtime toggle survives detach and attach. It does not modify the configurat
 
 If any pane cannot fit a framed content area of two columns and one row, the whole tab temporarily uses compact. Framing returns when space permits. This fallback does not change the requested style or split ratios. Split and resize limits remain the compact limits.
 
-In framed style, frame cells and gutters do not send clicks, motion, or wheel events to programs. A release still completes a program's earlier content press. The facing borders and their gutter support divider dragging. Right-clicking a frame opens that pane's menu. A gutter opens the nearest pane's menu, with ties going to the topmost, then leftmost pane.
+In framed style, frame cells do not send clicks, motion, or wheel events to programs. A release still completes a program's earlier content press. Either of two facing borders supports divider dragging. Right-clicking a frame opens that pane's menu.
 
 ### Scrollback
 

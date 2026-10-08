@@ -115,7 +115,7 @@ fn leftPress(s: *State, ev: input.Mouse, target: Target) Effect {
         .sidebar_new => .new_workspace,
         .workspace_directory => .workspace_directory,
         .application_menu => blk: {
-            s.* = .{ .menu_open = .{ .subject = .application, .x = 0, .y = ev.y -| 5 } };
+            s.* = .{ .menu_open = .{ .subject = .application, .x = 0, .y = ev.y -| 6 } };
             break :blk .open_menu;
         },
         .sidebar_toggle => .toggle_sidebar,

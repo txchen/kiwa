@@ -19,7 +19,8 @@
 # "prefix+x" = "none" # Disable a default binding.
 
 [ui]
-# pane_style = "compact" # "framed" adds independent borders and blank gutters.
+# pane_style = "compact" # "framed" draws a border around each pane.
+# theme = "kiwa" # Or pick one from the sidebar menu's Theme item. See kiwa config guide.
 # sidebar_width = 26 # Columns, 12..200. Omit to preserve the saved drag width.
 
 [terminal]

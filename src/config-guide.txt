@@ -56,7 +56,7 @@ split_right, split_down, focus_left, focus_right, focus_up, focus_down,
 next_pane, prev_pane, close_pane, rotate_panes, zoom, resize_mode,
 new_workspace, close_workspace, rename_workspace, next_workspace,
 prev_workspace, change_workspace_directory, navigate, toggle_sidebar,
-copy_mode, help, reload_config, toggle_pane_style, detach.
+copy_mode, help, reload_config, toggle_pane_style, choose_theme, detach.
 "none" disables the chord. Closing actions retain their usual confirmation.
 
 [ui]
@@ -68,11 +68,20 @@ it. Narrow terminals clamp or collapse the sidebar to leave room for panes.
 
 pane_style = "compact"
 Values: "compact" or "framed". Compact keeps single internal dividers.
-Framed gives each pane its own border and leaves a one-cell blank gutter.
+Framed gives each pane its own border; neighboring borders touch.
 Single panes and zoomed panes have no border. A zoomed tab shows [Z] after
 its name. Narrow layouts use compact until every pane fits a frame.
 
-The style applies to every tab in this server. Prefix+f toggles it by default.
+theme = "kiwa"
+Colors of the sidebar, tab row, pane borders, menus, and dialogs. Pane
+content keeps its program's colors. Built-in themes: kiwa (default),
+catppuccin, catppuccin-latte, terminal, tokyo-night, tokyo-night-day,
+dracula, nord, gruvbox, gruvbox-light, one-dark, one-light, solarized,
+solarized-light, kanagawa, kanagawa-lotus, rose-pine, rose-pine-dawn, vesper.
+Names ignore case, and _ or a space means -. The sidebar menu's Theme item
+previews each theme and writes the chosen one here, keeping other lines.
+
+The pane style applies to every tab in this server. Prefix+f toggles it by default.
 Override or disable that chord under [bindings]. Toggling preserves panes and
 split ratios and resizes pane content.
 The toggle survives detach but does not modify the file or survive a restart.
