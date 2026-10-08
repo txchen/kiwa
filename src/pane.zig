@@ -50,6 +50,9 @@ pub const Pane = struct {
     /// written to the PTY yet. Until it has, it may still be between
     /// `fork` and its `chdir`, where it is in the server's directory.
     start_dir: []u8,
+    /// The basename of the shell this pane started, to tell it from a
+    /// program that replaced it with `exec`.
+    shell_name: []u8,
     wrote: bool = false,
     /// The OSC 52 sequence for the program's last clipboard write, waiting
     /// to go to the outer terminal; empty when there is none.
@@ -80,10 +83,13 @@ pub const Pane = struct {
             }),
             .stream = undefined,
             .start_dir = &.{},
+            .shell_name = &.{},
         };
         errdefer p.terminal.deinit(gpa);
         p.start_dir = try gpa.dupe(u8, opts.cwd);
         errdefer gpa.free(p.start_dir);
+        p.shell_name = try gpa.dupe(u8, std.fs.path.basename(opts.shell));
+        errdefer gpa.free(p.shell_name);
 
         var handler: Handler = .init(&p.terminal);
         handler.effects.write_pty = &writePty;
@@ -123,6 +129,7 @@ pub const Pane = struct {
         self.stream.deinit();
         self.terminal.deinit(self.gpa);
         self.gpa.free(self.start_dir);
+        self.gpa.free(self.shell_name);
         self.gpa.destroy(self);
     }
 
@@ -169,8 +176,18 @@ pub const Pane = struct {
     /// closing the pane would interrupt. Null when the shell is in front.
     pub fn busy(self: *const Pane, buf: *Comm) ?[]const u8 {
         const pgrp = self.foregroundGroup() orelse return null;
-        if (pgrp == self.pid) return null;
-        return sys.processName(pgrp, buf) orelse "a program";
+        const name = sys.processName(pgrp, buf) orelse return if (pgrp == self.pid) null else "a program";
+        if (pgrp == self.pid and isShell(name, self.shell_name)) return null;
+        return name;
+    }
+
+    /// Above the largest paste, so that one paste still goes through whole.
+    pub const pending_limit = input.default_paste_limit + 1024 * 1024;
+
+    fn full(self: *const Pane) bool {
+        if (self.pending.items.len < pending_limit) return false;
+        std.log.warn("pane {d} is not reading its input; dropped a write", .{@intFromEnum(self.id)});
+        return true;
     }
 
     /// Hangs up the child's process group.
@@ -179,7 +196,10 @@ pub const Pane = struct {
     }
 
     /// Writes to the PTY without blocking and queues what it does not accept.
+    /// Drops `bytes` while the program has left `pending_limit` unread, so
+    /// that a program that stops reading cannot grow the server without bound.
     pub fn write(self: *Pane, bytes: []const u8) !void {
+        if (self.full()) return;
         if (self.pending.items.len == 0) {
             const n = sys.write(self.fd, bytes) catch |e| switch (e) {
                 error.WouldBlock => 0,
@@ -195,6 +215,7 @@ pub const Pane = struct {
     /// Encodes a decoded input event for this pane's terminal modes and
     /// writes it without blocking.
     pub fn send(self: *Pane, ev: input.Event) !void {
+        if (self.full()) return;
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.pending);
         const encoded = encode.event(&aw.writer, &self.terminal, ev);
         self.pending = aw.toArrayList();
@@ -210,6 +231,7 @@ pub const Pane = struct {
     /// Encodes a mouse report at pane-local cell (`x`, `y`) for the
     /// program's mouse modes and writes it without blocking.
     pub fn sendMouse(self: *Pane, ev: input.Mouse, x: i32, y: i32) !void {
+        if (self.full()) return;
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &self.pending);
         const encoded = encode.mouse(&aw.writer, &self.terminal, ev, x, y);
         self.pending = aw.toArrayList();
@@ -365,6 +387,19 @@ pub fn appendOsc52(gpa: std.mem.Allocator, out: *std.ArrayList(u8), target: u8, 
     _ = b64.encode(out.unusedCapacitySlice()[0..len], data);
     out.items.len += len;
     out.appendSliceAssumeCapacity(tail);
+}
+
+/// Whether process name `name` is shell `shell`. The kernel may truncate
+/// a process name, so a long one matches a prefix.
+fn isShell(name: []const u8, shell: []const u8) bool {
+    if (std.mem.eql(u8, name, shell)) return true;
+    return name.len >= 15 and std.mem.startsWith(u8, shell, name);
+}
+
+test "a shell is known by its name, even truncated" {
+    try std.testing.expect(isShell("zsh", "zsh"));
+    try std.testing.expect(!isShell("vim", "zsh"));
+    try std.testing.expect(isShell("a-very-long-she", "a-very-long-shell-name"));
 }
 
 /// The path in an OSC 7 report, `file://host/path` with percent escapes,
