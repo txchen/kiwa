@@ -23,7 +23,7 @@ jobs:
       - name: Install end-to-end test dependencies
         run: brew install htop fzf
       - name: Build and run unit and end-to-end tests
-        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=${{ matrix.optimize }}
+        run: mise exec -- zig build test e2e -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=${{ matrix.optimize }} -Dfuzz=100
       - name: Build release binary
         if: matrix.optimize == 'ReleaseFast'
         run: mise exec -- zig build -Dtarget=aarch64-macos.13.0 -Dcpu=baseline -Doptimize=ReleaseFast

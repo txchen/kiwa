@@ -3487,23 +3487,66 @@ pub fn main(init: std.process.Init) !u8 {
         os.removePaneShell(shell);
         gpa.free(shell);
     }
-    var passed: usize = 0;
-    var failed: usize = 0;
+    // Every case has its own socket, state, and directories, so functional
+    // cases run in parallel. Perf cases measure the machine and run alone.
+    const jobs: usize = if (kind == .perf) 1 else if (init.environ_map.get("KIWA_E2E_JOBS")) |v|
+        @max(1, std.fmt.parseInt(usize, v, 10) catch 1)
+    else
+        std.Thread.getCpuCount() catch 1;
+    var running: std.AutoHashMapUnmanaged(sys.pid_t, usize) = .empty;
+    defer running.deinit(gpa);
+    var tally: Tally = .{};
     for (cases, 0..) |case, i| {
         if (case.kind != kind) continue;
         if (filter) |f| if (std.mem.indexOf(u8, case.name, f) == null) continue;
-        // A hung case would otherwise hold CI until its job times out.
-        running_case = case.name;
-        _ = alarm(case_timeout_s);
-        const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, shell, i, case.run) catch |e| blk: {
-            std.debug.print("    error: {t}\n", .{e});
-            break :blk false;
-        };
-        std.debug.print("{s} {s}\n", .{ if (ok) "PASS" else "FAIL", case.name });
-        if (ok) passed += 1 else failed += 1;
+        while (running.count() >= jobs) try reapCase(gpa, io, &running, &tally);
+        const log = try caseLog(gpa, i);
+        defer gpa.free(log);
+        const pid = sys.fork();
+        if (pid < 0) return error.ForkFailed;
+        if (pid == 0) {
+            const fd = sys.open(log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600) catch sys._exit(2);
+            _ = libc.dup2(fd, 1);
+            _ = libc.dup2(fd, 2);
+            // A hung case would otherwise hold CI until its job times out.
+            running_case = case.name;
+            _ = alarm(case_timeout_s);
+            const ok = runCase(gpa, io, init.environ_map, kiwa, skewed, shell, i, case.run) catch |e| blk: {
+                std.debug.print("    error: {t}\n", .{e});
+                break :blk false;
+            };
+            sys._exit(if (ok) 0 else 1);
+        }
+        try running.put(gpa, pid, i);
     }
-    std.debug.print("{d} passed, {d} failed\n", .{ passed, failed });
-    return if (failed == 0) 0 else 1;
+    while (running.count() > 0) try reapCase(gpa, io, &running, &tally);
+    std.debug.print("{d} passed, {d} failed\n", .{ tally.passed, tally.failed });
+    return if (tally.failed == 0) 0 else 1;
+}
+
+const Tally = struct { passed: usize = 0, failed: usize = 0 };
+
+/// Where case `index` writes its output, so that parallel cases do not interleave.
+fn caseLog(gpa: std.mem.Allocator, index: usize) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(gpa, "/tmp/kiwa-e2e-{d}-{d}.log", .{ sys.getpid(), index }, 0);
+}
+
+/// Waits for one running case, then prints its output and result.
+fn reapCase(gpa: std.mem.Allocator, io: std.Io, running: *std.AutoHashMapUnmanaged(sys.pid_t, usize), tally: *Tally) !void {
+    var status: c_int = 0;
+    const pid = libc.waitpid(-1, &status, 0);
+    if (pid < 0) return error.WaitFailed;
+    const index = (running.fetchRemove(pid) orelse return).value;
+    const log = try caseLog(gpa, index);
+    defer gpa.free(log);
+    if (std.Io.Dir.cwd().readFileAlloc(io, log, gpa, .limited(16 * 1024 * 1024))) |text| {
+        defer gpa.free(text);
+        std.debug.print("{s}", .{text});
+    } else |_| {}
+    std.Io.Dir.cwd().deleteFile(io, log) catch {};
+    const ok = libc.W.IFEXITED(@bitCast(status)) and libc.W.EXITSTATUS(@bitCast(status)) == 0;
+    std.debug.print("{s} {s}\n", .{ if (ok) "PASS" else "FAIL", cases[index].name });
+    if (ok) tally.passed += 1 else tally.failed += 1;
 }
 
 fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map, kiwa: [:0]const u8, skewed: [:0]const u8, shell: []const u8, index: usize, run: *const fn (*Ctx) anyerror!void) !bool {

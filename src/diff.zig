@@ -480,6 +480,7 @@ fn writeCodepoint(w: *Writer, cp: u21) Writer.Error!void {
 }
 
 const testing = std.testing;
+const fuzz = @import("fuzz.zig");
 const alloc = testing.allocator;
 
 const Fixture = struct {
@@ -871,7 +872,7 @@ test "random frame pairs round-trip through a ghostty-vt outer terminal" {
     var outer: Outer = undefined;
     try outer.init(2, 1);
     defer outer.deinit();
-    for (0..2000) |i| {
+    for (0..fuzz.runs(2000)) |i| {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 1 + r.uintLessThan(u16, 5);
         try f.init(cols, rows);
@@ -898,7 +899,7 @@ test "a row's floor never exceeds the bytes its repaint writes" {
     defer old.deinit(alloc);
     var new: Frame = .{};
     defer new.deinit(alloc);
-    for (0..3000) |_| {
+    for (0..fuzz.runs(3000)) |_| {
         const cols = 1 + r.uintLessThan(u16, 20);
         try old.resize(alloc, cols, 1);
         try new.resize(alloc, cols, 1);
@@ -1050,7 +1051,7 @@ test "random writes diffed by their dirty rows send what a full-frame diff sends
     try outer.init(2, 1);
     defer outer.deinit();
     var scrolls: [1]Scroll = undefined;
-    for (0..2000) |i| {
+    for (0..fuzz.runs(2000)) |i| {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 1 + r.uintLessThan(u16, 6);
         try f.init(cols, rows);
@@ -1099,7 +1100,7 @@ test "reading a frame's rows through a scroll matches scrolling a copy in place"
     var copy: Frame = .{};
     defer copy.deinit(alloc);
     var buf: [16]Cell = undefined;
-    for (0..500) |_| {
+    for (0..fuzz.runs(500)) |_| {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 2 + r.uintLessThan(u16, 6);
         for ([_]*Frame{ &src, &copy }) |f| try f.resize(alloc, cols, rows);
@@ -1171,7 +1172,7 @@ test "random scrolled frames round-trip through a ghostty-vt outer terminal" {
     try outer.init(2, 2);
     defer outer.deinit();
     var scrolls: [2]Scroll = undefined;
-    for (0..2000) |i| {
+    for (0..fuzz.runs(2000)) |i| {
         const cols = 2 + r.uintLessThan(u16, 14);
         const rows = 2 + r.uintLessThan(u16, 6);
         try f.init(cols, rows);

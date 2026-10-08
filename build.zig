@@ -8,8 +8,9 @@ const ghostty_commit = commit: {
     break :commit url[start..end];
 };
 
-fn kiwaOptions(b: *std.Build, protocol_skew: u16) *std.Build.Step.Options {
+fn kiwaOptions(b: *std.Build, protocol_skew: u16, fuzz_percent: u8) *std.Build.Step.Options {
     const options = b.addOptions();
+    options.addOption(u8, "fuzz_percent", fuzz_percent);
     options.addOption([]const u8, "version", zon.version);
     options.addOption([]const u8, "ghostty_commit", ghostty_commit);
     options.addOption(u16, "protocol_skew", protocol_skew);
@@ -37,11 +38,12 @@ pub fn build(b: *std.Build) void {
     const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize });
     const vt = ghostty.module("ghostty-vt");
 
-    const options = kiwaOptions(b, 0);
+    const fuzz = b.option(u8, "fuzz", "Percent of each randomized unit test's cases to run (default 10; CI runs 100)") orelse 10;
+    const options = kiwaOptions(b, 0, fuzz);
     const mod = kiwaModule(b, target, optimize, vt, options);
     const exe = b.addExecutable(.{ .name = "kiwa", .root_module = mod });
     b.installArtifact(exe);
-    const skewed_options = kiwaOptions(b, 1);
+    const skewed_options = kiwaOptions(b, 1, fuzz);
     const skewed_exe = b.addExecutable(.{
         .name = "kiwa-skewed",
         .root_module = kiwaModule(b, target, optimize, vt, skewed_options),

@@ -118,6 +118,14 @@ overflow. Their results depend on the machine, so CI does not run them.
 Run them before a change that could affect the event loop or the renderer.
 Both steps take a name filter, as in `zig build e2e -- vim`.
 
+Functional cases run in parallel, one per CPU by default, because each has
+its own socket, state, and directories. Set `KIWA_E2E_JOBS=1` to run them
+one at a time. Perf cases always run one at a time.
+
+The randomized unit tests run a tenth of their cases by default, so a local
+`zig build test` stays fast. CI runs all of them with `-Dfuzz=100`; pass the
+same flag locally after changing the frame diff or the renderer.
+
 The end-to-end tests require git, Python 3, less, Vim, htop, fzf, and ncurses
 utilities/terminfo (CI installs these explicitly).
 

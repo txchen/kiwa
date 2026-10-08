@@ -500,6 +500,7 @@ pub fn paneCursor(rect: Rect, rs: *const vt.RenderState, shape_is_default: bool)
 }
 
 const testing = std.testing;
+const fuzz = @import("fuzz.zig");
 
 test "a full grapheme table hands out no id instead of wrapping" {
     var g: Graphemes = .{};
@@ -779,7 +780,8 @@ test "random output composed by shift and carried rows matches composing every r
     try f.resize(gpa, 10, 6);
     var shifts: usize = 0;
     var carried: usize = 0;
-    for (0..3000) |i| {
+    const runs = fuzz.runs(3000);
+    for (0..runs) |i| {
         var buf: [64]u8 = undefined;
         const op: []const u8 = switch (r.uintLessThan(u8, 10)) {
             0...3 => try std.fmt.bufPrint(&buf, "{c}{c}\r\n", .{ r.intRangeAtMost(u8, 'a', 'z'), r.intRangeAtMost(u8, 'a', 'z') }),
@@ -812,7 +814,7 @@ test "random output composed by shift and carried rows matches composing every r
             return e;
         };
     }
-    try testing.expect(shifts > 200 and carried > shifts);
+    try testing.expect(shifts > runs / 15 and carried > shifts);
 }
 
 test "drawn rows tell how far a pane scrolled" {

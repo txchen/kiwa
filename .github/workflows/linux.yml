@@ -46,7 +46,7 @@ jobs:
         run: >-
           mise exec -- zig build test e2e
           -Dtarget=${{ matrix.platform.target }}
-          -Dcpu=baseline -Doptimize=${{ matrix.optimize }}
+          -Dcpu=baseline -Doptimize=${{ matrix.optimize }} -Dfuzz=100
       - name: Build release binary
         if: matrix.optimize == 'ReleaseFast'
         run: >-
