@@ -65,6 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const resolved = paths.resolve(init.arena.allocator(), .fromMap(init.environ_map)) catch |e| switch (e) {
         error.NoHome => return fail("kiwa: set HOME or KIWA_STATE_DIR\n"),
+        error.RelativePath => return fail("kiwa: HOME, KIWA_SOCKET, and KIWA_STATE_DIR must be absolute paths\n"),
         else => return e,
     };
     if (cmd.len == 0) {

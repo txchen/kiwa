@@ -16,13 +16,19 @@ pub const Env = struct {
         return .{
             .kiwa_socket = nonEmpty(map.get("KIWA_SOCKET")),
             .kiwa_state_dir = nonEmpty(map.get("KIWA_STATE_DIR")),
-            .xdg_runtime_dir = nonEmpty(map.get("XDG_RUNTIME_DIR")),
-            .xdg_state_home = nonEmpty(map.get("XDG_STATE_HOME")),
+            // The XDG spec says to ignore relative values.
+            .xdg_runtime_dir = absolute(map.get("XDG_RUNTIME_DIR")),
+            .xdg_state_home = absolute(map.get("XDG_STATE_HOME")),
             .home = nonEmpty(map.get("HOME")),
             .uid = sys.getuid(),
         };
     }
 };
+
+fn absolute(s: ?[]const u8) ?[]const u8 {
+    const v = nonEmpty(s) orelse return null;
+    return if (v[0] == '/') v else null;
+}
 
 fn nonEmpty(s: ?[]const u8) ?[]const u8 {
     const v = s orelse return null;
@@ -38,9 +44,13 @@ pub const Paths = struct {
     log: [:0]const u8,
 };
 
-pub const ResolveError = error{ NoHome, OutOfMemory };
+pub const ResolveError = error{ NoHome, RelativePath, OutOfMemory };
 
+/// The server runs in `/`, so every path must be absolute.
 pub fn resolve(arena: std.mem.Allocator, env: Env) ResolveError!Paths {
+    for ([_]?[]const u8{ env.kiwa_socket, env.kiwa_state_dir, env.home }) |p| {
+        if (p) |v| if (v[0] != '/') return error.RelativePath;
+    }
     var socket_dir: ?[:0]const u8 = null;
     const socket: [:0]const u8 = if (env.kiwa_socket) |s|
         try arena.dupeZ(u8, s)
@@ -148,6 +158,13 @@ test "KIWA_SOCKET and KIWA_STATE_DIR override both paths" {
     try testing.expect(p.socket_dir == null);
     try testing.expectEqualStrings("/t/state", p.state_dir);
     try testing.expectEqualStrings("/t/state/server.log", p.log);
+}
+
+test "relative overrides are refused" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(error.RelativePath, resolve(arena.allocator(), .{ .kiwa_state_dir = "state", .uid = 1 }));
+    try testing.expectError(error.RelativePath, resolve(arena.allocator(), .{ .kiwa_socket = "x.sock", .home = "/h", .uid = 1 }));
 }
 
 test "no state directory without HOME or an override" {
