@@ -728,7 +728,7 @@ fn resizeReachesPane(ctx: *Ctx) !void {
     _ = try o.pump(300);
     try o.send("tput cols; tput lines\r");
     try o.waitLine("64");
-    try o.waitLine("28");
+    try o.waitLine("29");
 }
 
 fn takeover(ctx: *Ctx) !void {
@@ -1379,11 +1379,11 @@ fn caseName(ctx: *Ctx) []const u8 {
 
 /// The tab area of an 80x24 outer terminal: right of the 26-column sidebar
 /// and below the tab row.
-const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 22 };
-const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 22 };
-const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 22 };
-const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 11 };
-const right_bottom: Box = .{ .x = 53, .y = 12, .cols = 27, .rows = 11 };
+const area: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
+const left_half: Box = .{ .x = 26, .y = 1, .cols = 27, .rows = 23 };
+const right_half: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
+const right_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 12 };
+const right_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
 
 fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
@@ -1447,7 +1447,7 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try o.waitText("left11");
     try o.send("clear; tput cols; tput lines\r");
     try o.waitLine("54");
-    try o.waitLine("22");
+    try o.waitLine("23");
     want.clearRetainingCapacity();
     try want.print(ctx.gpa, "1: {s} (active)\n  1: ~, 1 pane (active)\n  2: two, 1 pane\n2: two\n  1: two, 1 pane\n  2: two, 1 pane (active)\n", .{name});
     try ctx.waitList(want.items);
@@ -1477,8 +1477,8 @@ fn resizeModeMovesTheDivider(ctx: *Ctx) !void {
     // An unambiguous escape: a raw ESC followed at once by typing would read as alt+c.
     try o.waitKitty();
     try o.press(named(.escape, .{}));
-    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 22 };
-    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 22 };
+    const resized_left: Box = .{ .x = 26, .y = 1, .cols = 22, .rows = 23 };
+    const resized_right: Box = .{ .x = 48, .y = 1, .cols = 32, .rows = 23 };
     try waitBoxes(o, &.{ resized_left, resized_right });
     try o.send("clear; tput cols\r");
     try waitTextIn(o, "32", resized_right);
@@ -1596,8 +1596,8 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     try o.send("mkdir sub && cd sub && echo in-$(basename $PWD)\r");
     try o.waitLine("in-sub");
     try prefixed(o, "v");
-    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 22 };
-    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 22 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 47, .rows = 23 };
+    const right: Box = .{ .x = 73, .y = 1, .cols = 47, .rows = 23 };
     try waitBoxes(o, &.{ left, right });
     try o.send("clear; pwd\r");
     const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
@@ -1880,8 +1880,8 @@ fn freshAttachShowsTheChrome(ctx: *Ctx) !void {
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 0, 0), " Workspaces "), "the sidebar header is on the top row");
     try expect(std.mem.startsWith(u8, try g.rowText(&buf, 1, 0), " 1 ws "), "workspace 1 is listed under the header");
     try expect(g.highlighted(0, 1) and g.highlighted(24, 1), "workspace 1 is highlighted across the sidebar");
-    const controls = g.findIn("+ new", .{ .x = 0, .y = 1, .cols = 25, .rows = 22 }) orelse return error.MissingSidebarControl;
-    const host = g.findIn("Host", .{ .x = 0, .y = 1, .cols = 25, .rows = 22 }) orelse return error.MissingSidebarDetails;
+    const controls = g.findIn("+ new", .{ .x = 0, .y = 1, .cols = 25, .rows = 23 }) orelse return error.MissingSidebarControl;
+    const host = g.findIn("Host", .{ .x = 0, .y = 1, .cols = 25, .rows = 23 }) orelse return error.MissingSidebarDetails;
     try expect(controls[1] < host[1], "new is above the information section");
     try expect(g.cp(24, controls[1]) == 0x00ab, "the collapse control sits before the divider");
     for (0..24) |y| try expect(g.cp(25, y) == 0x2502, "the divider runs down the sidebar's right edge");
@@ -2119,18 +2119,18 @@ fn dragMovesTheBorder(ctx: *Ctx) !void {
     try prefixed(o, "v");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.drag(.{ left_half.x + left_half.cols - 1, 10 }, .{ 42, 12 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 22 };
-    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 22 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 17, .rows = 23 };
+    const right: Box = .{ .x = 43, .y = 1, .cols = 37, .rows = 23 };
     try waitBoxes(o, &.{ left, right });
     try waitAccent(o, &.{ right, left });
     try o.send("clear; tput cols\r");
     try waitTextIn(o, "37", right);
     // A second drag on the shared divider stops at the minimum content size.
     try o.drag(.{ right.x - 1, 3 }, .{ 2, 3 });
-    const narrow: Box = .{ .x = 26, .y = 1, .cols = 3, .rows = 22 };
-    try waitBoxes(o, &.{ narrow, .{ .x = 29, .y = 1, .cols = 51, .rows = 22 } });
+    const narrow: Box = .{ .x = 26, .y = 1, .cols = 3, .rows = 23 };
+    try waitBoxes(o, &.{ narrow, .{ .x = 29, .y = 1, .cols = 51, .rows = 23 } });
     try o.send("clear; tput cols\r");
-    try waitTextIn(o, "51", .{ .x = 29, .y = 1, .cols = 51, .rows = 22 });
+    try waitTextIn(o, "51", .{ .x = 29, .y = 1, .cols = 51, .rows = 23 });
     try prefixed(o, "h");
     try o.send("clear; tput cols\r");
     try waitTextIn(o, "2", narrow);
@@ -2140,14 +2140,22 @@ fn defaultShortcutsAndFooter(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.waitKitty();
     try expect(!try o.contains("ctrl+b ? help"), "normal mode has no persistent help hint");
+    const bottom_row: Box = .{ .x = 26, .y = 23, .cols = 54, .rows = 1 };
+    try o.send("clear; i=1; while [ $i -le 30 ]; do echo LINE-$i; i=$((i+1)); done; printf LAST-ROW\r");
+    try waitTextIn(o, "LAST-ROW", bottom_row);
     try o.send("\x02");
     try o.waitText(" PREFIX ");
     {
         var g: Grid = try .load(o);
         defer g.deinit();
         try expect(g.findIn("1 ~", .{ .x = 26, .y = 0, .cols = 54, .rows = 1 }) != null, "prefix keeps the tab row visible");
-        try expect(g.findIn("PREFIX", .{ .x = 26, .y = 23, .cols = 54, .rows = 1 }) != null, "prefix help is on the bottom row");
+        try expect(g.findIn("PREFIX", bottom_row) != null, "prefix help covers the bottom row");
+        try expect(g.findIn("LAST-ROW", bottom_row) == null, "the help hides the pane's bottom row while it shows");
     }
+    try o.send("\x1b");
+    try waitTextIn(o, "LAST-ROW", bottom_row);
+    try o.send("\x02");
+    try o.waitText(" PREFIX ");
     try o.send("\\");
     try waitBoxes(o, &.{ left_half, right_half });
     try o.send("clear; echo RIGHT-$((20+2))\r");
@@ -2275,10 +2283,10 @@ fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
 }
 
 const framed_config = "[ui]\npane_style = 'framed'\n";
-const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 22 };
-const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 22 };
-const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 10 };
-const framed_bottom: Box = .{ .x = 53, .y = 12, .cols = 27, .rows = 11 };
+const framed_left: Box = .{ .x = 26, .y = 1, .cols = 26, .rows = 23 };
+const framed_right: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 23 };
+const framed_top: Box = .{ .x = 53, .y = 1, .cols = 27, .rows = 11 };
+const framed_bottom: Box = .{ .x = 53, .y = 13, .cols = 27, .rows = 11 };
 
 fn framesDrawn(o: *Outer, boxes: []const Box) !bool {
     var g: Grid = try .load(o);
@@ -2314,7 +2322,7 @@ fn paneStyleLifecycle(ctx: *Ctx) !void {
     try prefixed(o, "f");
     try waitFrames(o, &.{ framed_left, framed_right });
     try o.send("printf '\\033[0m'; stty size; test \"$$\" = \"$(cat pane.pid)\" && echo ID-$PANE_TOKEN\r");
-    try o.waitText("20 25");
+    try o.waitText("21 25");
     try o.waitText("ID-kept");
     try prefixed(o, "c");
     try waitNoBorders(o);
@@ -2358,13 +2366,13 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.mouseReport(0, 65, 11, 'M');
     try o.mouseReport(32, 65, 2, 'M');
-    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 2 }, .{ .x = 53, .y = 3, .cols = 27, .rows = 20 } });
+    try waitBoxes(o, &.{ left_half, .{ .x = 53, .y = 1, .cols = 27, .rows = 3 }, .{ .x = 53, .y = 4, .cols = 27, .rows = 20 } });
     try o.mouseReport(32, 65, 11, 'M');
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.mouseReport(0, 65, 11, 'm');
     try o.mouseReport(0, 53, 5, 'M');
     try o.mouseReport(32, 77, 5, 'M');
-    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 51, .rows = 22 }, .{ .x = 77, .y = 1, .cols = 3, .rows = 11 }, .{ .x = 77, .y = 12, .cols = 3, .rows = 11 } });
+    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 51, .rows = 23 }, .{ .x = 77, .y = 1, .cols = 3, .rows = 12 }, .{ .x = 77, .y = 13, .cols = 3, .rows = 11 } });
     try o.mouseReport(32, 53, 5, 'M');
     try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
     try o.mouseReport(0, 53, 5, 'm');
@@ -2381,9 +2389,9 @@ fn paneStyleNestedDrag(ctx: *Ctx) !void {
     try o.mouseReport(0, 52, 5, 'M');
     try o.resize(100, 24);
     const wider = [_]Box{
-        .{ .x = 26, .y = 1, .cols = 35, .rows = 22 },
-        .{ .x = 62, .y = 1, .cols = 38, .rows = 10 },
-        .{ .x = 62, .y = 12, .cols = 38, .rows = 11 },
+        .{ .x = 26, .y = 1, .cols = 35, .rows = 23 },
+        .{ .x = 62, .y = 1, .cols = 38, .rows = 11 },
+        .{ .x = 62, .y = 13, .cols = 38, .rows = 11 },
     };
     try waitFrames(o, &wider);
     try o.mouseReport(32, 70, 5, 'M');
@@ -2638,18 +2646,18 @@ fn sidebarDragPersists(ctx: *Ctx) !void {
 fn horizontalSplitUsesOneRow(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "-");
-    const top: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 11 };
-    const bottom: Box = .{ .x = 26, .y = 12, .cols = 54, .rows = 11 };
+    const top: Box = .{ .x = 26, .y = 1, .cols = 54, .rows = 12 };
+    const bottom: Box = .{ .x = 26, .y = 13, .cols = 54, .rows = 11 };
     try waitBoxes(o, &.{ top, bottom });
     try o.send("clear; tput lines\r");
     try waitTextIn(o, "11", bottom);
     try o.press(char('k', .{ .alt = true }));
     try o.send("clear; tput lines\r");
-    try waitTextIn(o, "10", top);
+    try waitTextIn(o, "11", top);
     var g: Grid = try .load(o);
     defer g.deinit();
-    for (26..80) |x| try expect(g.cp(x, 11) == 0x2500, "one shared horizontal divider");
-    try expect(g.cp(26, 1) != 0x250c and g.cp(79, 22) != 0x2518, "no outer pane borders");
+    for (26..80) |x| try expect(g.cp(x, 12) == 0x2500, "one shared horizontal divider");
+    try expect(g.cp(26, 1) != 0x250c and g.cp(79, 23) != 0x2518, "no outer pane borders");
 }
 
 fn wheelScrollsTheScrollback(ctx: *Ctx) !void {
@@ -3159,20 +3167,20 @@ fn restoreRebuildsTheSession(ctx: *Ctx) !void {
     try o.waitKitty();
     try o.send("mkdir -p one/left one/top one/bottom two/x && cd one/left && echo in-$(basename $PWD)\r");
     try o.waitLine("in-left");
-    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 28 };
-    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 28 };
+    const full: Box = .{ .x = 26, .y = 1, .cols = 134, .rows = 29 };
+    const half: Box = .{ .x = 93, .y = 1, .cols = 67, .rows = 29 };
     try prefixed(o, "v");
-    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 28 }, half });
+    try waitBoxes(o, &.{ .{ .x = 26, .y = 1, .cols = 67, .rows = 29 }, half });
     try o.send("cd ../top && echo in-$(basename $PWD)\r");
     try waitTextIn(o, "in-top", half);
     try prefixed(o, "-");
-    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 14 }, .{ .x = 93, .y = 15, .cols = 67, .rows = 14 } });
+    try waitBoxes(o, &.{ .{ .x = 93, .y = 1, .cols = 67, .rows = 15 }, .{ .x = 93, .y = 16, .cols = 67, .rows = 14 } });
     try o.send("cd ../bottom && echo in-$(basename $PWD)\r");
     try o.waitText("in-bottom");
     try o.drag(.{ 92, 5 }, .{ 75, 5 });
-    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 28 };
-    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 14 };
-    const bottom: Box = .{ .x = 76, .y = 15, .cols = 84, .rows = 14 };
+    const left: Box = .{ .x = 26, .y = 1, .cols = 50, .rows = 29 };
+    const top: Box = .{ .x = 76, .y = 1, .cols = 84, .rows = 15 };
+    const bottom: Box = .{ .x = 76, .y = 16, .cols = 84, .rows = 14 };
     try waitBoxes(o, &.{ left, top, bottom });
     try prefixed(o, "k");
     try waitAccent(o, &.{ top, left, bottom });

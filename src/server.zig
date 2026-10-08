@@ -152,6 +152,8 @@ const Conn = struct {
     drawn_menu: ?Menu = null,
     /// Whether `frame` holds a dialog over the panes.
     drawn_dialog: bool = false,
+    /// Whether the last frame showed the mode bar over the panes' bottom row.
+    drawn_bar: bool = false,
     /// The outer window title last sent.
     title: std.ArrayList(u8) = .empty,
 
@@ -1442,9 +1444,14 @@ const Server = struct {
         // Closing or changing a menu uncovers whatever it was drawn over.
         const uncover = c.drawn_menu != null and !std.meta.eql(c.drawn_menu, menu);
         // Closing the help box or a dialog uncovers panes and borders.
-        const uncover_panes = (c.drawn_help and !help) or (c.drawn_dialog and dialog == null);
+        const view = try s.chromeView(c);
+        const bar = view.showsBar();
+        const uncover_panes = (c.drawn_help and !help) or (c.drawn_dialog and dialog == null) or (c.drawn_bar and !bar);
         try s.compose(c, compose_all or uncover or uncover_panes);
-        try s.drawChrome(c, compose_all or uncover);
+        try s.drawChrome(c, view, compose_all or uncover);
+        chrome.drawBar(&c.frame, view);
+        c.drawn_bar = bar;
+        if (bar and c.frame.cursor.y + 1 == c.frame.rows) c.frame.cursor.visible = false;
         if (help) {
             if (s.configuration.keys.len == 0 and std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key)) {
                 chrome.drawHelp(&c.frame, s.tabArea(c.size), c.prefix.help_offset);
@@ -1512,7 +1519,7 @@ const Server = struct {
             const shift = try p.drawn_rows.update(s.gpa, &p.terminal, &p.render);
             var which: frame_mod.Frame.Which = if (same) .changed else .all;
             // A scroll would also move the overlay cells drawn over the pane.
-            const overlaid = c.drawn_menu != null or c.drawn_help or c.drawn_dialog;
+            const overlaid = c.drawn_menu != null or c.drawn_help or c.drawn_dialog or c.drawn_bar;
             if (shift) |n| if (same and !overlaid and p.render.rows == pl.inner.rows) {
                 try c.scrolls.append(s.gpa, .{ .rect = pl.inner, .n = n, .confined = s.geometry.effective == .framed });
                 c.frame.scrollRows(pl.inner, n);
@@ -1562,8 +1569,7 @@ const Server = struct {
 
     /// Redraws the sidebar and the tab row when what they show changed, and
     /// retitles the outer window with them.
-    fn drawChrome(s: *Server, c: *Conn, all: bool) !void {
-        const view = try s.chromeView(c);
+    fn drawChrome(s: *Server, c: *Conn, view: chrome.View, all: bool) !void {
         var h: std.hash.Wyhash = .init(0);
         std.hash.autoHashStrat(&h, view, .Deep);
         const key = h.final();

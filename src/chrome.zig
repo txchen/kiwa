@@ -61,6 +61,15 @@ pub const View = struct {
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
     sidebar_width: u16 = sidebar_cols,
+
+    /// Whether the mode bar shows: in a mode, or with a notice. Otherwise
+    /// the panes own the bottom row.
+    pub fn showsBar(v: View) bool {
+        return switch (v.mode) {
+            .normal, .help => v.notice,
+            else => true,
+        };
+    }
 };
 
 /// Where the chrome and the tab area go in a frame. Modes never change it,
@@ -70,6 +79,8 @@ pub const Geometry = struct {
     /// is too narrow for one.
     sidebar: u16,
     tab_row: bool,
+    /// Whether the frame is tall enough for the mode bar. The bar covers
+    /// the tab area's bottom row only while it shows (`View.showsBar`).
     status_row: bool,
     /// What the active tab's panes own.
     area: Rect,
@@ -92,7 +103,7 @@ pub const Geometry = struct {
             .sidebar = sidebar,
             .tab_row = tab_row,
             .status_row = status_row,
-            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top - @intFromBool(status_row) },
+            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top },
         };
     }
 };
@@ -131,9 +142,15 @@ pub fn draw(f: *Frame, v: View) void {
         cell.style.flags.underline = .single;
         cell.style.underline_color = divider.fg_color;
     }
-    if (!g.status_row) return;
+}
+
+/// Draws the mode bar over the tab area's bottom row while `v` shows it.
+/// Called after the panes are composed, so that it stays on top of them.
+pub fn drawBar(f: *Frame, v: View) void {
+    const g: Geometry = .sized(f.cols, f.rows, v.collapsed, v.sidebar_width);
+    if (!g.status_row or !v.showsBar()) return;
+    f.clearRect(.{ .x = g.sidebar, .y = f.rows - 1, .cols = f.cols - g.sidebar, .rows = 1 });
     const footer = f.rowMut(f.rows - 1)[g.sidebar..];
-    @memset(footer, .blank);
     switch (v.mode) {
         .normal, .help => if (v.notice) {
             _ = put(footer, 1, "Configuration reloaded", plain);
@@ -184,7 +201,7 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         }
         return .none;
     }
-    if (g.status_row and y == rows - 1) return .none;
+    if (g.status_row and v.showsBar() and y == rows - 1) return .none;
     if (!g.tab_row or y != 0) return null;
     const rel = x - g.sidebar;
     var slots: TabSlots = .init(v.tabs, cols - g.sidebar);
@@ -690,6 +707,7 @@ const Screen = struct {
 fn render(cols: u16, rows: u16, v: View) !Screen {
     var s: Screen = try .init(cols, rows);
     draw(&s.f, v);
+    drawBar(&s.f, v);
     return s;
 }
 
@@ -706,10 +724,10 @@ fn isHighlight(c: Cell) bool {
 }
 
 test "geometry: 26 columns at 64 or more, collapsed below or when toggled, and a tab row" {
-    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 94, .rows = 28 }, Geometry.of(120, 30, false).area);
-    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 38, .rows = 22 }, Geometry.of(64, 24, false).area);
-    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 59, .rows = 22 }, Geometry.of(63, 24, false).area);
-    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 116, .rows = 28 }, Geometry.of(120, 30, true).area);
+    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 94, .rows = 29 }, Geometry.of(120, 30, false).area);
+    try testing.expectEqual(Rect{ .x = 26, .y = 1, .cols = 38, .rows = 23 }, Geometry.of(64, 24, false).area);
+    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 59, .rows = 23 }, Geometry.of(63, 24, false).area);
+    try testing.expectEqual(Rect{ .x = 4, .y = 1, .cols = 116, .rows = 29 }, Geometry.of(120, 30, true).area);
     try testing.expectEqual(Rect{ .x = 0, .y = 0, .cols = 5, .rows = 1 }, Geometry.of(5, 1, false).area);
 }
 
@@ -919,7 +937,7 @@ test "key help lists every prefix binding in a box centered over the tab area" {
     };
     try testing.expectEqual(prefix.help.len + 2, bottom - top.? + 1);
     try testing.expect(left - g.area.x == s.f.cols - 1 - right or left - g.area.x + 1 == s.f.cols - 1 - right);
-    try testing.expect(top.? - g.area.y == s.f.rows - 2 - bottom or top.? - g.area.y + 1 == s.f.rows - 2 - bottom);
+    try testing.expect(top.? - g.area.y == s.f.rows - 1 - bottom or top.? - g.area.y + 1 == s.f.rows - 1 - bottom);
     // The tab row stays a tab row under the help box.
     try testing.expect(std.mem.startsWith(u8, got, " Workspaces              │ 1 sh"));
 }
@@ -967,7 +985,11 @@ test "clicks land on the workspace, tab, or button drawn there" {
     try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 26 + 16, 0));
     try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 120, 6, 1, 4));
     try testing.expectEqual(null, hit(v, 120, 6, 26, 1));
-    try testing.expectEqual(Hit.none, hit(v, 120, 6, 119, 5).?);
+    // The bottom row is the panes' unless the mode bar covers it.
+    try testing.expectEqual(null, hit(v, 120, 6, 119, 5));
+    var armed = v;
+    armed.mode = .prefix;
+    try testing.expectEqual(Hit.none, hit(armed, 120, 6, 119, 5).?);
 }
 
 test "a collapsed sidebar hits by row, and its footer toggles" {
@@ -1053,7 +1075,7 @@ test "resized sidebar draws and hits the same divider and preserves terminal spa
     defer s.deinit();
     try testing.expectEqual(@as(u21, 0x2502), s.at(37, 10).cp);
     try testing.expectEqual(Hit.resize_sidebar, hit(v, 100, 24, 37, 10).?);
-    try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 22 }, Geometry.sized(100, 24, false, 38).area);
+    try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 23 }, Geometry.sized(100, 24, false, 38).area);
     try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500).sidebar);
     try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38).sidebar);
 }
@@ -1148,5 +1170,5 @@ test "the tab separator uses the sidebar divider color without consuming a pane 
     }
     const geometry = Geometry.of(80, 24, false);
     try testing.expectEqual(1, geometry.area.y);
-    try testing.expectEqual(22, geometry.area.rows);
+    try testing.expectEqual(23, geometry.area.rows);
 }
