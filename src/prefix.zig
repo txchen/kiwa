@@ -23,6 +23,8 @@ pub const Action = union(enum) {
     resize_mode,
     next_tab,
     prev_tab,
+    move_tab_next,
+    move_tab_prev,
     /// Zero-based.
     tab: u8,
     rename_tab,
@@ -156,6 +158,8 @@ fn digitBindings() []const Binding {
 const direct_bindings = [_]Binding{
     .{ .trigger = .{ .code = .{ .char = 'h' }, .mods = .{ .alt = true } }, .action = .prev_tab, .help = .{ .keys = "alt+h / l", .text = "previous / next tab" } },
     .{ .trigger = .{ .code = .{ .char = 'l' }, .mods = .{ .alt = true } }, .action = .next_tab },
+    .{ .trigger = .{ .code = .{ .char = 'h' }, .mods = .{ .alt = true, .shift = true } }, .action = .move_tab_prev, .help = .{ .keys = "alt+shift+h / l", .text = "move the tab left / right" } },
+    .{ .trigger = .{ .code = .{ .char = 'l' }, .mods = .{ .alt = true, .shift = true } }, .action = .move_tab_next },
     .{ .trigger = .{ .code = .{ .char = 'j' }, .mods = .{ .alt = true } }, .action = .next_pane, .help = .{ .keys = "alt+j / k", .text = "next / previous pane" } },
     .{ .trigger = .{ .code = .{ .char = 'k' }, .mods = .{ .alt = true } }, .action = .prev_pane },
     .{ .trigger = .{ .code = .{ .char = 'z' }, .mods = .{ .alt = true } }, .action = .zoom, .help = .{ .keys = "alt+z", .text = "zoom the pane" } },
@@ -513,6 +517,7 @@ test "digits pick tabs and shifted digits no longer pick workspaces" {
 test "direct shortcuts work in legacy and kitty encodings" {
     try expectRun("\x02\\\x02\x1b[92u", &.{}, &.{ .{ .split = .right }, .{ .split = .right } });
     try expectRun("\x1bh\x1bl\x1bj\x1bk\x1bz\x1bo\x1b\x0a\x1b\x0b", &.{}, &.{ .prev_tab, .next_tab, .next_pane, .prev_pane, .zoom, .rotate_panes, .next_workspace, .prev_workspace });
+    try expectRun("\x1bH\x1bL", &.{}, &.{ .move_tab_prev, .move_tab_next });
     try expectRun("\x1b[106;7u\x1b[107;7u\x1b[106;3u", &.{}, &.{ .next_workspace, .prev_workspace, .next_pane });
     try expectRun("\x02|\x02\x1b[92;2u\x02d", &.{}, &.{ .{ .split = .right }, .{ .split = .right }, .detach });
 }

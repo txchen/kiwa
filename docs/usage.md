@@ -44,6 +44,7 @@ These shortcuts work directly, without the prefix:
 | Key | Action |
 | --- | --- |
 | `alt+h` / `alt+l` | Previous / next tab |
+| `alt+shift+h` / `alt+shift+l` | Move the tab left / right |
 | `alt+j` / `alt+k` | Next / previous pane, wrapping in layout order |
 | `alt+z` | Zoom or unzoom |
 | `alt+o` | Rotate pane contents to the preceding layout slot, keeping the same pane focused |

@@ -92,7 +92,7 @@ Some combinations require the outer terminal's extended keyboard protocol. Choos
 
 | Group | Actions |
 | --- | --- |
-| Tabs | `new_tab`, `close_tab`, `rename_tab`, `next_tab`, `prev_tab`, `tab_1` through `tab_9` |
+| Tabs | `new_tab`, `close_tab`, `rename_tab`, `next_tab`, `prev_tab`, `move_tab_prev`, `move_tab_next`, `tab_1` through `tab_9` |
 | Splits | `split_right`, `split_down` |
 | Directional pane focus | `focus_left`, `focus_right`, `focus_up`, `focus_down` |
 | Pane operations | `next_pane`, `prev_pane`, `close_pane`, `rotate_panes`, `zoom`, `resize_mode`, `toggle_pane_style` |

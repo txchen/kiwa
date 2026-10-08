@@ -1453,6 +1453,36 @@ fn workspacesTabsAndSplits(ctx: *Ctx) !void {
     try ctx.waitList(want.items);
 }
 
+fn movingATabReordersTheTabRow(ctx: *Ctx) !void {
+    for ([_]Outer.Keyboard{ .kitty, .legacy }) |keyboard| {
+        const o = try attachedAs(ctx, keyboard);
+        const name = caseName(ctx);
+        try prefixed(o, "c");
+        try cdTwo(o);
+        var want: std.ArrayList(u8) = .empty;
+        defer want.deinit(ctx.gpa);
+        try want.print(ctx.gpa, "1: {s} (active)\n  1: ~, 1 pane\n  2: two, 1 pane (active)\n", .{name});
+        try ctx.waitList(want.items);
+        try o.press(char('H', .{ .alt = true }));
+        want.clearRetainingCapacity();
+        try want.print(ctx.gpa, "1: {s} (active)\n  1: two, 1 pane (active)\n  2: ~, 1 pane\n", .{name});
+        try ctx.waitList(want.items);
+        try o.press(char('H', .{ .alt = true }));
+        try o.press(char('L', .{ .alt = true }));
+        want.clearRetainingCapacity();
+        try want.print(ctx.gpa, "1: {s} (active)\n  1: ~, 1 pane\n  2: two, 1 pane (active)\n", .{name});
+        try ctx.waitList(want.items);
+        try expect(try ctx.run("kill-server") == 0, "the server stops between keyboards");
+        _ = try o.waitExit();
+        // So that the next keyboard starts from one fresh tab.
+        for ([_][]const u8{ "two", "state/session.json" }) |sub| {
+            const path = try std.fs.path.join(ctx.gpa, &.{ ctx.dir, sub });
+            defer ctx.gpa.free(path);
+            try std.Io.Dir.cwd().deleteTree(ctx.io, path);
+        }
+    }
+}
+
 fn zoomAndUnzoom(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "v");
@@ -3436,6 +3466,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "right-click menus split, zoom, and close, and esc closes them", .run = rightClickMenus },
     .{ .name = "a pane's OSC 52 clipboard write reaches the outer terminal", .run = paneClipboardWritesReachTheOuterTerminal },
     .{ .name = "a dynamic tab name follows the foreground command", .run = dynamicNamesFollowTheForegroundCommand },
+    .{ .name = "alt+shift+h and l move the tab and keep it active", .run = movingATabReordersTheTabRow },
     .{ .name = "quiet tabs trigger no name checks", .run = quietTabsAreNotChecked },
     .{ .name = "prefix shift+t renames the tab, esc and an outside click cancel, and an empty name restores it", .run = renameTabWithPrefix },
     .{ .name = "a workspace is renamed from its menu, to a Chinese name and back", .run = renameWorkspaceFromItsMenu },

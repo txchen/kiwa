@@ -112,6 +112,9 @@ const accent: Style.Color = .palette(6);
 const plain: Style = .{};
 const dim: Style = .{ .flags = .{ .faint = true } };
 const divider: Style = .{ .fg_color = .rgb(66, 70, 86) };
+/// The tab row's background, darker than most dark themes' default, so the
+/// row stands apart from the panes without a separator line.
+const tab_bar: Style = .{ .bg_color = .rgb(22, 24, 33) };
 const sidebar_heading: Style = .{ .fg_color = .rgb(132, 149, 194), .flags = .{ .bold = true } };
 const workspace_selected: Style = .{ .fg_color = .rgb(230, 232, 240), .bg_color = .rgb(50, 55, 76) };
 const workspace_number: Style.Color = .rgb(139, 149, 174);
@@ -135,13 +138,8 @@ pub fn draw(f: *Frame, v: View) void {
     }
     if (!g.tab_row) return;
     const row = f.rowMut(0)[g.sidebar..];
-    @memset(row, .blank);
+    @memset(row, .{ .style = tab_bar });
     drawTabs(row, v.tabs);
-    // Use the tab row's underline instead of taking a row from the panes.
-    for (row) |*cell| {
-        cell.style.flags.underline = .single;
-        cell.style.underline_color = divider.fg_color;
-    }
 }
 
 /// Draws the mode bar over the tab area's bottom row while `v` shows it.
@@ -511,7 +509,7 @@ fn drawTabs(row: []Cell, tabs: []const Tab) void {
     var slots: TabSlots = .init(tabs, row.len);
     while (slots.next()) |slot| {
         const t = tabs[slot.index];
-        const style = if (t.active) highlight else plain;
+        const style = if (t.active) highlight else tab_bar;
         const cell = row[slot.x..][0..slot.cols];
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
@@ -530,7 +528,7 @@ fn drawTabs(row: []Cell, tabs: []const Tab) void {
             cell[slot.cols - 2] = .{ .cp = cp, .style = ms };
         }
     }
-    if (slots.plusX()) |x| _ = put(row, x, plus, plain);
+    if (slots.plusX()) |x| _ = put(row, x, plus, tab_bar);
 }
 
 fn drawModeBar(row: []Cell, label: []const u8, keys: []const u8) void {
@@ -1161,12 +1159,12 @@ test "long hostnames wrap in spare sidebar space and keep controls above the det
     try testing.expectEqual(null, infoTop(v, 9, 26));
 }
 
-test "the tab separator uses the sidebar divider color without consuming a pane row" {
+test "the tab row is a dark band: inactive tabs and the empty rest share its background" {
     var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2 });
     defer s.deinit();
     for (s.f.row(0)[26..]) |cell| {
-        try testing.expectEqual(.single, cell.style.flags.underline);
-        try testing.expectEqualDeep(divider.fg_color, cell.style.underline_color);
+        try testing.expectEqual(.none, cell.style.flags.underline);
+        if (!cell.style.eql(highlight)) try testing.expectEqualDeep(tab_bar.bg_color, cell.style.bg_color);
     }
     const geometry = Geometry.of(80, 24, false);
     try testing.expectEqual(1, geometry.area.y);

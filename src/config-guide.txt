@@ -50,7 +50,8 @@ is reserved and cannot also trigger an action. Use a modified key as prefix
 so ordinary typing remains available.
 
 Actions:
-new_tab, close_tab, rename_tab, next_tab, prev_tab, tab_1 through tab_9,
+new_tab, close_tab, rename_tab, next_tab, prev_tab, move_tab_prev,
+move_tab_next, tab_1 through tab_9,
 split_right, split_down, focus_left, focus_right, focus_up, focus_down,
 next_pane, prev_pane, close_pane, rotate_panes, zoom, resize_mode,
 new_workspace, close_workspace, rename_workspace, next_workspace,

@@ -292,6 +292,19 @@ pub const Session = struct {
         });
     }
 
+    /// Swaps the active tab with its neighbor. The tab stays active and does
+    /// not wrap past either end. Returns whether the order changed.
+    pub fn moveTab(s: *Session, dir: enum { next, prev }) bool {
+        const tabs = s.activeWorkspace().tabs.items;
+        const i = s.activeWorkspace().activeIndex();
+        const j = switch (dir) {
+            .next => if (i + 1 < tabs.len) i + 1 else return false,
+            .prev => if (i > 0) i - 1 else return false,
+        };
+        std.mem.swap(*Tab, &tabs[i], &tabs[j]);
+        return true;
+    }
+
     pub fn cycleWorkspace(s: *Session, next: bool) bool {
         const n = s.workspaces.items.len;
         const i = s.activeIndex();
@@ -543,6 +556,25 @@ test "tabs are selected by index and cycled with wrap-around" {
     defer one.deinit();
     _ = try one.newWorkspace("/w");
     try testing.expect(!one.cycleTab(.next));
+}
+
+test "moving a tab swaps it with its neighbor, keeps it active, and stops at the ends" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    const p1 = try s.newWorkspace("/w");
+    const p2 = try s.newTab();
+    _ = try s.newTab();
+    try testing.expect(s.selectTab(1));
+    try testing.expect(s.moveTab(.prev));
+    try testing.expectEqual(p2, s.focused());
+    try testing.expectEqual(0, s.activeWorkspace().activeIndex());
+    try testing.expect(!s.moveTab(.prev));
+    try testing.expect(s.moveTab(.next));
+    try testing.expect(s.moveTab(.next));
+    try testing.expectEqual(2, s.activeWorkspace().activeIndex());
+    try testing.expect(!s.moveTab(.next));
+    try testing.expect(s.selectTab(0));
+    try testing.expectEqual(p1, s.focused());
 }
 
 test "closing panes cascades to the tab, the workspace, and the session" {
