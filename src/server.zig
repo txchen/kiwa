@@ -46,6 +46,8 @@ const Deadline = enum {
     input,
     /// The earliest dynamic-name check that had to wait.
     names,
+    /// The earliest check for an orphaned agent record that had to wait.
+    agents,
     notice,
     /// After a change to what `session.json` holds. Batches a burst of
     /// changes into one write.
@@ -59,6 +61,7 @@ const delay_ns = std.EnumArray(Deadline, u64).init(.{
     .render = 16 * std.time.ns_per_ms,
     .input = 25 * std.time.ns_per_ms,
     .names = names.interval_ns,
+    .agents = names.interval_ns,
     .notice = 3 * std.time.ns_per_s,
     .save = std.time.ns_per_s,
 });
@@ -238,6 +241,9 @@ const Server = struct {
     hostname: []const u8,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
+    chrome_agents: std.ArrayList(chrome.Agent) = .empty,
+    /// One tab's panes while `chromeView` walks the session for agents.
+    tab_panes: std.ArrayList(PaneId) = .empty,
     /// The pane whose terminal holds the selection.
     selected: ?PaneId = null,
     stats: Stats = .{},
@@ -369,6 +375,8 @@ const Server = struct {
                 if (s.session.tabOf(p.id)) |t| if (t.focused == p.id) try s.markName(t);
             }
             if (d.moved) try s.markSave();
+            if (d.agent_changed) try s.markStale();
+            if (d.bytes > 0 and p.agent != null) try s.armAgents(p.agent_check.mark(monotonicNs()));
             // The child exit arrives as SIGCHLD; stop polling a hung-up PTY until then.
             if (d.closed) {
                 if (p.events) |current| s.poller.remove(p.fd, current);
@@ -737,6 +745,31 @@ const Server = struct {
             const due = t.name_check.due orelse continue;
             if (due <= now) try s.checkName(t, now) else try s.armNames(due);
         };
+    }
+
+    fn armAgents(s: *Server, due: u64) !void {
+        try s.setDeadline(.agents, @min(due, s.deadlines.get(.agents) orelse due));
+    }
+
+    /// Drops each due pane's agent record whose program left the
+    /// foreground without sending `clear`, as a killed program does.
+    fn checkDueAgents(s: *Server) !void {
+        const now = monotonicNs();
+        var it = s.panes.valueIterator();
+        while (it.next()) |entry| {
+            const p = entry.*;
+            const due = p.agent_check.due orelse continue;
+            if (due > now) {
+                try s.armAgents(due);
+                continue;
+            }
+            if (p.agent == null) {
+                p.agent_check = .{};
+                continue;
+            }
+            if (p.agent_check.ran(now)) |next| try s.armAgents(next);
+            if (p.dropOrphanedAgent()) try s.markStale();
+        }
     }
 
     /// Stops the panes a session close removed, then shows what is left.
@@ -1449,6 +1482,7 @@ const Server = struct {
                     try s.drainInput(c);
                 },
                 .names => try s.checkDueNames(),
+                .agents => try s.checkDueAgents(),
                 .notice => if (s.client) |c| {
                     c.notice = false;
                     try s.markStale();
@@ -1642,7 +1676,9 @@ const Server = struct {
         for (current.tabs.items) |t| try s.chrome_tabs.append(s.gpa, .{ .name = t.name.text(), .activity = t.activity, .active = t.id == current.active, .zoomed = t.zoomed });
         var pane_count: usize = 0;
         for (current.tabs.items) |t| pane_count += t.layout.count();
+        try s.collectAgents();
         return .{
+            .agents = s.chrome_agents.items,
             .hostname = s.hostname,
             .directory = current.root_dir,
             .home = s.env.get("HOME") orelse "",
@@ -1663,6 +1699,30 @@ const Server = struct {
                 .copy => .{ .copy = if (s.focusedPane()) |p| if (p.copy) |copy| copy.copy_failed else false else false },
                 .dialog => .normal,
             },
+        };
+    }
+
+    /// Lists the panes with an agent record in session order for the sidebar.
+    fn collectAgents(s: *Server) !void {
+        s.chrome_agents.clearRetainingCapacity();
+        var any = false;
+        var it = s.panes.valueIterator();
+        while (it.next()) |p| any = any or p.*.agent != null;
+        if (!any) return;
+        for (s.session.workspaces.items, 0..) |ws, i| for (ws.tabs.items) |t| {
+            s.tab_panes.clearRetainingCapacity();
+            try t.layout.panes(s.gpa, &s.tab_panes);
+            for (s.tab_panes.items) |id| {
+                const p = s.panes.get(id) orelse continue;
+                // By pointer, so the label points into the pane, not a copy.
+                if (p.agent) |*a| try s.chrome_agents.append(s.gpa, .{
+                    .workspace = i,
+                    .label = if (a.app_len > 0) a.app() else t.name.text(),
+                    .state = a.state,
+                    .kind = a.kind,
+                    .pane = id,
+                });
+            }
         };
     }
 
@@ -1789,6 +1849,8 @@ const Server = struct {
         s.closed.deinit(s.gpa);
         s.chrome_workspaces.deinit(s.gpa);
         s.chrome_tabs.deinit(s.gpa);
+        s.chrome_agents.deinit(s.gpa);
+        s.tab_panes.deinit(s.gpa);
         s.session.deinit();
         s.git.deinit(s.gpa);
         s.scratch.deinit(s.gpa);
