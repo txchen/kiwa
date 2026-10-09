@@ -1,6 +1,6 @@
 # Existing no-margin scrolling cost test fails on released 0.1.6
 
-Status: open
+Status: resolved
 
 ## Reproduction
 
@@ -19,3 +19,6 @@ The new framed no-margin test has the opposite intentional contract: partial-wid
 ## Release handling
 
 Retain the failing test and its existing threshold unchanged. Report this pre-existing failure rather than claiming the entire e2e-perf suite passed. Run the separate comparative bench-check release budgets before tagging. Local reproduction logs are under /tmp/kiwa-pane-style-017/no-margins-{baseline-release,current}-{1,2,3}.log for this session.
+
+2026-10-09: resolved on `osc7501`; see
+`.scratch/test-suite-cleanup/issues/01-no-margin-scroll-budget.md`.
