@@ -100,3 +100,36 @@ _Avoid_ line so it no longer conflicts.
   click.
 - `zig build test`, `zig build e2e`, `zig build e2e-perf`, all passing.
 - ReleaseFast binary size before and after.
+
+## Comments
+
+2026-10-08, implementation on `osc7501` (`dacec02`..`48540b6`):
+
+- The rules live in a new pure module, `src/agent.zig`. `Pane.agent`
+  holds the record, and `Pane.agent_check` is a `names.Limiter` that the
+  new `agents` server deadline runs. Output from a pane with a record
+  marks the limiter. The check drops the record when `foregroundGroup()`
+  differs from `agent.pgrp`.
+- `chrome.Agent` rows carry the pane id, so a click resolves its pane
+  from the same view it hit. `Session.revealPane` selects the workspace
+  and tab, focuses the pane, and leaves zoom when the tab was zoomed on
+  another pane.
+- Colors: working uses accent, blocked uses marker for both glyph and
+  word, done is plain, error uses the error color, and idle is dim. No
+  style was added. At the narrowest sidebar (12 columns) the state word
+  is clipped.
+- Tests: unit tests in `agent.zig`, `chrome.zig`, `hit.zig`, `mouse.zig`,
+  and `session.zig`. The e2e cases use a shell `printf` as the fake
+  program, plus a perf case for a quiet pane that has a record.
+  `zig build test`, `zig build e2e` (84 passed), and `zig build e2e-perf`
+  pass, except `scrolling output costs bytes per line, not per screen (no
+  margins)`. That case also fails on `master` (`e8b4cac`), so this branch
+  did not cause it.
+- ReleaseFast size, x86_64-linux-musl: 2,257,376 bytes on `master`,
+  2,276,064 bytes after the ghostty-vt bump alone (`07c71ba`, +18,688),
+  and 2,290,000 bytes on this branch (+13,936 over the bump, +32,624 or
+  1.45% over `master`).
+- Known limit: the report records the foreground group when Kiwa reads
+  it. A program that reports and exits before Kiwa drains the PTY gets
+  the shell's group, so the orphan check never drops that record. Real
+  agents run for a long time, so this case does not come up in practice.
