@@ -2297,29 +2297,29 @@ fn programStatusShowsInTheSidebar(ctx: *Ctx) !void {
     try expect(!try o.contains("Agents"), "a query alone makes no record");
 
     try report(o, "state=working:app=pi");
-    try o.waitText(" ● 1 pi           working");
+    try o.waitText(" ● 1 pi");
     try o.waitText("Agents");
     try report(o, "state=blocked:kind=question:app=pi");
-    try o.waitText(" ? 1 pi          question");
+    try o.waitText(" ? 1 pi");
     try report(o, "state=done:id=child");
     try o.send("echo child-sent\r");
     try o.waitLine("child-sent");
-    try expect(try o.contains(" ? 1 pi          question"), "a child report leaves the root record alone");
+    try expect(try o.contains(" ? 1 pi"), "a child report leaves the root record alone");
     try report(o, "state=idle");
-    try o.waitText(" · 1 ~               idle");
+    try o.waitText(" · 1 ~");
     try report(o, "state=clear");
     try o.waitGone("Agents");
 
     try report(o, "state=working:app=pi");
-    try o.waitText("pi           working");
+    try o.waitText(" ● 1 pi");
     try o.send("printf '\\033]133;A\\033\\\\'\r");
     try o.waitGone("Agents");
     try report(o, "state=done:app=pi");
-    try o.waitText(" ✓ 1 pi              done");
+    try o.waitText(" ✓ 1 pi");
     try o.send("printf '\\033]133;A\\033\\\\'; echo prompted\r");
     try o.waitLine("prompted");
     _ = try o.pump(100);
-    try expect(try o.contains(" ✓ 1 pi              done"), "a new prompt keeps a done record");
+    try expect(try o.contains(" ✓ 1 pi"), "a new prompt keeps a done record");
 }
 
 fn clickingAnAgentShowsItsPane(ctx: *Ctx) !void {
@@ -2332,7 +2332,7 @@ fn clickingAnAgentShowsItsPane(ctx: *Ctx) !void {
     try o.click(left_half.x + 5, left_half.y + 5);
     try waitAccent(o, &.{ left_half, right_half });
     try report(o, "state=blocked:kind=permission:app=pi");
-    try o.waitText(" ? 2 pi        permission");
+    try o.waitText(" ! 2 pi");
     try o.click(right_half.x + 5, right_half.y + 5);
     try waitAccent(o, &.{ right_half, left_half });
     try prefixed(o, "w1\r");
@@ -2354,16 +2354,16 @@ fn killedAgentLeavesNoRecord(ctx: *Ctx) !void {
     try writeAgentScript(ctx);
     const o = try attachedWithPrompt(ctx);
     try o.send("sh agent.sh\r");
-    try o.waitText(" ● 1 fake         working");
+    try o.waitText(" ● 1 fake");
     _ = try o.pump(300);
-    try expect(try o.contains("fake         working"), "the record stays while its program is in front");
+    try expect(try o.contains(" ● 1 fake"), "the record stays while its program is in front");
     try o.waitGone("Agents");
 }
 
 fn quietAgentMakesNoWakes(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try report(o, "state=working:app=pi");
-    try o.waitText("pi           working");
+    try o.waitText(" ● 1 pi");
     // Past the report's last orphan and name checks, one interval after it.
     _ = try o.pump(1200);
     const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
@@ -2374,7 +2374,7 @@ fn quietAgentMakesNoWakes(ctx: *Ctx) !void {
     std.debug.print("    quiet agent 5 s: server context switches={d}, outer bytes={d}\n", .{ switches, bytes });
     try expect(switches <= 2, "at most 2 server context switches in 5 s");
     try expect(bytes == 0, "no output reaches the outer terminal");
-    try expect(try o.contains("pi           working"), "a quiet program keeps its record");
+    try expect(try o.contains(" ● 1 pi"), "a quiet program keeps its record");
 }
 
 fn dragMovesTheBorder(ctx: *Ctx) !void {

@@ -491,24 +491,34 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
     }
 }
 
-/// Draws ` ● 1 pi      working`: the state's glyph, the workspace number,
-/// the label, and the state word at the right edge.
+/// Draws ` ● 1 pi`: the state's icon, the workspace number, and the label.
 fn drawAgent(line: []Cell, a: Agent, st: *const Styles) void {
-    const accent: Style = .{ .fg_color = st.accent };
-    const marker: Style = .{ .fg_color = st.marker };
-    const glyph: u21, const glyph_style: Style, const word: []const u8, const word_style: Style = switch (a.state) {
-        .working => .{ 0x25cf, accent, "working", dim },
-        .blocked => .{ '?', marker, if (a.kind) |k| @tagName(k) else "blocked", marker },
-        .done => .{ 0x2713, plain, "done", dim },
-        .err => .{ 0x2717, st.@"error", "error", dim },
-        .idle => .{ 0x00b7, dim, "idle", dim },
-    };
-    line[1] = .{ .cp = glyph, .style = glyph_style };
+    line[1] = .{ .cp = agentIcon(a), .style = switch (a.state) {
+        .working => .{ .fg_color = st.accent },
+        .blocked => .{ .fg_color = st.marker, .flags = .{ .bold = true } },
+        .done => plain,
+        .err => st.@"error",
+        .idle => dim,
+    } };
     var num: [24]u8 = undefined;
     const x = put(line, 3, std.fmt.bufPrint(&num, "{d} ", .{a.workspace + 1}) catch unreachable, .{ .fg_color = st.workspace_number });
-    const word_x = @max(x, line.len -| word.len);
-    fit(line[0..word_x -| 1], x, a.label, plain);
-    _ = put(line, word_x, word, word_style);
+    fit(line[0 .. line.len - 1], x, a.label, plain);
+}
+
+/// One cell per state, so the column lines up in every font. A blocked
+/// program's icon says what it waits for; `*` reads as a password.
+fn agentIcon(a: Agent) u21 {
+    return switch (a.state) {
+        .working => 0x25cf,
+        .blocked => if (a.kind) |k| switch (k) {
+            .permission => '!',
+            .question => '?',
+            .auth => '*',
+        } else '!',
+        .done => 0x2713,
+        .err => 0x2717,
+        .idle => 0x00b7,
+    };
 }
 
 fn drawCollapsed(f: *Frame, v: View) void {
@@ -1275,7 +1285,7 @@ fn expectRow(s: *const Screen, y: usize, want: []const u8) !void {
     try testing.expectEqualStrings(want, std.mem.trimEnd(u8, line[0 .. std.mem.indexOf(u8, line, "│") orelse line.len], " "));
 }
 
-test "agents show between the footer and Host, one row per record in its state's look" {
+test "agents show between the footer and Host, one row per record with its state's icon" {
     const v: View = .{ .workspaces = &three, .tabs = &tabs2, .agents = &agents3, .hostname = "devbox", .directory = "/code/kiwa" };
     var s = try render(80, 24, v);
     defer s.deinit();
@@ -1283,16 +1293,13 @@ test "agents show between the footer and Host, one row per record in its state's
     try expectRow(&s, 12, " + new        • menu    «");
     try expectRow(&s, 13, " ────────────────────────");
     try expectRow(&s, 14, " Agents");
-    try expectRow(&s, 15, " ● 1 pi           working");
-    try expectRow(&s, 16, " ? 2 claude-code  blocked");
-    try expectRow(&s, 17, " ✓ 1 pi              done");
+    try expectRow(&s, 15, " ● 1 pi");
+    try expectRow(&s, 16, " ! 2 claude-code");
+    try expectRow(&s, 17, " ✓ 1 pi");
     try expectRow(&s, 19, " Host");
     try testing.expectEqualDeep(default_styles.accent, s.at(1, 15).style.fg_color);
-    try testing.expect(s.at(20, 15).style.flags.faint);
     try testing.expectEqualDeep(default_styles.marker, s.at(1, 16).style.fg_color);
-    try testing.expectEqualDeep(default_styles.marker, s.at(20, 16).style.fg_color);
-    try testing.expect(!s.at(20, 16).style.flags.faint);
-    try testing.expect(s.at(22, 17).style.flags.faint);
+    try testing.expect(s.at(1, 16).style.flags.bold);
     try testing.expectEqualDeep(default_styles.workspace_number, s.at(3, 15).style.fg_color);
 
     try testing.expectEqualDeep(@as(?Hit, .{ .agent = 0 }), hit(v, 80, 24, 6, 15));
@@ -1304,17 +1311,21 @@ test "agents show between the footer and Host, one row per record in its state's
     try expectHit(v, &s, "/code/kiwa", .workspace_directory);
 }
 
-test "kinds, errors, and idle read in their own words and colors" {
+test "each blocked kind, error, and idle has its own icon and color" {
     const agents = [_]Agent{
-        .{ .workspace = 0, .label = "pi", .state = .blocked, .kind = .permission, .pane = @enumFromInt(1) },
-        .{ .workspace = 0, .label = "x", .state = .err, .pane = @enumFromInt(2) },
-        .{ .workspace = 0, .label = "y", .state = .idle, .pane = @enumFromInt(3) },
+        .{ .workspace = 0, .label = "a", .state = .blocked, .kind = .permission, .pane = @enumFromInt(1) },
+        .{ .workspace = 0, .label = "b", .state = .blocked, .kind = .question, .pane = @enumFromInt(2) },
+        .{ .workspace = 0, .label = "c", .state = .blocked, .kind = .auth, .pane = @enumFromInt(3) },
+        .{ .workspace = 0, .label = "x", .state = .err, .pane = @enumFromInt(4) },
+        .{ .workspace = 0, .label = "y", .state = .idle, .pane = @enumFromInt(5) },
     };
     var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &agents });
     defer s.deinit();
-    try expectRow(&s, 21, " ? 1 pi        permission");
-    try expectRow(&s, 22, " ✗ 1 x              error");
-    try expectRow(&s, 23, " · 1 y               idle");
+    try expectRow(&s, 19, " ! 1 a");
+    try expectRow(&s, 20, " ? 1 b");
+    try expectRow(&s, 21, " * 1 c");
+    try expectRow(&s, 22, " ✗ 1 x");
+    try expectRow(&s, 23, " · 1 y");
     try testing.expectEqualDeep(default_styles.@"error".fg_color, s.at(1, 22).style.fg_color);
     try testing.expect(s.at(1, 23).style.flags.faint);
 }
@@ -1330,18 +1341,17 @@ test "agents win over Host, short rows show the agents that fit, and long labels
     var s = try render(80, 6, v);
     defer s.deinit();
     try expectRow(&s, 2, " + new        • menu    «");
-    try expectRow(&s, 5, " ● 1 pi           working");
+    try expectRow(&s, 5, " ● 1 pi");
     try testing.expectEqualDeep(@as(?Hit, .{ .agent = 0 }), hit(v, 80, 6, 5, 5));
     try testing.expectEqualDeep(@as(?Hit, .new_workspace), hit(v, 80, 6, 1, 2));
 
     const long = [_]Agent{.{ .workspace = 0, .label = "a-very-long-agent-name", .state = .working, .pane = @enumFromInt(1) }};
     var narrow = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &long, .sidebar_width = min_sidebar_cols });
     defer narrow.deinit();
-    // The narrowest sidebar clips the word rather than overrun the divider.
-    try expectRow(&narrow, 23, " ● 1 workin");
+    try expectRow(&narrow, 23, " ● 1 a-ve…");
     var mid = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &long, .sidebar_width = 20 });
     defer mid.deinit();
-    try expectRow(&mid, 23, " ● 1 a-ver… working");
+    try expectRow(&mid, 23, " ● 1 a-very-long-…");
 }
 
 test "the collapsed sidebar shows no agents" {

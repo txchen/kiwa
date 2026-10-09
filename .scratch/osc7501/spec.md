@@ -66,18 +66,18 @@ Host block uses. One row per pane with a record, in session order
 
 ```
  Agents
- ● 1 pi           working
- ? 2 claude-code  blocked
- ✓ 1 pi              done
+ ● 1 pi
+ ! 2 claude-code
+ ✓ 1 pi
 ```
 
-- Glyph and color per state: working `●` accent, blocked `?` marker or a
-  warning color from the theme, done `✓`, error `✗`, idle `·` dim. Pick
-  colors from the existing `Styles`; add a style only if none fits.
+- One single-width icon per state, theme-colored, and no state word:
+  working `●` accent, blocked bold in the marker color (`!` permission or
+  no kind, `?` question, `*` auth), done `✓`, error `✗` in the error
+  color, idle `·` dim. Emoji were rejected because they are two cells wide,
+  render differently across fonts, and ignore the theme.
 - Then the workspace number, then the label: `app`, or the tab name when
-  `app` is empty. The state word is right-aligned and dim except for
-  `blocked`, which reads `blocked`, `permission`, `question`, or `auth`
-  from `kind`.
+  `app` is empty. The label takes the rest of the row.
 - The block shows only when at least one pane has a record, and only in
   spare space. Like the Host block, it never displaces workspace entries.
   If both do not fit, Agents wins over Host. When rows are short, show as
