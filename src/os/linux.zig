@@ -87,15 +87,43 @@ pub fn processCwd(pid: pid_t, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// `/proc/<pid>/comm`, which the kernel caps at 15 bytes.
+/// `/proc/<pid>/comm`, which the kernel caps at 15 bytes, or the
+/// executable's name when comm no longer names the program. Naming the
+/// main thread renames comm: Node calls its main thread `MainThread`.
 pub fn processName(pid: pid_t, buf: []u8) ?[]const u8 {
+    const comm = std.mem.trimEnd(u8, readProc(pid, "comm", buf) orelse return null, "\n");
+    if (comm.len == 0) return null;
+    var exe_buf: [sys.PATH_MAX]u8 = undefined;
+    var exe_path: [32]u8 = undefined;
+    const exe_link = std.fmt.bufPrintZ(&exe_path, "/proc/{d}/exe", .{pid}) catch return comm;
+    const n = sys.check(c.readlink(exe_link, &exe_buf, exe_buf.len)) catch return comm;
+    const link = exe_buf[0..n];
+    const deleted = " (deleted)";
+    const exe = std.fs.path.basename(if (std.mem.endsWith(u8, link, deleted)) link[0 .. n - deleted.len] else link);
+    if (namesFile(comm, exe)) return comm;
+    var args_buf: [4096]u8 = undefined;
+    var args = std.mem.splitScalar(u8, readProc(pid, "cmdline", &args_buf) orelse return comm, 0);
+    while (args.next()) |arg| if (namesFile(comm, std.fs.path.basename(arg))) return comm;
+    if (exe.len == 0 or exe.len > buf.len) return comm;
+    @memcpy(buf[0..exe.len], exe);
+    return buf[0..exe.len];
+}
+
+/// Whether `comm` is the kernel's name for an exec of `file`: the file's
+/// name, cut to 15 bytes. A script run by its `#!` line is named after
+/// the script, which is an argument of the interpreter; a symlink such as
+/// `python3` is named after the link, which is argv[0].
+fn namesFile(comm: []const u8, file: []const u8) bool {
+    return std.mem.startsWith(u8, file, comm);
+}
+
+fn readProc(pid: pid_t, comptime file: []const u8, buf: []u8) ?[]const u8 {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/" ++ file, .{pid}) catch return null;
     const fd = sys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
     defer sys.close(fd);
     const n = sys.read(fd, buf) catch return null;
-    const name = std.mem.trimEnd(u8, buf[0..n], "\n");
-    return if (name.len > 0) name else null;
+    return buf[0..n];
 }
 
 /// The running executable, for a re-exec. The kernel resolves the link at
@@ -259,3 +287,25 @@ pub const DirWatch = struct {
         return w.changes[0..len];
     }
 };
+
+const testing = std.testing;
+
+test "a process that renames its main thread is named after its executable" {
+    var saved: [16]u8 = undefined;
+    _ = linux.prctl(@intFromEnum(linux.PR.GET_NAME), @intFromPtr(&saved), 0, 0, 0);
+    defer _ = linux.prctl(@intFromEnum(linux.PR.SET_NAME), @intFromPtr(&saved), 0, 0, 0);
+    const before = blk: {
+        var buf: [64]u8 = undefined;
+        break :blk try testing.allocator.dupe(u8, processName(linux.getpid(), &buf) orelse return error.NoName);
+    };
+    defer testing.allocator.free(before);
+    _ = linux.prctl(@intFromEnum(linux.PR.SET_NAME), @intFromPtr("MainThread"), 0, 0, 0);
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(before, processName(linux.getpid(), &buf) orelse return error.NoName);
+}
+
+test "comm names the program when it is the executable's, a symlink's, or a script's name" {
+    try testing.expect(namesFile("python3", "python3.12"));
+    try testing.expect(namesFile("x86_64-linux-gn", "x86_64-linux-gnu-gcc-13"));
+    try testing.expect(!namesFile("MainThread", "node"));
+}

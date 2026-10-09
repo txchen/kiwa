@@ -421,6 +421,10 @@ pub fn resetChildSignals() void {
 
 const testing = std.testing;
 
+test {
+    _ = os;
+}
+
 extern "c" fn pause() c_int;
 
 fn socketPair() ![2]fd_t {
