@@ -106,10 +106,16 @@ const Moved = struct {
         return m;
     }
 
-    /// Whether row `y`, which lies in the scroll's rows, equals `want`.
+    /// The scroll if it moves row `y`; rows outside it stay where they are.
+    fn scrollOf(m: *const Moved, y: usize) ?Scroll {
+        const s = m.scroll orelse return null;
+        return if (y >= s.rect.y and y < s.rect.y + s.rect.rows) s else null;
+    }
+
+    /// Whether row `y` equals `want`.
     fn rowEquals(m: *const Moved, y: usize, want: []const Cell) bool {
         const here = m.old.row(y);
-        const s = m.scroll orelse return rowsEqual(here, want);
+        const s = m.scrollOf(y) orelse return rowsEqual(here, want);
         if (m.cut_left or m.cut_right) return false;
         const r = s.rect;
         if (!rowsEqual(here[0..r.x], want[0..r.x]) or !rowsEqual(here[r.x + r.cols ..], want[r.x + r.cols ..])) return false;
@@ -118,10 +124,10 @@ const Moved = struct {
         return rowsEqual(m.old.row(r.y + from)[r.x..][0..r.cols], band);
     }
 
-    /// Row `y`, which lies in the scroll's rows. Valid until the next call.
+    /// Row `y`. Valid until the next call.
     fn row(m: *const Moved, y: usize) []const Cell {
         const here = m.old.row(y);
-        const s = m.scroll orelse return here;
+        const s = m.scrollOf(y) orelse return here;
         const r = s.rect;
         const out = m.buf;
         @memcpy(out[0..r.x], here[0..r.x]);
@@ -189,7 +195,12 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
     for (scrolls) |s| {
         const r = s.rect;
         const rows: Scroll = .{ .rect = .{ .y = r.y, .cols = old.cols, .rows = r.rows }, .n = s.n };
-        const candidates: [2]Scroll = .{ rows, s };
+        // Without side margins, a full-width scroll also moves what is
+        // beside the rect, such as the sidebar's workspace rows, and each
+        // such row must be redrawn. Leaving them out of the scroll repaints
+        // the rect's part of those rows instead, which can cost less.
+        const wide = if (lr_margins) rows else cheaperEdge(old, new, rows, r, sc.row);
+        const candidates: [2]Scroll = .{ wide, s };
         const count: usize = if (lr_margins and r.cols >= 2 and !std.meta.eql(r, rows.rect)) 2 else 1;
         // The narrowest candidate goes first: it usually costs least, and
         // each later count stops once it costs more.
@@ -222,6 +233,50 @@ pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Fr
         }
     }
     try emit(old, new, g, w, sc.chosen.items, .{ .x = old.cursor.x, .y = old.cursor.y });
+}
+
+/// `rows`, or `rows` without its leading edge rows (`besideChanges`)
+/// when repainting those rows unscrolled likely costs less. The two
+/// differ only in those rows. Counting the cells each would rewrite
+/// stands in for their bytes: the cells beside `r` usually carry styles,
+/// so the count favors scrolling them, if anything.
+fn cheaperEdge(old: *const Frame, new: *const Frame, rows: Scroll, r: Rect, buf: []Cell) Scroll {
+    const kept = besideChanges(old, rows, r);
+    const k = rows.rect.rows - kept.rect.rows;
+    if (k == 0) return rows;
+    const top = if (rows.n > 0) r.y else r.y + r.rows - k;
+    const scrolled: Moved = .init(old, rows, buf);
+    var scrolled_cells: u64 = 0;
+    var unscrolled_cells: u64 = 0;
+    for (top..top + k) |y| {
+        unscrolled_cells += rowFloor(old.row(y), new.row(y));
+        scrolled_cells += rowFloor(scrolled.row(y), new.row(y));
+    }
+    return if (unscrolled_cells < scrolled_cells) kept else rows;
+}
+
+/// `rows`, a full-width scroll of `r`'s rows, without the rows at its
+/// leading edge whose cells beside `r` the scroll would change. Returns
+/// `rows` when there are none, or when too few rows would be left.
+fn besideChanges(old: *const Frame, rows: Scroll, r: Rect) Scroll {
+    const n: usize = @abs(rows.n);
+    if (n >= r.rows) return rows;
+    var k: usize = 0;
+    while (k + n + 2 <= r.rows) : (k += 1) {
+        // Scrolling up, row `y` takes the row `n` below it; down, above it.
+        const y = if (rows.n > 0) r.y + k else r.y + r.rows - 1 - k;
+        const from = if (rows.n > 0) y + n else y - n;
+        if (besideEqual(old.row(y), old.row(from), r)) break;
+    }
+    if (k == 0) return rows;
+    var kept = rows;
+    kept.rect.rows -= @intCast(k);
+    if (rows.n > 0) kept.rect.y += @intCast(k);
+    return kept;
+}
+
+fn besideEqual(a: []const Cell, b: []const Cell, r: Rect) bool {
+    return rowsEqual(a[0..r.x], b[0..r.x]) and rowsEqual(a[r.x + r.cols ..], b[r.x + r.cols ..]);
 }
 
 /// The bytes that `moved`'s scroll, if any, and repainting `r`'s rows of
@@ -353,7 +408,7 @@ const Out = struct {
     fn setPen(o: *Out, style: Style) Writer.Error!void {
         if (o.pen.eql(style)) return;
         try o.begin();
-        try sgr.write(o.w, style);
+        try sgr.change(o.w, o.pen, style);
         o.pen = style;
     }
 
@@ -438,13 +493,15 @@ const Out = struct {
 /// The start of the next character at or after `from` that differs.
 fn nextChanged(old: ?[]const Cell, new: []const Cell, from: usize) ?usize {
     std.debug.assert(from >= new.len or new[from].width != .tail);
-    var x = from;
-    while (x < new.len) {
-        const end = @min(x + unitWidth(new[x]), new.len);
-        for (x..end) |i| if (!oldAt(old, i).eql(new[i])) return x;
-        x = end;
+    var i = from;
+    if (old) |prev| {
+        while (i < new.len and prev[i].eql(new[i])) i += 1;
+    } else {
+        while (i < new.len and new[i].eql(.blank)) i += 1;
     }
-    return null;
+    if (i >= new.len) return null;
+    // A changed tail belongs to the wide character before it.
+    return if (i > from and new[i].width == .tail and new[i - 1].width == .wide) i - 1 else i;
 }
 
 /// An unknown screen has just been cleared, so it is all blanks.
@@ -652,7 +709,7 @@ test "a style-only change sets the pen, writes the cell, and resets the pen" {
     f.new.rowMut(0)[1].style = .{ .flags = .{ .bold = true }, .fg_color = .palette(1) };
     f.old.cursor = .{ .x = 2, .y = 0 };
     f.new.cursor = f.old.cursor;
-    try testing.expectEqualStrings("\x08\x1b[0;1;31mb\x1b[0m", try f.diffBytes());
+    try testing.expectEqualStrings("\x08\x1b[1;31mb\x1b[0m", try f.diffBytes());
     try f.expectRoundTrip();
 }
 
@@ -1006,6 +1063,33 @@ test "confined full-width scrolls work without left and right margins" {
     try testing.expect(std.mem.indexOf(u8, try f.diffBytes(), "\x1b[S") != null);
     try testing.expectEqual(1, f.scratch.chosen.items.len);
     try testing.expectEqual(up.rect, f.scratch.chosen.items[0].rect);
+    try f.expectRoundTrip();
+}
+
+test "without side margins, a scroll leaves out the sidebar row it would move" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(40, 10);
+    const r: Rect = .{ .x = 12, .y = 1, .cols = 28, .rows = 9 };
+    const sidebar: Style = .{ .fg_color = .rgb(230, 232, 240), .bg_color = .rgb(50, 55, 76) };
+    for (0..10) |y| {
+        const row = f.old.rowMut(y);
+        row[11] = .{ .cp = '|' };
+        for (r.x..r.x + r.cols) |x| row[x] = .{ .cp = @intCast('a' + y) };
+    }
+    for (" 1 workspace", 0..) |ch, x| f.old.rowMut(1)[x] = .{ .cp = ch, .style = sidebar };
+    f.new.copyFrom(&f.old);
+    const up: Scroll = .{ .rect = r, .n = 1 };
+    up.apply(&f.new);
+    // The row that scrolls in, and the pane's top row, which moved up.
+    for (r.x..r.x + r.cols) |x| f.new.rowMut(9)[x] = .{ .cp = 'z' };
+    for (r.x..r.x + r.cols) |x| f.new.rowMut(1)[x] = .{ .cp = 'b' };
+    f.how = .{ .choose = .{ .scrolls = &.{up}, .lr_margins = false } };
+    const bytes = try f.diffBytes();
+    // Rows 3 to 10 scroll; the workspace row stays and is not rewritten.
+    try testing.expect(std.mem.indexOf(u8, bytes, "\x1b[3r\x1b[S\x1b[r") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "workspace") == null);
+    try testing.expectEqual(Rect{ .y = 2, .cols = 40, .rows = 8 }, f.scratch.chosen.items[0].rect);
     try f.expectRoundTrip();
 }
 
