@@ -35,6 +35,8 @@ pub const Effect = union(enum) {
     resize_sidebar: u16,
     select_tab: usize,
     new_tab,
+    /// Shows the pane of the sidebar's agent row at this index.
+    select_agent: usize,
     /// Focuses the pane and clears any selection. With `deliver`, the report
     /// also goes to the pane's program.
     focus: struct { pane: PaneId, deliver: bool },
@@ -125,6 +127,7 @@ fn leftPress(s: *State, ev: input.Mouse, target: Target) Effect {
         },
         .tab => |i| .{ .select_tab = i },
         .tab_new => .new_tab,
+        .sidebar_agent => |i| .{ .select_agent = i },
         .border => |b| {
             const d = b.divider orelse return .{ .focus = .{ .pane = b.pane, .deliver = false } };
             s.* = .{ .dragging_border = .{ .split = d.split, .axis = d.axis, .grab = along(ev, d.axis) - d.at } };
@@ -232,6 +235,9 @@ test "chrome clicks act on press and swallow the drag and release" {
         .{ report(.left, .release, 40, 0), .tab_new, false, .none, .idle },
         .{ report(.left, .press, 70, 0), .none, false, .none, .idle },
         .{ report(.middle, .press, 1, 2), .{ .sidebar_workspace = 1 }, false, .none, .idle },
+        .{ report(.left, .press, 3, 21), .{ .sidebar_agent = 1 }, false, .{ .select_agent = 1 }, .pressed_on },
+        .{ report(.left, .release, 3, 21), .{ .sidebar_agent = 1 }, false, .none, .idle },
+        .{ report(.right, .press, 3, 21), .{ .sidebar_agent = 1 }, false, .none, .idle },
     });
 }
 

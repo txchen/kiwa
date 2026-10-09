@@ -255,6 +255,23 @@ pub const Session = struct {
         return true;
     }
 
+    /// Selects `pane`'s workspace and tab and focuses it, unzooming a tab
+    /// zoomed on another pane. Returns whether anything changed.
+    pub fn revealPane(s: *Session, pane: PaneId) bool {
+        for (s.workspaces.items, 0..) |ws, wi| for (ws.tabs.items, 0..) |t, ti| {
+            if (!t.layout.contains(pane)) continue;
+            var changed = s.selectWorkspace(wi);
+            changed = s.selectTab(ti) or changed;
+            if (t.focused != pane) {
+                t.focused = pane;
+                t.zoomed = false;
+                changed = true;
+            }
+            return changed;
+        };
+        return false;
+    }
+
     /// Resizes the focused pane by one step. A zoomed tab does not resize.
     pub fn resize(s: *Session, area: Rect, dir: layout.Dir) bool {
         const t = s.activeTab();
@@ -666,6 +683,25 @@ test "a pane is focused directly only when the active tab shows it" {
     try testing.expect(s.selectTab(0));
     try testing.expect(s.toggleZoom());
     try testing.expect(!s.focusPane(b));
+}
+
+test "revealing a pane selects its workspace and tab, focuses it, and leaves zoom" {
+    var s: Session = .init(testing.allocator, "sh");
+    defer s.deinit();
+    const a = try s.newWorkspace("/w");
+    const b = try s.split(screen, .right);
+    try testing.expect(s.toggleZoom());
+    _ = try s.newTab();
+    _ = try s.newWorkspace("/v");
+    try testing.expect(s.revealPane(a));
+    try testing.expectEqual(0, s.activeIndex());
+    try testing.expectEqual(0, s.activeWorkspace().activeIndex());
+    try testing.expectEqual(a, s.focused());
+    try testing.expect(!s.activeTab().zoomed);
+    try testing.expect(!s.revealPane(a));
+    try testing.expect(s.revealPane(b));
+    try testing.expectEqual(b, s.focused());
+    try testing.expect(!s.revealPane(@enumFromInt(999)));
 }
 
 test "only the visible tab is placed, and a zoomed pane fills the area" {

@@ -1150,10 +1150,11 @@ const Server = struct {
         if (s.session.isEmpty()) return;
         if (c.prefix.mode == .dialog) return s.dialogMouse(c, ev);
         const t = s.session.activeTab();
+        const view = try s.chromeView(c);
         const target = hit.at(.{
             .cols = c.size.cols,
             .rows = c.size.rows,
-            .chrome = try s.chromeView(c),
+            .chrome = view,
             .geometry = &s.geometry,
             .menu = if (c.mouse == .menu_open) c.mouse.menu_open else null,
         }, ev.x, ev.y);
@@ -1205,6 +1206,11 @@ const Server = struct {
                 try s.showChanges();
             },
             .new_tab => try s.act(c, .new_tab),
+            .select_agent => |i| if (s.session.revealPane(view.agents[i].pane)) {
+                try s.clearSelection();
+                try s.markName(s.session.activeTab());
+                try s.showChanges();
+            },
             .focus => |f| {
                 try s.clearSelection();
                 if (s.session.focusPane(f.pane)) {

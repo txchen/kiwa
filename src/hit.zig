@@ -21,6 +21,8 @@ pub const Target = union(enum) {
     /// An index into the tab row's tabs.
     tab: usize,
     tab_new,
+    /// An index into the sidebar's agents.
+    sidebar_agent: usize,
     /// A frame or gutter cell. `divider` identifies a draggable boundary.
     border: struct { pane: PaneId, divider: ?layout.Divider },
     /// A cell of a pane's content, in pane-local coordinates.
@@ -57,6 +59,7 @@ pub fn at(s: Scene, x: u16, y: u16) Target {
         .resize_sidebar => .sidebar_resize,
         .tab => |i| .{ .tab = i },
         .new_tab => .tab_new,
+        .agent => |i| .{ .sidebar_agent = i },
     };
     return switch (s.geometry.at(x, y)) {
         .none => .none,
@@ -142,6 +145,21 @@ test "every target, at several sizes, expanded and collapsed" {
         try testing.expectEqualDeep(Target.none, at(s, cols, 0));
         try testing.expectEqualDeep(Target.none, at(s, 0, rows));
     }
+}
+
+test "agent rows in the sidebar hit by their index" {
+    var f: Fixture = try .init(80, 24, false);
+    defer f.deinit();
+    const agents = [_]chrome.Agent{
+        .{ .workspace = 0, .label = "pi", .state = .working, .pane = pid(1) },
+        .{ .workspace = 1, .label = "claude-code", .state = .blocked, .pane = pid(2) },
+    };
+    f.scene.chrome.agents = &agents;
+    const s = try f.place();
+    try testing.expectEqualDeep(Target.none, at(s, 3, 20));
+    try testing.expectEqualDeep(Target{ .sidebar_agent = 0 }, at(s, 3, 22));
+    try testing.expectEqualDeep(Target{ .sidebar_agent = 1 }, at(s, 3, 23));
+    try testing.expectEqualDeep(Target.sidebar_new, at(s, 1, 19));
 }
 
 test "a zoomed pane has no border, and an open menu covers what is under it" {
