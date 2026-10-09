@@ -28,15 +28,15 @@ Kiwa is written in Zig and uses Ghostty's `ghostty-vt` terminal engine. It works
 
 ### Small binary, quiet idle panes
 
-Kiwa's column was **remeasured on October 9, 2026**, with ReleaseFast product code at `e673b98` and five runs per scenario. The tmux, Zellij, and Herdr columns are a **snapshot from October 6, 2026**, taken on the same machine with tmux 3.7c, Zellij 0.45.1, and Herdr 0.9.3. Neither is a measurement of the latest commit.
+Kiwa's column was **remeasured on October 9, 2026**, with ReleaseFast product code at `4566643` and five runs per scenario. The tmux, Zellij, and Herdr columns are a **snapshot from October 6, 2026**, taken on the same machine with tmux 3.7c, Zellij 0.45.1, and Herdr 0.9.3. Neither is a measurement of the latest commit.
 
 Executable and download sizes on Linux x86_64, in decimal MB:
 
 | Size | Kiwa | tmux | Zellij | Herdr |
 | --- | ---: | ---: | ---: | ---: |
-| Executable | 2.29 MB | 1.43 MB | 52.55 MB | 29.96 MB |
-| Executable + shared libraries beyond libc | 2.29 MB | 3.81 MB | 52.55 MB | 29.96 MB |
-| Download asset | 0.90 MB | Not measured | 18.73 MB | 29.96 MB |
+| Executable | 2.30 MB | 1.43 MB | 52.55 MB | 29.96 MB |
+| Executable + shared libraries beyond libc | 2.30 MB | 3.81 MB | 52.55 MB | 29.96 MB |
+| Download asset | 0.91 MB | Not measured | 18.73 MB | 29.96 MB |
 | Linking | Static | Dynamic | Static PIE | Static PIE |
 
 Tmux has the smaller executable. Kiwa's Linux binary includes its dependencies. Tmux's library total depends on the distribution and does not mean those libraries are unique to tmux. Kiwa and Zellij downloads are gzip archives; Herdr's is a bare executable.
@@ -47,9 +47,9 @@ CPU below is the median percentage of **one core**, summed across server and cli
 | --- | ---: | ---: | ---: | ---: |
 | 1 idle pane | 0.000% | 0.000% | 0.059% | 0.272% |
 | 10 idle panes | 0.000% | 0.000% | 0.254% | 0.761% |
-| 60 Hz one-cell spinner | 0.278% | 0.544% | 3.868% | 2.186% |
-| 30 lines/s, 80 bytes each | 0.425% | 0.429% | 10.780% | 11.989% |
-| 10 hidden output panes, focused pane idle | 0.900% | 2.944% | 7.139% | 3.463% |
+| 60 Hz one-cell spinner | 0.271% | 0.544% | 3.868% | 2.186% |
+| 30 lines/s, 80 bytes each | 0.414% | 0.429% | 10.780% | 11.989% |
+| 10 hidden output panes, focused pane idle | 0.905% | 2.944% | 7.139% | 3.463% |
 | 10 idle panes, detached | 0.000% | 0.000% | 0.253% | 0.620% |
 | 10 hidden output panes, detached | 0.894% | 2.781% | 6.328% | 3.048% |
 
@@ -59,12 +59,12 @@ Memory is server RSS at the end of the sample, not peak memory. Client RSS is se
 
 | Memory | Kiwa | tmux | Zellij | Herdr |
 | --- | ---: | ---: | ---: | ---: |
-| Server, 1 idle pane | 2.2 MiB | 4.4 MiB | 77.5 MiB | 26.4 MiB |
+| Server, 1 idle pane | 2.3 MiB | 4.4 MiB | 77.5 MiB | 26.4 MiB |
 | Server, 10 idle panes | 3.9 MiB | 4.4 MiB | 149.8 MiB | 29.0 MiB |
 | Server, 10 hidden output panes + 1 idle | 10.4 MiB | 7.6 MiB | 170.9 MiB | 35.5 MiB |
 | Client, 1 idle pane | 1.2 MiB | 5.1 MiB | 21.4 MiB | 19.7 MiB |
 
-These ran on a four-core Intel N97, at 100×40, with a 6-second warmup and 12-second sample; Kiwa had five runs, the others three. Kiwa keeps its sidebar and tab row; tmux's status line is off. Kiwa's scrolling result uses an outer terminal with left and right margins, and is a tie with tmux, not a claimed win. Without margins, Kiwa measured 0.627% CPU, more than tmux; that is a known regression, tracked separately.
+These ran on a four-core Intel N97, at 100×40, with a 6-second warmup and 12-second sample; Kiwa had five runs, the others three. Kiwa keeps its sidebar and tab row; tmux's status line is off. Kiwa's scrolling result uses an outer terminal with left and right margins. Without them, it measured 0.413% CPU. Both overlap tmux's measured range, so scrolling is a tie here, not a claimed win.
 
 The workloads have fixed output rates. They measure multiplexer overhead, not maximum throughput or input latency. Pane programs and the outer terminal emulator are excluded. This is a comparison of the tested configurations, not proof that one program is universally faster.
 

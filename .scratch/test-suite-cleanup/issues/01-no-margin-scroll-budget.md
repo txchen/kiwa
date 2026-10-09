@@ -1,6 +1,6 @@
 # Investigate the existing no-margin scrolling performance failure
 
-Status: open
+Status: resolved
 
 ## Reproduction
 
@@ -40,3 +40,12 @@ both stay at 52,752 bytes. The benchmark's growth lies between `dcd6ecd` and
 `e8b4cac`, not on `osc7501`. This e2e case's first recorded
 failure, on 0.1.6 (`30b7722`), also comes after `dcd6ecd`, so one cause is
 likely but not shown. See `docs/benchmarks.md`, "Kiwa rerun".
+
+2026-10-09, resolved on `osc7501` (`2914255`, `4566643`). Cause: without
+side margins a pane scroll moves the sidebar rows beside it, and the
+sidebar text in those rows grew (details block, footer once panes took
+the bottom row, 24-bit theme colors). The mode bar now keeps the bottom
+row and the details block hides on such terminals, SGR changes go out as
+deltas, and a full-width scroll leaves out leading rows it would move when
+that costs less. `e2e-perf -- 'no margins'` passes at 60 bytes per line;
+the bench sends 68,872 bytes at 0.413% CPU. See `docs/benchmarks.md`.

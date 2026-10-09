@@ -7,9 +7,9 @@
 Only Kiwa was measured. The tmux, Zellij, and Herdr numbers below are still
 the October 6 snapshot, taken on the same machine.
 
-Kiwa's product code was at `e673b98` on the `osc7501` branch, built with
-ReleaseFast. This build adds OSC 7501 agent status and the ghostty-vt bump
-to `a4aacd9`. The command was:
+Kiwa's product code was at `4566643` on the `osc7501` branch, built with
+ReleaseFast. This build adds OSC 7501 agent status, the ghostty-vt bump to
+`a4aacd9`, and the no-margin scrolling fix described below. The command was:
 
 ```sh
 mise exec -- zig build bench -Doptimize=ReleaseFast -- --programs kiwa --runs 5
@@ -17,62 +17,83 @@ mise exec -- zig build bench -Doptimize=ReleaseFast -- --programs kiwa --runs 5
 
 Same machine, kernel, Zig, and Python as the snapshot. Five runs per
 scenario and variant, 6-second warmup, 12-second sample. Load average was
-0.24 at the start, mostly at or below 0.40 during the runs with one sample
-at 1.57, and `0.21 0.24 1.11` at the end. Before the run, two orphaned Herdr
-servers left by earlier prototypes were stopped. One kept a shell busy at
-about one core.
+0.92 at the start and `0.14 0.16 0.30` at the end. Before the first rerun
+of the day, two orphaned Herdr servers left by earlier prototypes were
+stopped. One kept a shell busy at about one core.
 
 | Scenario | Variant | Total CPU % of one core, median (range) | Ticks per run | Context switches | Outer bytes in 12 s | Outer bytes per frame | Server RSS MiB | Client RSS MiB |
 |---|---|---|---|---|---|---|---|---|
-| 1 idle pane | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | 0 | - | 2.2 | 1.2 |
-| 60 Hz one-cell spinner | outer with margins | 0.278 (0.274 to 0.284) | 4, 3, 3, 4, 3 | 742 (741 to 745) | 1,442 | 2.0 | 2.2 | 1.2 |
-| 30 lines/s of 80 bytes | outer with margins | 0.425 (0.417 to 0.425) | 5, 4, 4, 5, 6 | 385 (384 to 385) | 52,752 | 146.5 | 2.9 | 1.2 |
-| 30 lines/s of 80 bytes | outer without margins | 0.627 (0.618 to 0.651) | 7, 9, 8, 7, 7 | 385 (384 to 460) | 248,512 (248,512 to 249,892) | 690.3 | 2.9 | 1.2 |
+| 1 idle pane | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | 0 | - | 2.3 | 1.2 |
+| 60 Hz one-cell spinner | outer with margins | 0.271 (0.266 to 0.276) | 3, 3, 3, 3, 4 | 741 (740 to 742) | 1,442 | 2.0 | 2.3 | 1.2 |
+| 30 lines/s of 80 bytes | outer with margins | 0.414 (0.406 to 0.421) | 5, 5, 5, 5, 5 | 386 (384 to 390) | 52,752 | 146.5 | 2.9 | 1.2 |
+| 30 lines/s of 80 bytes | outer without margins | 0.413 (0.405 to 0.432) | 4, 6, 5, 4, 6 | 384 (384 to 390) | 68,872 | 191.3 | 2.9 | 1.2 |
 | 10 idle panes | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | 0 | - | 3.9 | 1.2 |
 | 1 idle pane, detached | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | - | - | 2.1 | - |
 | 10 idle panes, detached | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | - | - | 3.8 | - |
-| 10 hidden producers, focused pane idle | outer with margins | 0.900 (0.888 to 0.939) | 11, 12, 10, 10, 10 | 3,838 (3,831 to 3,852) | 0 | - | 10.4 | 1.2 |
-| 10 hidden producers, detached | outer with margins | 0.894 (0.890 to 0.932) | 11, 12, 10, 11, 11 | 3,836 (3,824 to 3,844) | - | - | 10.4 | - |
+| 10 hidden producers, focused pane idle | outer with margins | 0.905 (0.901 to 0.910) | 11, 11, 11, 11, 11 | 3,832 (3,829 to 3,839) | 0 | - | 10.4 | 1.2 |
+| 10 hidden producers, detached | outer with margins | 0.894 (0.887 to 0.935) | 12, 11, 11, 11, 10 | 3,827 (3,824 to 3,839) | - | - | 10.4 | - |
 
-The client used no measurable CPU in any run. The executable is 2,294,624
-bytes, and `kiwa-x86_64-linux-musl.tar.gz` is 903,778 bytes.
+The client used no measurable CPU in any run. The executable is 2,301,536
+bytes, and `kiwa-x86_64-linux-musl.tar.gz` is 907,510 bytes.
 
 ### What changed since October 6
 
-| Measure | Oct 6 (`dcd6ecd`) | Oct 9 (`e673b98`) |
+| Measure | Oct 6 (`dcd6ecd`) | Oct 9 (`4566643`) |
 |---|---|---|
 | Idle CPU and context switches, every idle scenario | 0 | 0 |
-| Spinner CPU | 0.247% | 0.278% |
-| Scrolling CPU, with margins | 0.423% | 0.425% |
-| Scrolling CPU, without margins | 0.444% | 0.627% |
-| Scrolling outer bytes, without margins | 82,552 | 248,512 |
-| Hidden producers CPU, attached / detached | 0.876% / 0.872% | 0.900% / 0.894% |
-| Server RSS, 1 idle / 10 idle / 10 producers | 1.9 / 3.6 / 10.1 MiB | 2.2 / 3.9 / 10.4 MiB |
+| Spinner CPU | 0.247% | 0.271% |
+| Scrolling CPU, with margins | 0.423% | 0.414% |
+| Scrolling CPU, without margins | 0.444% | 0.413% |
+| Scrolling outer bytes, without margins | 82,552 | 68,872 |
+| Hidden producers CPU, attached / detached | 0.876% / 0.872% | 0.905% / 0.894% |
+| Server RSS, 1 idle / 10 idle / 10 producers | 1.9 / 3.6 / 10.1 MiB | 2.3 / 3.9 / 10.4 MiB |
 | Client RSS | 1.0 MiB | 1.2 MiB |
-| Executable / archive | 2,096,176 / 841,915 bytes | 2,294,624 / 903,778 bytes |
+| Executable / archive | 2,096,176 / 841,915 bytes | 2,301,536 / 907,510 bytes |
 
 Idle is unchanged: no CPU time and no wakes.
 
 Most of the spinner rise predates this branch. Interleaved three-run
 spinner samples on the same day measured `master` (`e8b4cac`, release
-0.3.0) at 0.271% and 0.270%, the ghostty-vt bump alone (`07c71ba`) at
-0.270% and 0.276%, and `e673b98` at 0.277% to 0.281%. The agent-status code
-adds at most about 0.01 percentage points of one core at 60 frames per
-second. This run does not show which of the 49 commits between `dcd6ecd` and
-`e8b4cac` accounts for the rest, or whether the machine itself changed.
+0.3.0) at 0.271% and 0.270%, and the ghostty-vt bump alone (`07c71ba`) at
+0.270% and 0.276%. This run does not show which of the 49 commits between
+`dcd6ecd` and `e8b4cac` accounts for it, or whether the machine changed.
 
-The no-margin scrolling regression predates this branch too. A one-run
-check of `master` measured 0.614% CPU and 248,512 outer bytes. It is recorded with the open no-margin `e2e-perf` failure in
-`.scratch/test-suite-cleanup/issues/01-no-margin-scroll-budget.md`. That
-test's first recorded failure, on 0.1.6, also comes after `dcd6ecd`, so
-one cause is likely but not shown. With
-margins, scrolling cost is unchanged. Without margins, Kiwa now uses more
-CPU than tmux's 0.429%. It still passes the scrolling gate, which allows
-1.5 times tmux's value plus 0.021, or 0.665%.
+### The no-margin scrolling regression and its fix
 
-Against the October 6 tmux values, the other gates still pass: spinner
-0.278% against 0.571%, hidden output 0.900% against 3.091% attached and
-0.894% against 2.920% detached, and every memory gate under 20 MiB.
+Before the fix, `master` and this branch sent 248,512 outer bytes in the
+no-margin scrolling scenario, at 0.614% to 0.627% CPU, three times the
+October 6 bytes. Bisecting with that byte count, which does not vary
+between runs, found two steps: `b2af2c6` (0.1.3) raised 74,272 to 129,712,
+and `c5a5231` (0.1.4) to 227,992. Later releases added the rest.
+
+Without left and right margins, a scrolling pane makes the outer terminal
+scroll whole rows, so the sidebar rows beside the pane move too, and Kiwa
+redraws each one every frame. Captured frames showed the cost growing with
+the sidebar text in those rows: the details block (Host, directory, and
+counts), the footer once the panes took the bottom row, and the theme's
+24-bit colors on the workspace row.
+
+The fix has three parts:
+
+- Without margins, the mode bar keeps the bottom row and the details block
+  does not show, so only the workspace list sits beside the scrolling rows.
+  Terminals with margins, such as Ghostty, keep the full layout.
+- Style changes go out as deltas when that is shorter than a reset.
+- Without margins, a full-width scroll leaves out the leading rows whose
+  sidebar cells it would move when repainting them unscrolled costs less.
+  A cheaper scan of changed cells also speeds up every diff.
+
+Interleaved three-run samples against the 0.1.1-level build `e4c3dd1`
+measured that build at 0.422% and 0.407% CPU with 74,272 bytes. This fix
+measures 0.413% with 68,872 bytes. With the palette-based `terminal`
+theme, the no-margin scenario sends 60,952 bytes. The previously failing
+`e2e-perf` case, "scrolling output costs bytes per line, not per screen
+(no margins)", now passes at 60 bytes per line.
+
+Against the October 6 tmux values, every gate passes: spinner 0.271%
+against 0.571%, hidden output 0.905% against 3.091% attached and 0.894%
+against 2.920% detached, scrolling 0.414% and 0.413% against 0.665%, and
+every memory gate under 20 MiB.
 
 ## Recorded comparison
 
