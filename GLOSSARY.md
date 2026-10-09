@@ -82,8 +82,16 @@ _Avoid_: auto title, default name
 
 **Activity marker**:
 A mark on a workspace or tab that produced output or a bell while the user
-was not viewing it.
-_Avoid_: badge, notification, agent state
+was not viewing it. It says nothing about what the program is doing; see
+**Agent status**.
+_Avoid_: badge, notification
+
+**Agent status**:
+The state a program reports about itself through OSC 7501, the Program
+Status Protocol: idle, working, done, blocked, or error. The sidebar's
+Agents block lists each pane that has one. Kiwa shows it and never infers
+it from screen text.
+_Avoid_: agent state, program status, detection
 
 **Frame**:
 The full grid of cells the client should show in the outer terminal at one
