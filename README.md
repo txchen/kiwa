@@ -2,19 +2,22 @@
   <img src="docs/assets/kiwa.svg" alt="Kiwa · 際（きわ）" width="760">
 </h1>
 
-A terminal multiplexer with a workspace sidebar. No agent supervision. No configuration homework.
+A terminal multiplexer with a workspace sidebar that shows what your AI agents are doing. They report it; Kiwa never reads the screen to guess. No configuration homework.
 
-I built Kiwa because I liked Herdr's workspace sidebar more than I liked paying its CPU bill. I wanted a multiplexer, not something watching my terminal output to work out what my AI agent was doing. I'll leave the AI coding controls to tools like Paseo.
+I built Kiwa because I liked Herdr's workspace sidebar more than I liked paying its CPU bill. Herdr works out what an AI agent is doing by scanning its pane's text on a timer. I wanted a multiplexer that does nothing while my panes are quiet. I'll leave the AI coding controls to tools like Paseo.
+
+Then the agents learned to speak for themselves. pi and Claude Code now report whether they are working, waiting on you, or done, through [OSC 7501](docs/usage.md#agent-status), the Program Status Protocol. Kiwa listens, and shows each agent under its workspace in the sidebar. It does no work until a report arrives, so a quiet agent still costs nothing.
 
 Tmux is the performance benchmark, but I didn't want another configuration project just to get a comfortable workspace sidebar. Herdr got that part right. Zellij wasn't my answer either. Its 52.5 MB executable was a lot of multiplexer for someone who mostly wanted a column on the left.
 
-So Kiwa keeps the sidebar and does less.
+So Kiwa keeps the sidebar, shows what agents tell it, and does less.
 
 The name comes from the Japanese 際（きわ）, meaning "edge" or "boundary". A fitting name for the bit of UI I wanted on the left.
 
 ## Features
 
 - A persistent workspace sidebar, with tabs and split panes for each project.
+- [Agent status](docs/usage.md#agent-status) under each workspace, from pi, Claude Code, or any program that speaks OSC 7501: working, waiting on you, done, or failed. Click a row, or use `prefix w`, to jump to that agent's pane.
 - Useful defaults. Install it, run `kiwa`, and start working. No config file required.
 - Keyboard navigation and mouse controls. Click to switch, drag to resize, right-click for actions.
 - Compact dividers or [individual pane frames](docs/configuration.md#pane-style). Zoomed tabs show `[Z]`.
@@ -22,9 +25,9 @@ The name comes from the Japanese 際（きわ）, meaning "edge" or "boundary". 
 - Detach without stopping your programs. Reattach when you need them.
 - Layout restore after a server restart, including workspace directories, splits, names, and zoom. Restored panes start new shells, not the old programs.
 - Scrollback, keyboard selection, and clipboard copy through OSC 52.
-- Directory and foreground-program tab names, Git branch display, and unread-output markers. No agent-status detective work.
+- Directory and foreground-program tab names, Git branch display, and unread-output markers.
 
-Kiwa is written in Zig and uses Ghostty's `ghostty-vt` terminal engine. It works inside your existing terminal on Linux and Apple silicon macOS. It is not a terminal emulator app or an AI agent manager.
+Kiwa is written in Zig and uses Ghostty's `ghostty-vt` terminal engine. It works inside your existing terminal on Linux and Apple silicon macOS. It is not a terminal emulator app, and it does not drive your agents.
 
 ### Small binary, quiet idle panes
 
@@ -53,7 +56,7 @@ CPU below is the median percentage of **one core**, summed across server and cli
 | 10 idle panes, detached | 0.000% | 0.000% | 0.253% | 0.620% |
 | 10 hidden output panes, detached | 0.894% | 2.781% | 6.328% | 3.048% |
 
-Herdr's sidebar was the inspiration. Its idle CPU usage was the motivation.
+Herdr's sidebar was the inspiration. Its idle CPU usage was the motivation. Agent status keeps Kiwa's idle numbers where they are: an end-to-end performance test checks that a quiet pane holding an agent record makes no server wakes.
 
 Memory is server RSS at the end of the sample, not peak memory. Client RSS is separate.
 
@@ -98,7 +101,7 @@ The default prefix is `Ctrl+b`. Release it, then press the next key. Press `Ctrl
 | `prefix f` | Toggle between compact and framed pane styles |
 | `prefix x` | Close a pane |
 | `prefix Shift+n` | New workspace |
-| `prefix w` | Navigate the workspace sidebar |
+| `prefix w` | Navigate the sidebar's workspaces and agents |
 | `prefix b` | Collapse or expand the sidebar |
 | `prefix [` | Copy mode; `v` selects, `y` copies |
 | `prefix d` | Detach, leaving programs running |
@@ -119,7 +122,21 @@ kiwa --remote dev # attach to Kiwa on the SSH host dev
 
 After upgrading, `kiwa kill-server` stops the old server **and its pane programs**. The next `kiwa` restores the layout with new shells. Detach instead when you want programs to keep running.
 
-[Full usage guide](docs/usage.md) covers all shortcuts, workspace directories, mouse behavior, copy mode, session restore, and environment variables.
+[Full usage guide](docs/usage.md) covers all shortcuts, agent status, workspace directories, mouse behavior, copy mode, session restore, and environment variables.
+
+### Agent status
+
+Nothing to configure. Run pi 1.1.0 or later, Claude Code 2.1.295 or later, or another program that reports through OSC 7501, directly in a Kiwa pane. A row appears under its workspace with the tab number and the program's name:
+
+| Icon | State |
+| --- | --- |
+| `●` | Working |
+| `!` `?` `*` | Waiting on you: a permission, a question, or a login |
+| `✓` | Done |
+| `✗` | Failed |
+| `·` | Idle |
+
+Click the row, or press `prefix w`, move to it with `j`/`k`, and press Enter. A program inside tmux in a Kiwa pane does not show, because tmux does not pass the reports on.
 
 ### Configure only what you want
 

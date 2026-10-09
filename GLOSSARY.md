@@ -88,8 +88,8 @@ _Avoid_: badge, notification
 
 **Agent status**:
 The state a program reports about itself through OSC 7501, the Program
-Status Protocol: idle, working, done, blocked, or error. The sidebar's
-Agents block lists each pane that has one. Kiwa shows it and never infers
+Status Protocol: idle, working, done, blocked, or error. The sidebar lists
+each pane that has one under its workspace. Kiwa shows it and never infers
 it from screen text.
 _Avoid_: agent state, program status, detection
 

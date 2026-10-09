@@ -92,6 +92,12 @@ Kiwa remembers it across restarts and collapse/expand. The default is 26
 columns, with at least 12 for the sidebar and 20 for the panes when expanded.
 A narrow client temporarily clamps the width without changing the saved choice.
 
+Some outer terminals lack left and right margins (DECLRMM); Ghostty and
+xterm have them. On a terminal without them, a scrolling pane
+also moves the sidebar rows beside it, and Kiwa must redraw them. To keep
+that cheap, Kiwa leaves the bottom row to the mode bar there, and the
+sidebar does not show its information section.
+
 The sidebar's **+ new** and **• menu** controls sit above the information
 section, or at the bottom when that section is hidden. The **menu** opens **Show keybindings**, **Theme**, **Reload config**,
 and **Detach**. **Theme** previews each built-in [theme](configuration.md#theme) as you move through the list; Enter keeps one and saves it to your configuration file. Keybindings reflect the live configuration. Reload success appears
@@ -221,6 +227,42 @@ program's OSC 52 clipboard writes go on to the outer terminal; writes over
 384 KiB are dropped, and clipboard reads are refused. Without
 kitty support in the outer terminal, a lone `esc` reaches the pane after
 25 ms with no further input.
+
+## Agent status
+
+Programs such as pi (1.1.0 and later) and Claude Code (2.1.295 and later)
+report their own state through OSC 7501, the
+[Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status).
+Kiwa answers the protocol's support query for every pane, so these programs
+start reporting on their own. Nothing needs configuring.
+
+Each pane that has reported shows as a row under its workspace, after the
+branch row: an icon, the pane's tab number, and the program's name, or the
+tab name when the program gave none. The focused pane's row is bold.
+
+| Icon | State |
+| --- | --- |
+| `●` | Working |
+| `!` | Waiting on you for a permission, or for something it did not name |
+| `?` | Waiting on you to answer a question |
+| `*` | Waiting on you to log in |
+| `✓` | Done |
+| `✗` | Failed |
+| `·` | Idle |
+
+Click a row to show its workspace, tab, and pane. In navigate mode
+(`prefix w`), `j` and `k` stop on agent rows too, and Enter shows that pane.
+The collapsed sidebar has no room for agent rows.
+
+A row goes away when the program clears its status, when its pane closes,
+or when the program leaves the foreground, as a killed program does. A new
+shell prompt, if the shell marks prompts with OSC 133, also drops a
+working or waiting status. Kiwa keeps only the program's own status, never
+its messages, and never infers a status from the screen. A pane that never
+reports shows nothing.
+
+Programs inside tmux in a Kiwa pane do not show, because tmux does not pass
+the reports on.
 
 ## Workspace directories
 
