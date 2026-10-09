@@ -2343,6 +2343,37 @@ fn clickingAnAgentShowsItsPane(ctx: *Ctx) !void {
     try waitTextIn(o, "left2", left_half);
 }
 
+fn navigatingToAnAgentShowsItsPane(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try createWorkspace(o);
+    try waitHighlighted(o, 2);
+    try o.waitLine("$");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.click(left_half.x + 5, left_half.y + 5);
+    try waitAccent(o, &.{ left_half, right_half });
+    try report(o, "state=blocked:kind=permission:app=pi");
+    try o.waitText("   ! 1 pi");
+    try o.click(right_half.x + 5, right_half.y + 5);
+    try waitAccent(o, &.{ right_half, left_half });
+    try prefixed(o, "w1\r");
+    try waitHighlighted(o, 1);
+
+    try prefixed(o, "w");
+    try waitCell(o, "the navigate cursor on workspace 1", 0, 1, 0x25b6);
+    try o.send("jj");
+    try waitCell(o, "the navigate cursor on the agent row", 0, 3, 0x25b6);
+    try o.send("j");
+    _ = try o.pump(100);
+    try waitCell(o, "the cursor stops at the last row", 0, 3, 0x25b6);
+    try o.press(named(.enter, .{}));
+    try o.waitGone(" NAVIGATE ");
+    try waitHighlighted(o, 2);
+    try waitAccent(o, &.{ left_half, right_half });
+    try o.send("echo left$((1+1))\r");
+    try waitTextIn(o, "left2", left_half);
+}
+
 fn writeAgentScript(ctx: *Ctx) !void {
     const script = try std.fmt.allocPrint(ctx.gpa, "{s}/agent.sh", .{ctx.dir});
     defer ctx.gpa.free(script);
@@ -3790,6 +3821,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "a click focuses a pane", .run = clickFocusesPanes },
     .{ .name = "OSC 7501 reports answer the query and show in the sidebar", .run = programStatusShowsInTheSidebar },
     .{ .name = "clicking an agent row shows its workspace, tab, and pane", .run = clickingAnAgentShowsItsPane },
+    .{ .name = "navigate mode steps onto an agent row and enter shows its pane", .run = navigatingToAnAgentShowsItsPane },
     .{ .name = "a program that exits without clear leaves no agent record", .run = killedAgentLeavesNoRecord },
     .{ .name = "a quiet pane with an agent record makes no wakes", .run = quietAgentMakesNoWakes, .kind = .perf },
     .{ .name = "sidebar menu reloads config, shows live bindings, and detaches", .run = sidebarMenuAndDetails },

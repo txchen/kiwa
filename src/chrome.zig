@@ -29,10 +29,17 @@ pub const Mode = union(enum) {
     normal,
     prefix,
     resize,
-    /// The navigate cursor, a workspace index.
-    navigate: usize,
+    navigate: Nav,
     help,
     copy: bool,
+};
+
+/// The navigate cursor: a workspace row, or one of its agent rows.
+pub const Nav = struct {
+    /// An index into `View.workspaces`.
+    workspace: usize,
+    /// The agent row's pane; null for the workspace row.
+    agent: ?PaneId = null,
 };
 
 pub const Workspace = struct {
@@ -377,7 +384,7 @@ fn firstShown(v: View, height: u16, expanded: bool) usize {
     for (v.workspaces, 0..) |ws, i| if (ws.active) {
         keep = i;
     };
-    if (v.mode == .navigate) keep = v.mode.navigate;
+    if (v.mode == .navigate) keep = v.mode.navigate.workspace;
     var first: usize = 0;
     while (first < keep) : (first += 1) {
         var used: usize = 0;
@@ -385,6 +392,14 @@ fn firstShown(v: View, height: u16, expanded: bool) usize {
         if (used <= height) break;
     }
     return first;
+}
+
+/// Whether the navigate cursor is on workspace `i`'s row (`agent` null) or
+/// on its agent row for that pane.
+fn navAt(v: View, i: usize, agent_pane: ?PaneId) bool {
+    if (v.mode != .navigate) return false;
+    const n = v.mode.navigate;
+    return n.workspace == i and std.meta.eql(n.agent, agent_pane);
 }
 
 fn lineStyle(ws: Workspace, under_cursor: bool, st: *const Styles) Style {
@@ -441,7 +456,7 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
     while (entries.next()) |e| {
         const i = e.index;
         const ws = v.workspaces[i];
-        const cursor = v.mode == .navigate and v.mode.navigate == i;
+        const cursor = navAt(v, i, null);
         const style = lineStyle(ws, cursor, &v.styles);
         const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
@@ -469,7 +484,13 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
             fit(bl, 3, branch, bs);
             y += 1;
         }
-        for (ws.agents, y..) |a, ay| drawAgent(f.rowMut(ay)[0..width], a, style, &v.styles);
+        for (ws.agents, y..) |a, ay| {
+            const row = f.rowMut(ay)[0..width];
+            const on = navAt(v, i, a.pane);
+            const row_style = lineStyle(ws, on, &v.styles);
+            drawAgent(row, a, row_style, &v.styles);
+            if (on) row[0] = .{ .cp = nav_mark, .style = row_style };
+        }
     }
 }
 
@@ -528,7 +549,7 @@ fn drawCollapsed(f: *Frame, v: View) void {
     while (entries.next()) |e| {
         const i = e.index;
         const ws = v.workspaces[i];
-        const cursor = v.mode == .navigate and v.mode.navigate == i;
+        const cursor = v.mode == .navigate and v.mode.navigate.workspace == i;
         const style = lineStyle(ws, cursor, &v.styles);
         const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
@@ -961,7 +982,7 @@ test "mode bars occupy the footer and keep tabs visible" {
     const cases = [_]struct { Mode, []const u8 }{
         .{ .prefix, " PREFIX   c tab  \\ vsplit  - hsplit  [ copy mode  ? help" },
         .{ .resize, " RESIZE   h j k l resize  esc done" },
-        .{ .{ .navigate = 0 }, " NAVIGATE   j k move  1-9 jump  enter switch  esc back" },
+        .{ .{ .navigate = .{ .workspace = 0 } }, " NAVIGATE   j k move  1-9 jump  enter switch  esc back" },
     };
     for (cases) |c| {
         var s = try render(100, 3, .{ .workspaces = &one, .tabs = &tabs2, .mode = c[0] });
@@ -977,14 +998,14 @@ test "mode bars occupy the footer and keep tabs visible" {
 }
 
 test "the navigate cursor is marked and reversed, apart from the active highlight" {
-    var s = try render(80, 6, .{ .workspaces = &three, .tabs = &tabs2, .mode = .{ .navigate = 2 } });
+    var s = try render(80, 6, .{ .workspaces = &three, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 2 } } });
     defer s.deinit();
     try testing.expectEqual(@as(u21, nav_mark), s.at(0, 3).cp);
     try testing.expect(s.at(5, 3).style.flags.inverse);
     try testing.expect(!s.at(5, 2).style.flags.inverse and isHighlight(s.at(5, 2)));
     try testing.expect(!s.at(5, 1).style.flags.inverse);
 
-    var collapsed = try render(40, 6, .{ .workspaces = &three, .tabs = &tabs2, .mode = .{ .navigate = 0 } });
+    var collapsed = try render(40, 6, .{ .workspaces = &three, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 0 } } });
     defer collapsed.deinit();
     try testing.expectEqual(@as(u21, nav_mark), collapsed.at(0, 0).cp);
     try testing.expect(collapsed.at(1, 0).style.flags.inverse);
@@ -1310,6 +1331,22 @@ test "agents show under their workspace with their state's icon and tab number" 
     try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 0 }), hit(v, 80, 24, 5, 2));
     try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 1 }), hit(v, 80, 24, 5, 5));
     try expectHit(v, &s, "/code/kiwa", .workspace_directory);
+}
+
+test "the navigate cursor can sit on an agent row, which it marks and reverses alone" {
+    const v: View = .{ .workspaces = &with_agents, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 0, .agent = @enumFromInt(3) } } };
+    var s = try render(80, 24, v);
+    defer s.deinit();
+    try testing.expectEqual(@as(u21, nav_mark), s.at(0, 4).cp);
+    try testing.expect(s.at(7, 4).style.flags.inverse);
+    try testing.expect(s.at(0, 1).cp != nav_mark and !s.at(5, 1).style.flags.inverse);
+    try testing.expect(!s.at(7, 3).style.flags.inverse);
+
+    var on_workspace = try render(80, 24, .{ .workspaces = &with_agents, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 0 } } });
+    defer on_workspace.deinit();
+    try testing.expectEqual(@as(u21, nav_mark), on_workspace.at(0, 1).cp);
+    try testing.expect(on_workspace.at(5, 2).style.flags.inverse);
+    try testing.expect(!on_workspace.at(7, 3).style.flags.inverse);
 }
 
 test "each blocked kind, error, and idle has its own icon and color" {

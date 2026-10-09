@@ -149,8 +149,7 @@ const Conn = struct {
     /// Whether `frame` holds the key help box over the panes.
     drawn_help: bool = false,
     notice: bool = false,
-    /// The navigate cursor, a workspace index.
-    nav: usize = 0,
+    nav: chrome.Nav = .{ .workspace = 0 },
     mouse: mouse.State = .idle,
     /// The menu `frame` holds over the panes and chrome.
     drawn_menu: ?Menu = null,
@@ -242,6 +241,8 @@ const Server = struct {
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
     chrome_agents: std.ArrayList(chrome.Agent) = .empty,
+    /// The rows the navigate cursor can stop on, top to bottom.
+    nav_stops: std.ArrayList(chrome.Nav) = .empty,
     /// Where each workspace's agents end in `chrome_agents`.
     agent_ends: std.ArrayList(usize) = .empty,
     /// One tab's panes while `chromeView` walks the session for agents.
@@ -981,7 +982,7 @@ const Server = struct {
                 break :blk true;
             },
             .navigate => blk: {
-                c.nav = ss.activeIndex();
+                c.nav = .{ .workspace = ss.activeIndex() };
                 break :blk false;
             },
             // The prefix entered the mode; the mode bar shows it.
@@ -1162,23 +1163,56 @@ const Server = struct {
         try s.markStale();
     }
 
+    /// Moves the navigate cursor through the sidebar's rows that it can
+    /// stop on: each workspace, then its agent rows when the sidebar shows them.
     fn navigate(s: *Server, c: *Conn, n: prefix.Nav) !void {
-        const last = s.session.workspaces.items.len - 1;
-        c.nav = @min(c.nav, last);
+        const view = try s.chromeView(c);
+        const g: chrome.Geometry = .sized(c.size.cols, c.size.rows, s.collapsed, s.sidebar_width);
+        const expanded = g.sidebar > chrome.collapsed_cols;
+        s.nav_stops.clearRetainingCapacity();
+        for (view.workspaces, 0..) |ws, i| {
+            try s.nav_stops.append(s.gpa, .{ .workspace = i });
+            if (expanded) for (ws.agents) |a| try s.nav_stops.append(s.gpa, .{ .workspace = i, .agent = a.pane });
+        }
+        const stops = s.nav_stops.items;
+        // Not `view.mode`: `enter` has already ended navigate mode.
+        const cursor = s.navCursor(c);
+        const at = for (stops, 0..) |stop, i| {
+            if (std.meta.eql(stop, cursor)) break i;
+        } else for (stops, 0..) |stop, i| {
+            // A collapsed sidebar has no agent stops; start from the workspace.
+            if (stop.workspace == cursor.workspace) break i;
+        } else 0;
         switch (n) {
-            .step => |dir| c.nav = switch (dir) {
-                .down => @min(c.nav + 1, last),
-                .up => c.nav -| 1,
+            .step => |dir| c.nav = stops[
+                switch (dir) {
+                    .down => @min(at + 1, stops.len - 1),
+                    .up => at -| 1,
+                }
+            ],
+            .jump => |i| if (i < view.workspaces.len) {
+                c.nav = .{ .workspace = i };
             },
-            .jump => |i| if (i <= last) {
-                c.nav = i;
-            },
-            .pick => if (s.session.selectWorkspace(c.nav)) {
+            .pick => if (cursor.agent) |pane| {
+                if (s.session.revealPane(pane)) {
+                    try s.clearSelection();
+                    try s.markName(s.session.activeTab());
+                    try s.showChanges();
+                }
+            } else if (s.session.selectWorkspace(cursor.workspace)) {
                 try s.relayout(false);
                 try s.markSave();
             },
         }
         try s.markStale();
+    }
+
+    /// The navigate cursor, kept on a row that still exists.
+    fn navCursor(s: *const Server, c: *const Conn) chrome.Nav {
+        const w = @min(c.nav.workspace, s.chrome_workspaces.items.len - 1);
+        const pane = c.nav.agent orelse return .{ .workspace = w };
+        for (s.chrome_workspaces.items[w].agents) |a| if (a.pane == pane) return .{ .workspace = w, .agent = pane };
+        return .{ .workspace = w };
     }
 
     fn onMouse(s: *Server, c: *Conn, ev: input.Mouse) !void {
@@ -1696,7 +1730,7 @@ const Server = struct {
                 .normal => .normal,
                 .armed => .prefix,
                 .resize => .resize,
-                .navigate => .{ .navigate = @min(c.nav, ss.workspaces.items.len - 1) },
+                .navigate => .{ .navigate = s.navCursor(c) },
                 .help => .help,
                 .copy => .{ .copy = if (s.focusedPane()) |p| if (p.copy) |copy| copy.copy_failed else false else false },
                 .dialog => .normal,
@@ -1866,6 +1900,7 @@ const Server = struct {
         s.chrome_tabs.deinit(s.gpa);
         s.chrome_agents.deinit(s.gpa);
         s.agent_ends.deinit(s.gpa);
+        s.nav_stops.deinit(s.gpa);
         s.tab_panes.deinit(s.gpa);
         s.session.deinit();
         s.git.deinit(s.gpa);

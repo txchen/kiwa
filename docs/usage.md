@@ -32,7 +32,7 @@ The prefix is `ctrl+b`. Press it, then one of these keys:
 | `n` / `p`, `1..9` | Next / previous tab, tab by number |
 | `shift+t` / `shift+x` | Rename / close the tab |
 | `shift+n` / `shift+w` / `shift+d` | Choose a directory for a new workspace / rename / close the workspace |
-| `w` | Navigate mode: `j/k` or arrows move through the sidebar, `1..9` jump, `enter` switches, `esc` or `q` leaves |
+| `w` | Navigate mode: `j/k` or arrows move through the sidebar's workspaces and agent rows, `1..9` jump to a workspace, `enter` switches to the workspace or the agent's pane, `esc` or `q` leaves |
 | `b` | Collapse or expand the sidebar |
 | `d` / `q` | Detach |
 | `[` / `ctrl+k` | Keyboard copy mode |

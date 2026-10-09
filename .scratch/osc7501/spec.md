@@ -88,6 +88,11 @@ two panes of one workspace both read `1 pi`.
 - The collapsed sidebar shows no agent rows.
 - Clicking an agent row focuses that pane: select its workspace, its tab,
   and the pane. The hit carries the pane id.
+- Navigate mode (`prefix w`) stops on agent rows too: `j`/`k` walk each
+  workspace row and then its agent rows, `1`-`9` still jump to workspaces,
+  and `enter` on an agent row reveals its pane. The cursor is a workspace
+  index plus an optional agent pane id, so it stays on the same agent when
+  rows above it change. A collapsed sidebar has no agent stops.
 
 ## Glossary
 
