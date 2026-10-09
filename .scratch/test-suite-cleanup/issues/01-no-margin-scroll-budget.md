@@ -37,5 +37,6 @@ snapshot (`dcd6ecd`), scrolling 30 lines/s without margins sent 82,552 outer
 bytes in 12 s at 0.444% CPU. `master` (`e8b4cac`) now sends 248,512 bytes at
 0.614% CPU, and `osc7501` (`e673b98`) 248,512 bytes at 0.627%. With margins,
 both stay at 52,752 bytes. The benchmark's growth lies between `dcd6ecd` and
-`e8b4cac`, not on `osc7501`. This e2e case already failed before
-`dcd6ecd` (0.1.6), so the two may not share one cause. See `docs/benchmarks.md`, "Kiwa rerun".
+`e8b4cac`, not on `osc7501`. This e2e case's first recorded
+failure, on 0.1.6 (`30b7722`), also comes after `dcd6ecd`, so one cause is
+likely but not shown. See `docs/benchmarks.md`, "Kiwa rerun".
