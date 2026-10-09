@@ -67,6 +67,7 @@ class Term:
         self.token = None
         self.token_at = None
         self.tail = b""
+        self.capture = None
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _answer(self, data):
@@ -110,6 +111,8 @@ class Term:
                 if self.token and self.token_at is None and self.token in self.tail + data:
                     self.token_at = now
                 self.tail = data[-8:]
+                if self.capture is not None:
+                    self.capture += data
                 if self.parse:
                     try:
                         self.stream.feed(data)
@@ -244,14 +247,19 @@ def trial_echo_screen(t, i):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("variant")
-    ap.add_argument("scenario", choices=["tabswitch", "echo", "echo-flood", "flood-bytes", "screen"])
+    ap.add_argument("scenario", choices=["tabswitch", "echo", "echo-flood", "flood-bytes", "capture", "screen"])
     ap.add_argument("--trials", type=int, default=10)
     ap.add_argument("--delay", default="0", help="one-way ms [KB/s] written to delay_ms")
     ap.add_argument("--out")
     a = ap.parse_args()
     open(f"{R}/delay_ms", "w").write(a.delay.replace(",", " ") + "\n")
 
-    t = Term(VARIANTS[a.variant])
+    name, _, build = a.variant.partition("@")
+    argv = list(VARIANTS[name])
+    if build:  # kiwa-ssh-tuned@16 runs /tmp/rproto/kiwa-16/bin/kiwa
+        kb = f"{P}/kiwa-{build}/bin/kiwa"
+        argv = [kb if x == "kiwa" else x.replace("exec kiwa", f"exec {kb}") for x in argv]
+    t = Term(argv)
     res = {"variant": a.variant, "scenario": a.scenario, "delay": a.delay}
     try:
         t.wait(lambda s: "$ " in s, 30)
@@ -263,7 +271,7 @@ def main():
             setup_tabs(t)
             fn = trial_tabswitch
             t.parse = False
-        elif a.scenario in ("echo", "echo-flood", "flood-bytes"):
+        elif a.scenario in ("echo", "echo-flood", "flood-bytes", "capture"):
             if a.scenario != "echo":
                 # Left pane floods output; focus returns to the right pane.
                 t.send(PREFIX + b"v")
@@ -275,6 +283,19 @@ def main():
                 t.send(PREFIX + b"l")
                 t.settle(0.05, 2)
                 time.sleep(1.0)
+            if a.scenario == "capture":
+                t.parse = False
+                with t.lock:
+                    t.capture = bytearray()
+                time.sleep(5)
+                with t.lock:
+                    buf, t.capture = bytes(t.capture), None
+                open(a.out or "capture.bin", "wb").write(buf)
+                frames = buf.count(b"\x1b[?2026h")
+                res.update(bytes_per_s=len(buf) / 5, frames_per_s=frames / 5,
+                           bytes_per_frame=len(buf) / max(frames, 1))
+                print(json.dumps(res))
+                return
             if a.scenario == "flood-bytes":
                 u0, d0 = proxy_bytes()
                 rx0 = t.rx

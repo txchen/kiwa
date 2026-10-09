@@ -1,0 +1,60 @@
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25", "dur_s": 5.64, "pty_Bps": 118838, "ms": [62.2, 65.1, 66.0, 57.6, 61.2, 62.1
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25", "dur_s": 5.7, "pty_Bps": 61036, "ms": [61.2, 64.9, 58.6, 75.9, 57.4, 69.
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25", "dur_s": 5.65, "pty_Bps": 119223, "ms": [57.7, 57.1, 62.9, 69.6, 60.6, 60.8, 75
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25", "dur_s": 5.7, "pty_Bps": 63284, "ms": [59.1, 68.9, 66.1, 61.3, 71.8, 64.4, 7
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25", "dur_s": 5.76, "pty_Bps": 86462, "ms": [78.9, 77.2, 76.0, 62.1, 65.4, 119.
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25", "dur_s": 5.86, "pty_Bps": 85920, "ms": [102.1, 80.4, 74.4, 73.3, 81.9, 73.0, 85.5
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.81, "pty_Bps": 120768, "ms": [71.0, 71.2, 83.8, 74.9, 77.6, 
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.75, "pty_Bps": 62841, "ms": [73.4, 77.2, 78.0, 67.9, 70.9
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.7, "pty_Bps": 125298, "ms": [71.3, 63.4, 72.0, 69.7, 64.8, 66.2,
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.74, "pty_Bps": 63347, "ms": [63.1, 73.4, 69.1, 82.4, 77.3, 61
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.89, "pty_Bps": 86803, "ms": [85.9, 75.8, 83.8, 78.3, 104.6,
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.87, "pty_Bps": 87340, "ms": [92.1, 73.1, 78.1, 77.1, 93.1, 82.0, 7
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,96", "dur_s": 29.74, "pty_Bps": 95061, "ms": [895.2, 1239.9, 1676.4, 2356.9, 
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.84, "pty_Bps": 63849, "ms": [81.6, 77.4, 81.8, 80.3, 81.7,
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.82, "pty_Bps": 145443, "ms": [134.1, 74.4, 73.7, 66.8, 66.0, 73.0
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.72, "pty_Bps": 64321, "ms": [62.7, 69.8, 79.5, 65.4, 68.5, 74.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.9, "pty_Bps": 88291, "ms": [90.6, 97.6, 80.1, 87.6, 97.6, 84
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.9, "pty_Bps": 87608, "ms": [78.8, 92.0, 103.9, 74.1, 89.1, 82.4, 97
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,64", "error": "timeout"}
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,64", "dur_s": 6.21, "pty_Bps": 63137, "ms": [89.0, 83.1, 85.8, 98.0, 114.6
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.7, "pty_Bps": 125573, "ms": [73.2, 67.7, 66.9, 73.3, 65.0, 68.7, 
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.83, "pty_Bps": 62874, "ms": [73.1, 85.1, 90.4, 81.2, 77.7, 69.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,64", "error": "timeout"}
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,64", "dur_s": 6.03, "pty_Bps": 84860, "ms": [106.5, 99.8, 99.0, 142.4, 94.9, 80.7, 
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,48", "dur_s": 45.88, "pty_Bps": 47852, "ms": [6318.3, 106.2, 7213.7, 3646.5, 
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,48", "error": "timeout"}
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,48", "dur_s": 27.78, "pty_Bps": 103922, "ms": [640.6, 896.2, 1153.7, 1466.6, 1776
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,48", "dur_s": 5.79, "pty_Bps": 63738, "ms": [72.0, 80.7, 77.8, 68.5, 73.2, 71.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,48", "error": "timeout"}
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,48", "dur_s": 19.11, "pty_Bps": 77588, "ms": [556.9, 696.4, 836.2, 1049.4, 1240.4, 
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25", "dur_s": 5.69, "pty_Bps": 124611, "ms": [60.1, 69.7, 63.9, 61.9, 68.7, 80.0
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25", "dur_s": 5.71, "pty_Bps": 62421, "ms": [68.7, 94.1, 68.7, 78.1, 66.1, 61
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25", "dur_s": 5.65, "pty_Bps": 126678, "ms": [63.7, 58.0, 58.7, 78.5, 65.5, 54.5, 59
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25", "dur_s": 5.66, "pty_Bps": 65015, "ms": [56.3, 62.6, 66.4, 67.6, 67.2, 66.5, 
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25", "dur_s": 5.68, "pty_Bps": 88718, "ms": [71.8, 71.6, 68.8, 66.1, 67.8, 64.1
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25", "dur_s": 5.68, "pty_Bps": 88763, "ms": [77.7, 69.4, 64.6, 62.2, 66.8, 66.5, 59.6,
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.95, "pty_Bps": 123993, "ms": [86.6, 90.7, 69.7, 71.0, 81.6, 
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.68, "pty_Bps": 64929, "ms": [70.9, 65.7, 63.7, 68.4, 64.6
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.63, "pty_Bps": 128656, "ms": [58.9, 61.7, 60.7, 65.6, 62.1, 64.4
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.67, "pty_Bps": 64646, "ms": [75.2, 74.9, 64.9, 66.5, 67.1, 66
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.83, "pty_Bps": 89126, "ms": [82.0, 79.2, 82.9, 85.2, 85.4, 
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,128", "dur_s": 5.85, "pty_Bps": 87651, "ms": [70.3, 74.0, 83.9, 83.6, 85.3, 90.4, 8
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,96", "error": "timeout"}
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.76, "pty_Bps": 65030, "ms": [73.6, 79.0, 66.3, 68.3, 80.8,
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.65, "pty_Bps": 128047, "ms": [62.0, 62.7, 70.5, 66.4, 67.8, 61.9,
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.69, "pty_Bps": 65041, "ms": [73.2, 66.3, 73.4, 68.2, 66.4, 67.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.85, "pty_Bps": 88732, "ms": [79.0, 83.8, 82.0, 83.1, 79.4, 9
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,96", "dur_s": 5.83, "pty_Bps": 89426, "ms": [82.9, 80.1, 81.6, 83.9, 84.5, 82.2, 84
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,64", "error": "timeout"}
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,64", "dur_s": 7.7, "pty_Bps": 63304, "ms": [179.5, 198.1, 213.0, 231.5, 26
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.69, "pty_Bps": 128287, "ms": [74.2, 73.4, 67.7, 66.9, 69.2, 65.5,
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.67, "pty_Bps": 65200, "ms": [75.7, 63.5, 65.7, 64.0, 66.3, 64.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,64", "error": "timeout"}
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.84, "pty_Bps": 88956, "ms": [74.1, 85.6, 88.0, 82.8, 83.6, 86.0, 82
+{"variant": "kiwa-ssh-noobscure", "scenario": "echo-flood", "delay": "25,48", "error": "timeout"}
+{"variant": "kiwa-ssh-noobscure@16", "scenario": "echo-flood", "delay": "25,48", "error": "timeout"}
+{"variant": "kiwa-ssh-tuned", "scenario": "echo-flood", "delay": "25,48", "dur_s": 45.96, "pty_Bps": 103876, "ms": [966.5, 1314.1, 1747.4, 2264.7, 292
+{"variant": "kiwa-ssh-tuned@16", "scenario": "echo-flood", "delay": "25,48", "dur_s": 5.72, "pty_Bps": 65123, "ms": [75.4, 65.4, 68.7, 68.9, 81.5, 64.
+{"variant": "herdr-ssh-noobscure", "scenario": "echo-flood", "delay": "25,48", "error": "timeout"}
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,48", "dur_s": 21.29, "pty_Bps": 77505, "ms": [577.8, 722.7, 902.2, 1124.1, 1351.1, 

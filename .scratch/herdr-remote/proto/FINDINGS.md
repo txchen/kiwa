@@ -112,3 +112,41 @@ chmod +x bin/herdr
 ./run-matrix.sh && python3 summarize.py
 ./run-tuned.sh
 ```
+
+## Follow-up: halve Kiwa's frame rate
+
+`capture` records 5 seconds of outer-terminal bytes during the flood, with no
+SSH. Kiwa sent about 1,050 bytes per frame and Herdr about 1,530. A Kiwa
+frame contains only cursor moves and the changed cells, so the frame
+rate set the byte rate. Kiwa rendered 117 to 121 frames/s, because the
+render deadline was 8 ms. Herdr rendered 58 frames/s.
+
+| build | frames/s | bytes/s |
+|---|---|---|
+| Kiwa, 8 ms render deadline | 117 to 121 | 123 to 128 KB |
+| Kiwa, 12 ms | 78 | 82 KB |
+| Kiwa, 16 ms | 58 to 62 | 61 to 65 KB |
+| Herdr | 58 | 89 KB |
+
+`run-fps.sh` runs the echo-flood scenario with 25 ms one-way delay on
+progressively slower links. Each cell shows the median in ms, the p10 to
+p90 range, and the downstream rate offered. The machine was busy, with a
+load average of 6 to 9 from other work, and both sides saw the same noise.
+`@16` means a 16 ms render deadline. `tuned` adds `-C -o
+ObscureKeystrokeTiming=no`. `noobscure` adds only the second option.
+
+| link | kiwa-ssh-noobscure | kiwa-ssh-noobscure@16 | kiwa-ssh-tuned | kiwa-ssh-tuned@16 | herdr-ssh-noobscure | herdr-remote |
+|---|---|---|---|---|---|---|
+| 25 | 63 (60-72), 122 KB/s | 69 (59-84), 62 KB/s | 61 (56-75), 56 KB/s | 66 (59-77), 30 KB/s | 68 (60-79), 88 KB/s | 73 (62-99), 54 KB/s |
+| 25,128 | 80 (71-114), 124 KB/s | 68 (65-78), 65 KB/s | 64 (60-71), 58 KB/s | 68 (62-77), 30 KB/s | 85 (73-103), 88 KB/s | 84 (73-100), 54 KB/s |
+| 25,96 | 2554 (930-4045), 123 KB/s [1 of 2 runs] | 80 (67-88), 65 KB/s | 67 (62-77), 58 KB/s | 68 (65-78), 30 KB/s | 86 (79-97), 88 KB/s | 83 (79-97), 55 KB/s |
+| 25,64 | timeout | 165 (86-344), 65 KB/s | 68 (64-73), 59 KB/s | 71 (64-90), 30 KB/s | timeout | 86 (80-121), 54 KB/s |
+| 25,48 | timeout in 1 of 2 runs | timeout | 2500 (903-7456), 57 KB/s | 72 (65-81), 30 KB/s | timeout | 1398 (590-2651), 54 KB/s |
+
+At 16 ms with compression, Kiwa sends about 30 KB/s and keeps 72 ms echo
+latency on a 48 KB/s link. Herdr `--remote` takes 1,398 ms there. When the
+link is not saturated, 16 ms costs up to 8 ms of extra frame latency
+during continuous output. The measured medians rose 5 to 6 ms, inside the
+p10 to p90 ranges. A single update after a quiet period still renders
+immediately, because the deadline applies only within 16 ms of the previous
+frame.

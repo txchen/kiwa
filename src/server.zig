@@ -53,7 +53,10 @@ const Deadline = enum {
 };
 
 const delay_ns = std.EnumArray(Deadline, u64).init(.{
-    .render = 8 * std.time.ns_per_ms,
+    // At most about 60 frames/s. Under continuous output every frame
+    // redraws the changed rows, so outer-terminal bytes scale with the frame
+    // rate; 8 ms sent twice the bytes and queued up on slow SSH links.
+    .render = 16 * std.time.ns_per_ms,
     .input = 25 * std.time.ns_per_ms,
     .names = names.interval_ns,
     .notice = 3 * std.time.ns_per_s,
