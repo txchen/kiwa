@@ -2268,6 +2268,115 @@ fn clickFocusesPanes(ctx: *Ctx) !void {
     try waitTextIn(o, "right3", right_half);
 }
 
+/// Asks for OSC 7501 support, then DA1, and prints both replies. A reply
+/// ahead of DA1 means the terminal supports the protocol, as pi detects it.
+const program_status_query =
+    \\import os, termios, tty
+    \\old = termios.tcgetattr(0)
+    \\tty.setraw(0)
+    \\os.write(1, b"\x1b]7501;?\x1b\\\x1b[c")
+    \\data = b""
+    \\while not data.endswith(b"c"):
+    \\    data += os.read(0, 64)
+    \\termios.tcsetattr(0, termios.TCSADRAIN, old)
+    \\print("reply", repr(data))
+;
+
+/// Sends one OSC 7501 report from the pane's shell.
+fn report(o: *Outer, comptime pairs: []const u8) !void {
+    try o.send("printf '\\033]7501;" ++ pairs ++ "\\033\\\\'\r");
+}
+
+fn programStatusShowsInTheSidebar(ctx: *Ctx) !void {
+    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/query.py", .{ctx.dir});
+    defer ctx.gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = program_status_query });
+    const o = try attachedWithPrompt(ctx);
+    try o.send("python3 query.py\r");
+    try o.waitText("reply b'\\x1b]7501;?\\x1b\\\\\\x1b[?");
+    try expect(!try o.contains("Agents"), "a query alone makes no record");
+
+    try report(o, "state=working:app=pi");
+    try o.waitText(" ● 1 pi           working");
+    try o.waitText("Agents");
+    try report(o, "state=blocked:kind=question:app=pi");
+    try o.waitText(" ? 1 pi          question");
+    try report(o, "state=done:id=child");
+    try o.send("echo child-sent\r");
+    try o.waitLine("child-sent");
+    try expect(try o.contains(" ? 1 pi          question"), "a child report leaves the root record alone");
+    try report(o, "state=idle");
+    try o.waitText(" · 1 ~               idle");
+    try report(o, "state=clear");
+    try o.waitGone("Agents");
+
+    try report(o, "state=working:app=pi");
+    try o.waitText("pi           working");
+    try o.send("printf '\\033]133;A\\033\\\\'\r");
+    try o.waitGone("Agents");
+    try report(o, "state=done:app=pi");
+    try o.waitText(" ✓ 1 pi              done");
+    try o.send("printf '\\033]133;A\\033\\\\'; echo prompted\r");
+    try o.waitLine("prompted");
+    _ = try o.pump(100);
+    try expect(try o.contains(" ✓ 1 pi              done"), "a new prompt keeps a done record");
+}
+
+fn clickingAnAgentShowsItsPane(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try createWorkspace(o);
+    try waitHighlighted(o, 2);
+    try o.waitLine("$");
+    try prefixed(o, "v");
+    try waitBoxes(o, &.{ left_half, right_half });
+    try o.click(left_half.x + 5, left_half.y + 5);
+    try waitAccent(o, &.{ left_half, right_half });
+    try report(o, "state=blocked:kind=permission:app=pi");
+    try o.waitText(" ? 2 pi        permission");
+    try o.click(right_half.x + 5, right_half.y + 5);
+    try waitAccent(o, &.{ right_half, left_half });
+    try prefixed(o, "w1\r");
+    try waitHighlighted(o, 1);
+    try clickSidebarText(o, "2 pi", 0);
+    try waitHighlighted(o, 2);
+    try waitAccent(o, &.{ left_half, right_half });
+    try o.send("echo left$((1+1))\r");
+    try waitTextIn(o, "left2", left_half);
+}
+
+fn writeAgentScript(ctx: *Ctx) !void {
+    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/agent.sh", .{ctx.dir});
+    defer ctx.gpa.free(script);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = "printf '\\033]7501;state=working:app=fake\\033\\\\'\nsleep 1\n" });
+}
+
+fn killedAgentLeavesNoRecord(ctx: *Ctx) !void {
+    try writeAgentScript(ctx);
+    const o = try attachedWithPrompt(ctx);
+    try o.send("sh agent.sh\r");
+    try o.waitText(" ● 1 fake         working");
+    _ = try o.pump(300);
+    try expect(try o.contains("fake         working"), "the record stays while its program is in front");
+    try o.waitGone("Agents");
+}
+
+fn quietAgentMakesNoWakes(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try report(o, "state=working:app=pi");
+    try o.waitText("pi           working");
+    // Past the report's last orphan and name checks, one interval after it.
+    _ = try o.pump(1200);
+    const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
+    const before = try sample(ctx, pid);
+    const bytes = try o.pump(5_000);
+    const after = try sample(ctx, pid);
+    const switches = after.switches - before.switches;
+    std.debug.print("    quiet agent 5 s: server context switches={d}, outer bytes={d}\n", .{ switches, bytes });
+    try expect(switches <= 2, "at most 2 server context switches in 5 s");
+    try expect(bytes == 0, "no output reaches the outer terminal");
+    try expect(try o.contains("pi           working"), "a quiet program keeps its record");
+}
+
 fn dragMovesTheBorder(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try prefixed(o, "v");
@@ -3680,6 +3789,10 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "the outer cursor sits at the focused pane's cursor", .run = cursorFollowsTheFocusedPane },
     .{ .name = "clicks switch workspaces and tabs, add them, and toggle the sidebar", .run = clicksSwitchWorkspacesAndTabs },
     .{ .name = "a click focuses a pane", .run = clickFocusesPanes },
+    .{ .name = "OSC 7501 reports answer the query and show in the sidebar", .run = programStatusShowsInTheSidebar },
+    .{ .name = "clicking an agent row shows its workspace, tab, and pane", .run = clickingAnAgentShowsItsPane },
+    .{ .name = "a program that exits without clear leaves no agent record", .run = killedAgentLeavesNoRecord },
+    .{ .name = "a quiet pane with an agent record makes no wakes", .run = quietAgentMakesNoWakes, .kind = .perf },
     .{ .name = "sidebar menu reloads config, shows live bindings, and detaches", .run = sidebarMenuAndDetails },
     .{ .name = "default shortcuts and the bottom prefix bar", .run = defaultShortcutsAndFooter },
     .{ .name = "configuration startup overrides saved width and keeps the custom prefix", .run = configStartupAndRestore },
