@@ -59,16 +59,19 @@ the spec requires; `clear` sets it to null.
 
 ## UI
 
-A new sidebar block, between the workspace list's footer and the Host
-block, headed `Agents` in the heading style with the same divider row the
-Host block uses. One row per pane with a record, in session order
-(workspace, tab, layout order):
+Each pane with a record is a row under its workspace in the sidebar list,
+after the branch row, in tab then layout order. A separate Agents block
+came first; the user found its leading workspace number confusing, since
+two panes of one workspace both read `1 pi`.
 
 ```
- Agents
- ● 1 pi
- ! 2 claude-code
- ✓ 1 pi
+ Workspaces
+ 1 kiwa              •
+   osc7501
+   ● 1 pi
+   ✓ 4 claude-code
+ 2 notes
+   ! 1 pi
 ```
 
 - One single-width icon per state, theme-colored, and no state word:
@@ -76,15 +79,15 @@ Host block uses. One row per pane with a record, in session order
   no kind, `?` question, `*` auth), done `✓`, error `✗` in the error
   color, idle `·` dim. Emoji were rejected because they are two cells wide,
   render differently across fonts, and ignore the theme.
-- Then the workspace number, then the label: `app`, or the tab name when
-  `app` is empty. The label takes the rest of the row.
-- The block shows only when at least one pane has a record, and only in
-  spare space. Like the Host block, it never displaces workspace entries.
-  If both do not fit, Agents wins over Host. When rows are short, show as
-  many agent rows as fit.
-- The collapsed sidebar shows nothing new.
+- Then the pane's tab number in the workspace-number color, then the
+  label: `app`, or the tab name when `app` is empty.
+- Rows share the workspace entry's style, so the active workspace's agents
+  sit on its selected background. The focused pane's label is bold.
+- Agent rows count toward the entry's height, so scrolling keeps the
+  active workspace visible.
+- The collapsed sidebar shows no agent rows.
 - Clicking an agent row focuses that pane: select its workspace, its tab,
-  and the pane. Add a `Hit` variant for it.
+  and the pane. The hit carries the pane id.
 
 ## Glossary
 

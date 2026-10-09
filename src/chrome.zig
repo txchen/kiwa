@@ -41,6 +41,8 @@ pub const Workspace = struct {
     branch: ?[]const u8 = null,
     activity: Activity = .none,
     active: bool = false,
+    /// In tab, then layout order.
+    agents: []const Agent = &.{},
 };
 
 pub const Tab = struct {
@@ -50,15 +52,17 @@ pub const Tab = struct {
     zoomed: bool = false,
 };
 
-/// One row of the sidebar's Agents block: a pane with an OSC 7501 record.
+/// A pane with an OSC 7501 record, shown as a row under its workspace.
 pub const Agent = struct {
-    /// The pane's workspace, as an index into `View.workspaces`.
-    workspace: usize,
     /// The reported app, or the pane's tab name when it reported none.
     label: []const u8,
+    /// The pane's tab, as an index into its workspace's tabs.
+    tab: usize = 0,
     state: agent.State,
     kind: ?agent.Kind = null,
     pane: PaneId,
+    /// The focused pane of the active workspace's active tab.
+    focused: bool = false,
 };
 
 /// What the chrome shows. Indexes are positions in the lists, from 1.
@@ -66,8 +70,6 @@ pub const View = struct {
     workspaces: []const Workspace,
     /// The active workspace's tabs.
     tabs: []const Tab,
-    /// In session order: workspace, tab, then layout order.
-    agents: []const Agent = &.{},
     mode: Mode = .normal,
     custom_keys: bool = false,
     hostname: []const u8 = "",
@@ -220,7 +222,7 @@ pub const Hit = union(enum) {
     resize_sidebar,
     tab: usize,
     new_tab,
-    agent: usize,
+    agent: PaneId,
 };
 
 /// What the chrome drawn by `draw` shows at (x, y), or null when the point
@@ -231,12 +233,10 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         if (x == g.sidebar - 1) return .resize_sidebar;
         const expanded = g.sidebar > collapsed_cols;
         const full: List = .of(rows, expanded);
-        if (expanded) {
-            const d: Details = .of(v, rows, g.sidebar);
-            if (d.host != null and y == rows - 2) return .workspace_directory;
-            if (d.agents) |top| if (y >= top + 2 and y < top + 2 + d.agent_rows) return .{ .agent = y - top - 2 };
-            if (d.top()) |top| if (y >= top and y < full.end) return .none;
-        }
+        if (expanded) if (infoTop(v, rows, g.sidebar)) |top| {
+            if (y == rows - 2) return .workspace_directory;
+            if (y >= top and y < full.end) return .none;
+        };
         const list = sidebarList(v, rows, expanded, g.sidebar);
         if (y == list.end and list.end < rows) {
             // The `«` and the cells around it toggle; the rest of the footer is `+ new`.
@@ -246,7 +246,11 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         }
         var entries: Entries = .init(v, list, expanded);
         while (entries.next()) |e| {
-            if (y >= e.y and y < e.y + e.rows) return .{ .workspace = e.index };
+            if (y < e.y or y >= e.y + e.rows) continue;
+            const ws = v.workspaces[e.index];
+            const head = entryRows(ws, expanded) - agentRows(ws, expanded);
+            if (y - e.y >= head) return .{ .agent = ws.agents[y - e.y - head].pane };
+            return .{ .workspace = e.index };
         }
         return .none;
     }
@@ -306,44 +310,20 @@ fn hostRows(text: []const u8, cols: usize) usize {
     return count;
 }
 
-/// The blocks below the expanded sidebar's footer: Agents, then Host.
-/// They take only spare space and never displace workspace entries.
-/// Agents comes first: Host shows only in the space Agents leaves.
-const Details = struct {
-    /// The divider rows that start each block; null when it does not show.
-    agents: ?u16 = null,
-    host: ?u16 = null,
-    /// How many agent rows fit under the Agents heading.
-    agent_rows: u16 = 0,
-
-    fn of(v: View, rows: u16, sidebar: u16) Details {
-        var used: usize = 2;
-        for (v.workspaces) |ws| used += entryRows(ws, true);
-        if (rows < 3 or used >= rows) return .{};
-        var spare = rows - used;
-        var d: Details = .{};
-        if (v.agents.len > 0 and spare >= 3) {
-            d.agent_rows = @intCast(@min(v.agents.len, spare - 2));
-            spare -= 2 + d.agent_rows;
-        }
-        var bottom = rows;
-        const host_rows = hostRows(v.hostname, sidebar - 3) + 5;
-        if (v.hostname.len > 0 and rows >= 12 and host_rows <= spare) {
-            bottom -= @intCast(host_rows);
-            d.host = bottom;
-        }
-        if (d.agent_rows > 0) d.agents = bottom - 2 - d.agent_rows;
-        return d;
-    }
-
-    fn top(d: Details) ?u16 {
-        return d.agents orelse d.host;
-    }
-};
+/// Show details only in spare space; never displace workspace entries.
+fn infoTop(v: View, rows: u16, sidebar: u16) ?u16 {
+    if (v.hostname.len == 0 or rows < 12) return null;
+    var used: usize = 1;
+    for (v.workspaces) |ws| used += entryRows(ws, true);
+    const count = hostRows(v.hostname, sidebar - 3);
+    if (count + 5 >= rows) return null;
+    const top: u16 = @intCast(rows - 5 - count);
+    return if (used + 1 <= top) top else null;
+}
 
 fn sidebarList(v: View, rows: u16, expanded: bool, sidebar: u16) List {
     var list = List.of(rows, expanded);
-    if (expanded) if (Details.of(v, rows, sidebar).top()) |top| {
+    if (expanded) if (infoTop(v, rows, sidebar)) |top| {
         list.end = top - 1;
     };
     return list;
@@ -382,7 +362,12 @@ const Entries = struct {
 };
 
 fn entryRows(ws: Workspace, expanded: bool) u16 {
-    return if (expanded and ws.branch != null) 2 else 1;
+    return @as(u16, 1) + @intFromBool(expanded and ws.branch != null) + agentRows(ws, expanded);
+}
+
+/// The collapsed sidebar has no room for agent rows.
+fn agentRows(ws: Workspace, expanded: bool) u16 {
+    return if (expanded) @intCast(ws.agents.len) else 0;
 }
 
 /// The first workspace to draw so that the active one, and the navigate
@@ -433,13 +418,7 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         footer[width - 1] = .{ .cp = 0x00ab };
     }
 
-    const details: Details = .of(v, f.rows, sidebar_width);
-    if (details.agents) |top| {
-        for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = v.styles.divider };
-        _ = put(f.rowMut(top + 1)[1..width], 0, "Agents", v.styles.sidebar_heading);
-        for (v.agents[0..details.agent_rows], top + 2..) |a, y| drawAgent(f.rowMut(y)[0..width], a, &v.styles);
-    }
-    if (details.host) |top| {
+    if (infoTop(v, f.rows, sidebar_width)) |top| {
         const inner = width - 2;
         for (f.rowMut(top)[1..width]) |*cell| cell.* = .{ .cp = 0x2500, .style = v.styles.divider };
         _ = put(f.rowMut(top + 1)[1..width], 0, "Host", v.styles.sidebar_heading);
@@ -480,29 +459,44 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
             ms.fg_color = v.styles.marker;
             line[width - 2] = .{ .cp = cp, .style = ms };
         }
-        if (e.rows == 2) {
-            const bl = f.rowMut(e.y + 1)[0..width];
+        var y = e.y + 1;
+        if (ws.branch) |branch| {
+            const bl = f.rowMut(y)[0..width];
             var bs = style;
             bs.fg_color = v.styles.branch;
             bs.flags.faint = !ws.active;
             for (bl) |*c| c.style = bs;
-            fit(bl, 3, ws.branch.?, bs);
+            fit(bl, 3, branch, bs);
+            y += 1;
         }
+        for (ws.agents, y..) |a, ay| drawAgent(f.rowMut(ay)[0..width], a, style, &v.styles);
     }
 }
 
-/// Draws ` ● 1 pi`: the state's icon, the workspace number, and the label.
-fn drawAgent(line: []Cell, a: Agent, st: *const Styles) void {
-    line[1] = .{ .cp = agentIcon(a), .style = switch (a.state) {
-        .working => .{ .fg_color = st.accent },
-        .blocked => .{ .fg_color = st.marker, .flags = .{ .bold = true } },
-        .done => plain,
-        .err => st.@"error",
-        .idle => dim,
-    } };
+/// Draws `   ● 2 pi` in the workspace entry's `style`: the state's icon,
+/// the pane's tab number, and the label.
+fn drawAgent(line: []Cell, a: Agent, style: Style, st: *const Styles) void {
+    for (line) |*c| c.style = style;
+    var icon = style;
+    switch (a.state) {
+        .working => icon.fg_color = st.accent,
+        .blocked => {
+            icon.fg_color = st.marker;
+            icon.flags.bold = true;
+        },
+        .done => {},
+        .err => icon.fg_color = st.@"error".fg_color,
+        .idle => icon.flags.faint = true,
+    }
+    line[3] = .{ .cp = agentIcon(a), .style = icon };
+    var number = style;
+    number.fg_color = st.workspace_number;
     var num: [24]u8 = undefined;
-    const x = put(line, 3, std.fmt.bufPrint(&num, "{d} ", .{a.workspace + 1}) catch unreachable, .{ .fg_color = st.workspace_number });
-    fit(line[0 .. line.len - 1], x, a.label, plain);
+    const x = put(line, 5, std.fmt.bufPrint(&num, "{d} ", .{a.tab + 1}) catch unreachable, number);
+    var label = style;
+    label.flags.bold = a.focused;
+    // One blank column before the divider, as workspace names keep.
+    fit(line[0 .. line.len - 1], x, a.label, label);
 }
 
 /// One cell per state, so the column lines up in every font. A blocked
@@ -1245,12 +1239,12 @@ test "sidebar details use spare space and directory and menu clicks match their 
     try testing.expect(std.mem.indexOf(u8, text, "2 tabs · 3 panes") != null);
     try testing.expectEqual(@as(u21, '2'), s.at(1, 23).cp);
     try testing.expect(std.mem.indexOf(u8, text, "+ new").? < std.mem.indexOf(u8, text, "Host").?);
-    try testing.expectEqual(null, Details.of(v, 10, 26).host);
+    try testing.expectEqual(null, infoTop(v, 10, 26));
     var many: [20]Workspace = undefined;
     for (&many) |*ws| ws.* = .{ .name = "workspace" };
     var crowded = v;
     crowded.workspaces = &many;
-    try testing.expectEqual(null, Details.of(crowded, 24, 26).host);
+    try testing.expectEqual(null, infoTop(crowded, 24, 26));
 }
 
 test "long hostnames wrap in spare sidebar space and keep controls above the details" {
@@ -1267,14 +1261,8 @@ test "long hostnames wrap in spare sidebar space and keep controls above the det
     try expectHit(v, &s, "menu", .application_menu);
     try testing.expectEqual(2, hostRows(host, 23));
     try testing.expectEqual(3, hostRows(host, 15));
-    try testing.expectEqual(null, Details.of(v, 9, 26).host);
+    try testing.expectEqual(null, infoTop(v, 9, 26));
 }
-
-const agents3 = [_]Agent{
-    .{ .workspace = 0, .label = "pi", .state = .working, .pane = @enumFromInt(1) },
-    .{ .workspace = 1, .label = "claude-code", .state = .blocked, .pane = @enumFromInt(2) },
-    .{ .workspace = 0, .label = "pi", .state = .done, .pane = @enumFromInt(3) },
-};
 
 fn expectRow(s: *const Screen, y: usize, want: []const u8) !void {
     const got = try s.text();
@@ -1285,84 +1273,96 @@ fn expectRow(s: *const Screen, y: usize, want: []const u8) !void {
     try testing.expectEqualStrings(want, std.mem.trimEnd(u8, line[0 .. std.mem.indexOf(u8, line, "│") orelse line.len], " "));
 }
 
-test "agents show between the footer and Host, one row per record with its state's icon" {
-    const v: View = .{ .workspaces = &three, .tabs = &tabs2, .agents = &agents3, .hostname = "devbox", .directory = "/code/kiwa" };
+const kiwa_agents = [_]Agent{
+    .{ .label = "pi", .state = .working, .pane = @enumFromInt(1) },
+    .{ .label = "pi", .tab = 3, .state = .done, .pane = @enumFromInt(3), .focused = true },
+};
+const notes_agents = [_]Agent{.{ .label = "claude-code", .state = .blocked, .pane = @enumFromInt(2) }};
+const with_agents = [_]Workspace{
+    .{ .name = "kiwa", .branch = "osc7501", .active = true, .agents = &kiwa_agents },
+    .{ .name = "notes", .agents = &notes_agents },
+};
+
+test "agents show under their workspace with their state's icon and tab number" {
+    const v: View = .{ .workspaces = &with_agents, .tabs = &tabs2, .hostname = "devbox", .directory = "/code/kiwa" };
     var s = try render(80, 24, v);
     defer s.deinit();
-    // Host takes the bottom 6 rows; Agents' 5 sit right above, under the footer.
-    try expectRow(&s, 12, " + new        • menu    «");
-    try expectRow(&s, 13, " ────────────────────────");
-    try expectRow(&s, 14, " Agents");
-    try expectRow(&s, 15, " ● 1 pi");
-    try expectRow(&s, 16, " ! 2 claude-code");
-    try expectRow(&s, 17, " ✓ 1 pi");
-    try expectRow(&s, 19, " Host");
-    try testing.expectEqualDeep(default_styles.accent, s.at(1, 15).style.fg_color);
-    try testing.expectEqualDeep(default_styles.marker, s.at(1, 16).style.fg_color);
-    try testing.expect(s.at(1, 16).style.flags.bold);
-    try testing.expectEqualDeep(default_styles.workspace_number, s.at(3, 15).style.fg_color);
+    try expectRow(&s, 1, " 1 kiwa");
+    try expectRow(&s, 2, "   osc7501");
+    try expectRow(&s, 3, "   ● 1 pi");
+    try expectRow(&s, 4, "   ✓ 4 pi");
+    try expectRow(&s, 5, " 2 notes");
+    try expectRow(&s, 6, "   ! 1 claude-code");
+    try testing.expectEqualDeep(default_styles.accent, s.at(3, 3).style.fg_color);
+    try testing.expectEqualDeep(default_styles.marker, s.at(3, 6).style.fg_color);
+    try testing.expect(s.at(3, 6).style.flags.bold);
+    // Sub-items share their workspace's selected background.
+    try testing.expectEqualDeep(default_styles.workspace_selected.bg_color, s.at(5, 3).style.bg_color);
+    try testing.expectEqualDeep(default_styles.workspace_selected.bg_color, s.at(20, 4).style.bg_color);
+    try testing.expectEqualDeep(default_styles.workspace_number, s.at(5, 3).style.fg_color);
+    try testing.expect(!s.at(7, 3).style.flags.bold);
+    try testing.expect(s.at(7, 4).style.flags.bold);
+    try testing.expectEqualDeep(plain.bg_color, s.at(5, 6).style.bg_color);
 
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = 0 }), hit(v, 80, 24, 6, 15));
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = 1 }), hit(v, 80, 24, 20, 16));
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = 2 }), hit(v, 80, 24, 1, 17));
-    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 80, 24, 3, 14));
-    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 80, 24, 3, 13));
-    try expectHit(v, &s, "+ new", .new_workspace);
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(1) }), hit(v, 80, 24, 6, 3));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(3) }), hit(v, 80, 24, 1, 4));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(2) }), hit(v, 80, 24, 20, 6));
+    try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 0 }), hit(v, 80, 24, 5, 2));
+    try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 1 }), hit(v, 80, 24, 5, 5));
     try expectHit(v, &s, "/code/kiwa", .workspace_directory);
 }
 
 test "each blocked kind, error, and idle has its own icon and color" {
     const agents = [_]Agent{
-        .{ .workspace = 0, .label = "a", .state = .blocked, .kind = .permission, .pane = @enumFromInt(1) },
-        .{ .workspace = 0, .label = "b", .state = .blocked, .kind = .question, .pane = @enumFromInt(2) },
-        .{ .workspace = 0, .label = "c", .state = .blocked, .kind = .auth, .pane = @enumFromInt(3) },
-        .{ .workspace = 0, .label = "x", .state = .err, .pane = @enumFromInt(4) },
-        .{ .workspace = 0, .label = "y", .state = .idle, .pane = @enumFromInt(5) },
+        .{ .label = "a", .state = .blocked, .kind = .permission, .pane = @enumFromInt(1) },
+        .{ .label = "b", .state = .blocked, .kind = .question, .pane = @enumFromInt(2) },
+        .{ .label = "c", .state = .blocked, .kind = .auth, .pane = @enumFromInt(3) },
+        .{ .label = "x", .state = .err, .pane = @enumFromInt(4) },
+        .{ .label = "y", .state = .idle, .pane = @enumFromInt(5) },
     };
-    var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &agents });
+    const ws = [_]Workspace{.{ .name = "kiwa", .agents = &agents }};
+    var s = try render(80, 24, .{ .workspaces = &ws, .tabs = &tabs2 });
     defer s.deinit();
-    try expectRow(&s, 19, " ! 1 a");
-    try expectRow(&s, 20, " ? 1 b");
-    try expectRow(&s, 21, " * 1 c");
-    try expectRow(&s, 22, " ✗ 1 x");
-    try expectRow(&s, 23, " · 1 y");
-    try testing.expectEqualDeep(default_styles.@"error".fg_color, s.at(1, 22).style.fg_color);
-    try testing.expect(s.at(1, 23).style.flags.faint);
+    try expectRow(&s, 2, "   ! 1 a");
+    try expectRow(&s, 3, "   ? 1 b");
+    try expectRow(&s, 4, "   * 1 c");
+    try expectRow(&s, 5, "   ✗ 1 x");
+    try expectRow(&s, 6, "   · 1 y");
+    try testing.expectEqualDeep(default_styles.@"error".fg_color, s.at(3, 5).style.fg_color);
+    try testing.expect(s.at(3, 6).style.flags.faint);
 }
 
-test "agents win over Host, short rows show the agents that fit, and long labels shorten" {
-    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .agents = &agents3, .hostname = "devbox" };
-    try testing.expectEqualDeep(Details{ .agents = 7, .agent_rows = 3 }, Details.of(v, 12, 26));
-    try testing.expectEqualDeep(Details{ .agents = 3, .agent_rows = 1 }, Details.of(v, 6, 26));
-    try testing.expectEqualDeep(Details{}, Details.of(v, 5, 26));
-    var crowded = v;
-    crowded.workspaces = &three;
-    try testing.expectEqualDeep(Details{}, Details.of(crowded, 7, 26));
-    var s = try render(80, 6, v);
+test "agent rows count toward the list, so the active workspace stays visible, and long labels shorten" {
+    var many: [6]Workspace = undefined;
+    for (&many) |*w| w.* = .{ .name = "w", .agents = &kiwa_agents };
+    many[5].active = true;
+    const v: View = .{ .workspaces = &many, .tabs = &tabs2 };
+    var s = try render(80, 10, v);
     defer s.deinit();
-    try expectRow(&s, 2, " + new        • menu    «");
-    try expectRow(&s, 5, " ● 1 pi");
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = 0 }), hit(v, 80, 6, 5, 5));
-    try testing.expectEqualDeep(@as(?Hit, .new_workspace), hit(v, 80, 6, 1, 2));
+    // Rows 1-8 hold the list: the last two workspaces, three rows each.
+    try expectRow(&s, 1, " 5 w");
+    try expectRow(&s, 4, " 6 w");
+    try expectRow(&s, 6, "   ✓ 4 pi");
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(3) }), hit(v, 80, 10, 5, 6));
 
-    const long = [_]Agent{.{ .workspace = 0, .label = "a-very-long-agent-name", .state = .working, .pane = @enumFromInt(1) }};
-    var narrow = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &long, .sidebar_width = min_sidebar_cols });
+    const long = [_]Agent{.{ .label = "a-very-long-agent-name", .tab = 1, .state = .working, .pane = @enumFromInt(1) }};
+    const ws = [_]Workspace{.{ .name = "kiwa", .active = true, .agents = &long }};
+    var narrow = try render(80, 24, .{ .workspaces = &ws, .tabs = &tabs2, .sidebar_width = min_sidebar_cols });
     defer narrow.deinit();
-    try expectRow(&narrow, 23, " ● 1 a-ve…");
-    var mid = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2, .agents = &long, .sidebar_width = 20 });
+    try expectRow(&narrow, 2, "   ● 2 a-…");
+    var mid = try render(80, 24, .{ .workspaces = &ws, .tabs = &tabs2, .sidebar_width = 20 });
     defer mid.deinit();
-    try expectRow(&mid, 23, " ● 1 a-very-long-…");
+    try expectRow(&mid, 2, "   ● 2 a-very-lon…");
 }
 
-test "the collapsed sidebar shows no agents" {
-    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .agents = &agents3, .collapsed = true };
+test "the collapsed sidebar shows no agent rows" {
+    const v: View = .{ .workspaces = &with_agents, .tabs = &tabs2, .collapsed = true };
     var s = try render(80, 24, v);
     defer s.deinit();
     const text = try s.text();
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "Agents") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "working") == null);
-    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 80, 24, 1, 10));
+    try testing.expect(std.mem.indexOf(u8, text, "pi") == null);
+    try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 1 }), hit(v, 80, 24, 1, 1));
 }
 
 test "the tab row is a dark band: inactive tabs and the empty rest share its background" {

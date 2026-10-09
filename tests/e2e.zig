@@ -2294,11 +2294,10 @@ fn programStatusShowsInTheSidebar(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
     try o.send("python3 query.py\r");
     try o.waitText("reply b'\\x1b]7501;?\\x1b\\\\\\x1b[?");
-    try expect(!try o.contains("Agents"), "a query alone makes no record");
+    try expect(!try o.contains("   · 1 "), "a query alone makes no record");
 
     try report(o, "state=working:app=pi");
-    try o.waitText(" ● 1 pi");
-    try o.waitText("Agents");
+    try o.waitText("   ● 1 pi");
     try report(o, "state=blocked:kind=question:app=pi");
     try o.waitText(" ? 1 pi");
     try report(o, "state=done:id=child");
@@ -2308,12 +2307,12 @@ fn programStatusShowsInTheSidebar(ctx: *Ctx) !void {
     try report(o, "state=idle");
     try o.waitText(" · 1 ~");
     try report(o, "state=clear");
-    try o.waitGone("Agents");
+    try o.waitGone("   · 1 ~");
 
     try report(o, "state=working:app=pi");
     try o.waitText(" ● 1 pi");
     try o.send("printf '\\033]133;A\\033\\\\'\r");
-    try o.waitGone("Agents");
+    try o.waitGone("   ● 1 pi");
     try report(o, "state=done:app=pi");
     try o.waitText(" ✓ 1 pi");
     try o.send("printf '\\033]133;A\\033\\\\'; echo prompted\r");
@@ -2332,12 +2331,12 @@ fn clickingAnAgentShowsItsPane(ctx: *Ctx) !void {
     try o.click(left_half.x + 5, left_half.y + 5);
     try waitAccent(o, &.{ left_half, right_half });
     try report(o, "state=blocked:kind=permission:app=pi");
-    try o.waitText(" ! 2 pi");
+    try o.waitText("   ! 1 pi");
     try o.click(right_half.x + 5, right_half.y + 5);
     try waitAccent(o, &.{ right_half, left_half });
     try prefixed(o, "w1\r");
     try waitHighlighted(o, 1);
-    try clickSidebarText(o, "2 pi", 0);
+    try clickSidebarText(o, "! 1 pi", 0);
     try waitHighlighted(o, 2);
     try waitAccent(o, &.{ left_half, right_half });
     try o.send("echo left$((1+1))\r");
@@ -2357,7 +2356,7 @@ fn killedAgentLeavesNoRecord(ctx: *Ctx) !void {
     try o.waitText(" ● 1 fake");
     _ = try o.pump(300);
     try expect(try o.contains(" ● 1 fake"), "the record stays while its program is in front");
-    try o.waitGone("Agents");
+    try o.waitGone(" ● 1 fake");
 }
 
 fn quietAgentMakesNoWakes(ctx: *Ctx) !void {

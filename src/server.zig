@@ -242,6 +242,8 @@ const Server = struct {
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
     chrome_agents: std.ArrayList(chrome.Agent) = .empty,
+    /// Where each workspace's agents end in `chrome_agents`.
+    agent_ends: std.ArrayList(usize) = .empty,
     /// One tab's panes while `chromeView` walks the session for agents.
     tab_panes: std.ArrayList(PaneId) = .empty,
     /// The pane whose terminal holds the selection.
@@ -1239,7 +1241,7 @@ const Server = struct {
                 try s.showChanges();
             },
             .new_tab => try s.act(c, .new_tab),
-            .select_agent => |i| if (s.session.revealPane(view.agents[i].pane)) {
+            .select_agent => |pane| if (s.session.revealPane(pane)) {
                 try s.clearSelection();
                 try s.markName(s.session.activeTab());
                 try s.showChanges();
@@ -1653,7 +1655,8 @@ const Server = struct {
     /// retitles the outer window with them.
     fn drawChrome(s: *Server, c: *Conn, view: chrome.View, all: bool) !void {
         var h: std.hash.Wyhash = .init(0);
-        std.hash.autoHashStrat(&h, view, .Deep);
+        // Recursive: workspace names and agent rows sit two pointers deep.
+        std.hash.autoHashStrat(&h, view, .DeepRecursive);
         const key = h.final();
         if (!all and c.drawn_chrome == key) return;
         chrome.draw(&c.frame, view);
@@ -1678,7 +1681,6 @@ const Server = struct {
         for (current.tabs.items) |t| pane_count += t.layout.count();
         try s.collectAgents();
         return .{
-            .agents = s.chrome_agents.items,
             .hostname = s.hostname,
             .directory = current.root_dir,
             .home = s.env.get("HOME") orelse "",
@@ -1702,28 +1704,41 @@ const Server = struct {
         };
     }
 
-    /// Lists the panes with an agent record in session order for the sidebar.
+    /// Gives each sidebar workspace its panes with an agent record, in tab
+    /// then layout order.
     fn collectAgents(s: *Server) !void {
         s.chrome_agents.clearRetainingCapacity();
         var any = false;
         var it = s.panes.valueIterator();
         while (it.next()) |p| any = any or p.*.agent != null;
         if (!any) return;
-        for (s.session.workspaces.items, 0..) |ws, i| for (ws.tabs.items) |t| {
-            s.tab_panes.clearRetainingCapacity();
-            try t.layout.panes(s.gpa, &s.tab_panes);
-            for (s.tab_panes.items) |id| {
-                const p = s.panes.get(id) orelse continue;
-                // By pointer, so the label points into the pane, not a copy.
-                if (p.agent) |*a| try s.chrome_agents.append(s.gpa, .{
-                    .workspace = i,
-                    .label = if (a.app_len > 0) a.app() else t.name.text(),
-                    .state = a.state,
-                    .kind = a.kind,
-                    .pane = id,
-                });
+        const focused = s.session.focused();
+        s.agent_ends.clearRetainingCapacity();
+        for (s.session.workspaces.items) |ws| {
+            for (ws.tabs.items, 0..) |t, ti| {
+                s.tab_panes.clearRetainingCapacity();
+                try t.layout.panes(s.gpa, &s.tab_panes);
+                for (s.tab_panes.items) |id| {
+                    const p = s.panes.get(id) orelse continue;
+                    // By pointer, so the label points into the pane, not a copy.
+                    if (p.agent) |*a| try s.chrome_agents.append(s.gpa, .{
+                        .label = if (a.app_len > 0) a.app() else t.name.text(),
+                        .tab = ti,
+                        .state = a.state,
+                        .kind = a.kind,
+                        .pane = id,
+                        .focused = id == focused,
+                    });
+                }
             }
-        };
+            try s.agent_ends.append(s.gpa, s.chrome_agents.items.len);
+        }
+        // Slice only after every append, which may move the items.
+        var start: usize = 0;
+        for (s.chrome_workspaces.items, s.agent_ends.items) |*cw, end| {
+            cw.agents = s.chrome_agents.items[start..end];
+            start = end;
+        }
     }
 
     /// Sends `{hostname}: {workspace}` as the outer window title when it changed.
@@ -1850,6 +1865,7 @@ const Server = struct {
         s.chrome_workspaces.deinit(s.gpa);
         s.chrome_tabs.deinit(s.gpa);
         s.chrome_agents.deinit(s.gpa);
+        s.agent_ends.deinit(s.gpa);
         s.tab_panes.deinit(s.gpa);
         s.session.deinit();
         s.git.deinit(s.gpa);

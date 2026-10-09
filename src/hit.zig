@@ -22,7 +22,7 @@ pub const Target = union(enum) {
     tab: usize,
     tab_new,
     /// An index into the sidebar's agents.
-    sidebar_agent: usize,
+    sidebar_agent: PaneId,
     /// A frame or gutter cell. `divider` identifies a draggable boundary.
     border: struct { pane: PaneId, divider: ?layout.Divider },
     /// A cell of a pane's content, in pane-local coordinates.
@@ -59,7 +59,7 @@ pub fn at(s: Scene, x: u16, y: u16) Target {
         .resize_sidebar => .sidebar_resize,
         .tab => |i| .{ .tab = i },
         .new_tab => .tab_new,
-        .agent => |i| .{ .sidebar_agent = i },
+        .agent => |pane| .{ .sidebar_agent = pane },
     };
     return switch (s.geometry.at(x, y)) {
         .none => .none,
@@ -147,19 +147,20 @@ test "every target, at several sizes, expanded and collapsed" {
     }
 }
 
-test "agent rows in the sidebar hit by their index" {
+test "agent rows under a workspace hit by their pane" {
     var f: Fixture = try .init(80, 24, false);
     defer f.deinit();
     const agents = [_]chrome.Agent{
-        .{ .workspace = 0, .label = "pi", .state = .working, .pane = pid(1) },
-        .{ .workspace = 1, .label = "claude-code", .state = .blocked, .pane = pid(2) },
+        .{ .label = "pi", .state = .working, .pane = pid(1) },
+        .{ .label = "claude-code", .state = .blocked, .pane = pid(2) },
     };
-    f.scene.chrome.agents = &agents;
+    const ws = [_]chrome.Workspace{ .{ .name = "a", .active = true, .agents = &agents }, .{ .name = "b" } };
+    f.scene.chrome.workspaces = &ws;
     const s = try f.place();
-    try testing.expectEqualDeep(Target.none, at(s, 3, 20));
-    try testing.expectEqualDeep(Target{ .sidebar_agent = 0 }, at(s, 3, 22));
-    try testing.expectEqualDeep(Target{ .sidebar_agent = 1 }, at(s, 3, 23));
-    try testing.expectEqualDeep(Target.sidebar_new, at(s, 1, 19));
+    try testing.expectEqualDeep(Target{ .sidebar_workspace = 0 }, at(s, 3, 1));
+    try testing.expectEqualDeep(Target{ .sidebar_agent = pid(1) }, at(s, 3, 2));
+    try testing.expectEqualDeep(Target{ .sidebar_agent = pid(2) }, at(s, 3, 3));
+    try testing.expectEqualDeep(Target{ .sidebar_workspace = 1 }, at(s, 3, 4));
 }
 
 test "a zoomed pane has no border, and an open menu covers what is under it" {
