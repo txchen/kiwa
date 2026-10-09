@@ -1,0 +1,28 @@
+{"variant": "kiwa-wrapper", "scenario": "echo", "delay": "25", "dur_s": 5.52, "pty_Bps": 9, "ms": [52.2, 51.8, 51.8, 52.
+{"variant": "herdr-remote", "scenario": "echo", "delay": "25", "dur_s": 5.53, "pty_Bps": 280, "ms": [52.7, 52.6, 53.8, 5
+{"variant": "kiwa-wrapper", "scenario": "echo", "delay": "75", "dur_s": 6.53, "pty_Bps": 8, "ms": [152.2, 152.0, 152.0, 
+{"variant": "herdr-remote", "scenario": "echo", "delay": "75", "dur_s": 6.54, "pty_Bps": 237, "ms": [152.9, 154.9, 153.9
+{"variant": "kiwa-wrapper", "scenario": "tabswitch", "delay": "25", "dur_s": 5.52, "pty_Bps": 157, "ms": [51.8, 52.1, 51
+{"variant": "herdr-remote", "scenario": "tabswitch", "delay": "25", "dur_s": 5.68, "pty_Bps": 1756, "ms": [67.4, 68.3, 6
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25", "dur_s": 5.68, "pty_Bps": 64719, "ms": [54.5, 66.0,
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25", "dur_s": 5.69, "pty_Bps": 88571, "ms": [70.2, 65.1,
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.67, "pty_Bps": 65139, "ms": [72.7, 64
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.87, "pty_Bps": 88843, "ms": [76.8, 90
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,48", "dur_s": 5.76, "pty_Bps": 65070, "ms": [74.9, 81
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,48", "dur_s": 22.73, "pty_Bps": 77534, "ms": [643.2, 
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,32", "dur_s": 5.82, "pty_Bps": 64802, "ms": [74.7, 80
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,32", "dur_s": 103.69, "pty_Bps": 53831, "ms": [2219.4
+{"variant": "kiwa-wrapper", "scenario": "echo", "delay": "25", "dur_s": 5.53, "pty_Bps": 9, "ms": [52.3, 54.4, 51.9, 51.
+{"variant": "herdr-remote", "scenario": "echo", "delay": "25", "dur_s": 5.53, "pty_Bps": 280, "ms": [54.1, 54.1, 52.9, 5
+{"variant": "kiwa-wrapper", "scenario": "echo", "delay": "75", "dur_s": 6.53, "pty_Bps": 8, "ms": [152.1, 152.9, 152.1, 
+{"variant": "herdr-remote", "scenario": "echo", "delay": "75", "dur_s": 6.54, "pty_Bps": 237, "ms": [153.4, 154.2, 154.0
+{"variant": "kiwa-wrapper", "scenario": "tabswitch", "delay": "25", "dur_s": 5.52, "pty_Bps": 158, "ms": [52.4, 51.8, 51
+{"variant": "herdr-remote", "scenario": "tabswitch", "delay": "25", "dur_s": 5.68, "pty_Bps": 1757, "ms": [67.4, 67.2, 6
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25", "dur_s": 5.66, "pty_Bps": 64901, "ms": [66.3, 64.9,
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25", "dur_s": 5.71, "pty_Bps": 88692, "ms": [74.4, 73.5,
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.72, "pty_Bps": 64259, "ms": [67.1, 69
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,64", "dur_s": 5.86, "pty_Bps": 89110, "ms": [88.1, 87
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,48", "dur_s": 5.74, "pty_Bps": 65006, "ms": [77.0, 80
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,48", "dur_s": 23.02, "pty_Bps": 77539, "ms": [661.5, 
+{"variant": "kiwa-wrapper", "scenario": "echo-flood", "delay": "25,32", "dur_s": 5.83, "pty_Bps": 65059, "ms": [84.7, 82
+{"variant": "herdr-remote", "scenario": "echo-flood", "delay": "25,32", "dur_s": 103.19, "pty_Bps": 53845, "ms": [2190.6

@@ -4,3 +4,5 @@ matrix.err
 matrix.out
 kiwa-*/
 fps.err
+shim/
+release.err

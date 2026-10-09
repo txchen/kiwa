@@ -114,6 +114,7 @@ Mouse selection copies to your clipboard when the outer terminal allows OSC 52 w
 kiwa              # attach or start
 kiwa ls           # list workspaces and tabs
 kiwa --version    # print version and pinned Ghostty commit
+kiwa --remote dev # attach to Kiwa on the SSH host dev
 ```
 
 After upgrading, `kiwa kill-server` stops the old server **and its pane programs**. The next `kiwa` restores the layout with new shells. Detach instead when you want programs to keep running.

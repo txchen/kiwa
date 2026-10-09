@@ -9,6 +9,7 @@ kiwa              # attach, starting the server if needed
 kiwa ls           # print the workspaces and tabs
 kiwa kill-server  # stop the server and its panes
 kiwa --version    # version and pinned Ghostty commit
+kiwa --remote dev # attach to Kiwa on the SSH host dev
 ```
 
 On attach, the client puts the terminal in raw mode and passes it to the
@@ -55,6 +56,31 @@ Directional pane focus remains available with `prefix h/j/k/l` or arrows.
 Cycling panes while zoomed keeps the newly focused pane zoomed. The tab row shows `[Z]` after a zoomed tab's name.
 
 Pane borders default to compact internal dividers. The optional [framed pane style](configuration.md#pane-style) gives each pane its own border.
+
+## Remote hosts
+
+`kiwa --remote <destination>` runs Kiwa on another machine over SSH. The
+destination is anything `ssh` accepts, such as `dev`, `user@host`, or an
+alias from `~/.ssh/config`. Install Kiwa on the remote host first. The
+remote server, its panes, and its configuration all live on that host, so
+detaching or losing the connection leaves the panes running there.
+
+The command runs:
+
+```sh
+ssh -t -C -o ObscureKeystrokeTiming=no <destination> kiwa
+```
+
+- `-t` allocates a remote terminal, which Kiwa needs.
+- `-C` compresses frames, which roughly halves the bytes on a slow link.
+- `ObscureKeystrokeTiming=no` stops OpenSSH 9.5 and later from sending
+  keystrokes on a 20 ms schedule with extra packets. That schedule adds up
+  to 20 ms to each keystroke. OpenSSH versions without this option run
+  without it.
+
+On the remote host, `kiwa` comes from `PATH`, then from `~/.local/bin`, where
+`install.sh` puts it by default. To pass other SSH options, set them for the
+host in `~/.ssh/config`, or run the `ssh` command above yourself.
 
 ## Workspaces and panes
 

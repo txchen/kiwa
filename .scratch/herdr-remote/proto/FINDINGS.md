@@ -150,3 +150,22 @@ during continuous output. The measured medians rose 5 to 6 ms, inside the
 p10 to p90 ranges. A single update after a quiet period still renders
 immediately, because the deadline applies only within 16 ms of the previous
 frame.
+
+## Release check: `kiwa --remote` against `herdr --remote`
+
+`run-release.sh` runs the `kiwa --remote` build against the remote Kiwa
+with the 16 ms deadline. It interleaves the variants and uses 2 rounds of 10
+trials. The load average was 4 to 6 from other work.
+
+| scenario | link | kiwa --remote | herdr --remote |
+|---|---|---|---|
+| echo | 25 | 52 (52-54) | 53 (52-54) |
+| echo | 75 | 152 (152-153) | 153 (153-155) |
+| tabswitch | 25 | 52 (52-52) | 68 (67-68) |
+| echo-flood | 25 | 66 (63-72), 30 KB/s | 69 (65-74), 55 KB/s |
+| echo-flood | 25,64 | 67 (64-77), 30 KB/s | 87 (79-91), 55 KB/s |
+| echo-flood | 25,48 | 77 (65-82), 30 KB/s | 1624 (675-3368), 55 KB/s |
+| echo-flood | 25,32 | 82 (80-85), 30 KB/s | 11946 (2408-12394), 35 KB/s |
+
+Below about 30 KB/s Kiwa's flood stream would also exceed the link, and
+latency would grow in the same way. This run did not test that.

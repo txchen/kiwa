@@ -15,7 +15,8 @@ pub const std_options: std.Options = .{
 
 const usage =
     "usage: kiwa [ls | kill-server | reload-config | --version | --help]\n" ++
-    "       kiwa config [path | guide | check | bindings]\n\n" ++
+    "       kiwa config [path | guide | check | bindings]\n" ++
+    "       kiwa --remote <ssh-destination>\n\n" ++
     "Configuration: $XDG_CONFIG_HOME/kiwa/config.toml or ~/.config/kiwa/config.toml\n" ++
     "For humans and agents: read `kiwa config guide`, edit the file, run\n" ++
     "`kiwa config check`, then `kiwa reload-config` to apply without restarting panes.\n";
@@ -25,7 +26,8 @@ pub fn main(init: std.process.Init) !u8 {
     _ = args.next();
     const cmd = args.next() orelse "";
     const sub = args.next();
-    if (args.next() != null or (sub != null and !std.mem.eql(u8, cmd, "config"))) return fail(usage);
+    const takes_sub = std.mem.eql(u8, cmd, "config") or std.mem.eql(u8, cmd, "--remote");
+    if (args.next() != null or (sub != null and !takes_sub)) return fail(usage);
     if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try sys.writeAll(1, usage);
         return 0;
@@ -59,6 +61,12 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, cmd, "--remote")) {
+        const destination = sub orelse return fail(usage);
+        // No SSH destination starts with a dash; this is a mistyped option.
+        if (destination.len == 0 or destination[0] == '-') return fail("kiwa: --remote needs an SSH destination\n");
+        return client.remote(init.gpa, init.environ_map, destination);
+    }
     if (std.mem.eql(u8, cmd, "--version")) {
         try sys.writeAll(1, "kiwa " ++ build_options.version ++ " (ghostty " ++ build_options.ghostty_commit ++ ")\n");
         return 0;

@@ -3587,6 +3587,40 @@ fn corruptSaveIsMovedAside(ctx: *Ctx) !void {
     try o.waitLine("fresh");
 }
 
+/// A fake `ssh` records its arguments. Its `-G` succeeds or fails like an
+/// OpenSSH with or without `ObscureKeystrokeTiming` (9.5).
+fn remoteExecsSsh(ctx: *Ctx) !void {
+    const fake =
+        \\mkdir -p new old
+        \\printf '#!/bin/sh\necho "$*" >>args\n' >new/ssh
+        \\printf '#!/bin/sh\n[ "$1" = -G ] && exit 255\necho "$*" >>args\n' >old/ssh
+        \\chmod +x new/ssh old/ssh
+    ;
+    ctx.gpa.free(try ctx.sh(fake));
+    const script = try std.fmt.allocPrintSentinel(ctx.gpa,
+        \\PATH="$PWD/new:$PATH" {0s} --remote user@host && PATH="$PWD/old:$PATH" {0s} --remote old
+        \\{0s} --remote -oProxyCommand=x; echo "dash $?"
+        \\cat args
+    , .{ctx.kiwa}, 0);
+    defer ctx.gpa.free(script);
+    const out = try ctx.sh(script);
+    defer ctx.gpa.free(out);
+    const lines = [_][]const u8{
+        "dash 2",
+        "-G -o ObscureKeystrokeTiming=no -- user@host",
+        "-t -C -o ObscureKeystrokeTiming=no -- user@host sh -c 'command -v kiwa",
+        "-t -C -- old sh -c 'command -v kiwa",
+    };
+    var rest: []const u8 = out;
+    for (lines) |want| {
+        const at = std.mem.indexOf(u8, rest, want) orelse {
+            std.debug.print("    expected {s}\n    in {s}\n", .{ want, out });
+            return error.ExpectationFailed;
+        };
+        rest = rest[at + want.len ..];
+    }
+}
+
 /// `functional` cases check behavior and run in CI. `perf` cases measure
 /// cost (wakes, context switches, outer bytes) or load the machine; their
 /// results depend on it, so they run on demand with `zig build e2e-perf`.
@@ -3600,6 +3634,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "a terminal without the kitty protocol gets no kitty flags", .run = legacyKeyboardGetsNoKittyFlags },
     .{ .name = "probe replies never reach a pane", .run = probeRepliesStayOutOfPanes },
     .{ .name = "pane keeps running while detached", .run = paneRunsWhileDetached },
+    .{ .name = "kiwa --remote runs ssh with a PTY, compression, and plain keystroke timing", .run = remoteExecsSsh },
     .{ .name = "quiet server makes no wakes", .run = quietServer, .kind = .perf },
     .{ .name = "kiwa __stats counts renders and wakes", .run = statsCountRendersAndWakes },
     .{ .name = "resize reaches the pane", .run = resizeReachesPane },

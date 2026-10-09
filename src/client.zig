@@ -314,3 +314,31 @@ test "any other detach succeeds without a hint" {
     try testing.expectEqual(null, o.hint);
     try testing.expectEqual(0, o.code);
 }
+
+/// Runs `script` with `/bin/sh`, passing the destination as `$1` and the
+/// remote command as `$2`. `ssh -G` checks the option against the local
+/// OpenSSH without connecting, because OpenSSH older than 9.5 rejects it.
+/// `ObscureKeystrokeTiming` sends keystrokes from a PTY session on a 20 ms
+/// schedule, and `-C` roughly halves frame bytes on slow links.
+const remote_script =
+    \\if ssh -G -o ObscureKeystrokeTiming=no -- "$1" >/dev/null 2>&1; then
+    \\  exec ssh -t -C -o ObscureKeystrokeTiming=no -- "$1" "$2"
+    \\fi
+    \\exec ssh -t -C -- "$1" "$2"
+;
+
+/// Parsed by the remote login shell, which may be fish or csh, so only
+/// single quotes, which all of them treat literally. The fallback is the
+/// default directory of `install.sh`, which a non-login PATH often lacks.
+const remote_command = "sh -c 'command -v kiwa >/dev/null 2>&1 && exec kiwa; " ++
+    "[ -x \"$HOME/.local/bin/kiwa\" ] && exec \"$HOME/.local/bin/kiwa\"; " ++
+    "echo \"kiwa: not found in PATH or ~/.local/bin on $(hostname)\" >&2; exit 127'";
+
+/// Replaces this process with `ssh` attaching to Kiwa on `destination`.
+pub fn remote(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, destination: [:0]const u8) !u8 {
+    const block = try env.createPosixBlock(gpa, .{});
+    defer block.deinit(gpa);
+    const argv = [_:null]?[*:0]const u8{ "sh", "-c", remote_script, "kiwa", destination.ptr, remote_command, null };
+    _ = libc.execve("/bin/sh", &argv, block.slice);
+    return error.ExecFailed;
+}

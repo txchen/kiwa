@@ -21,6 +21,7 @@ VARIANTS = {
     "kiwa-ssh-tuned": SSH + ["-C", "-o", "ObscureKeystrokeTiming=no", "-t", "lagbox", "kiwa"],
     "herdr-ssh-noobscure": SSH + ["-o", "ObscureKeystrokeTiming=no", "-t", "lagbox", "herdr"],
     "herdr-remote": ["herdr", "--remote", "lagbox"],
+    "kiwa-wrapper": ["bash", "-c", f"PATH={P}/shim:$PATH exec {P}/../../../zig-out/bin/kiwa --remote lagbox"],
     "shell-ssh": SSH + ["-t", "lagbox"],
     "shell-local": ["bash", "-c", f". {R}/remote/env.sh; cd; exec bash -i"],
 }
