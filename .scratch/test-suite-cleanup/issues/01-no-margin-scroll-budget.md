@@ -31,3 +31,10 @@ The cleanup does not change this case or production rendering logic. The other
 eight performance cases passed in the full run, including the three checks split
 out of functional coverage. Local logs are in `/tmp/kiwa-test-audit/final-perf.log`
 and `/tmp/kiwa-test-audit/baseline-perf-no-margins.log`.
+
+2026-10-09: the benchmark shows the same regression. On the October 6
+snapshot (`dcd6ecd`), scrolling 30 lines/s without margins sent 82,552 outer
+bytes in 12 s at 0.444% CPU. `master` (`e8b4cac`) now sends 248,512 bytes at
+0.614% CPU, and `osc7501` (`e673b98`) 248,512 bytes at 0.627%. With margins,
+both stay at 52,752 bytes. So the regression lies between `dcd6ecd` and
+`e8b4cac`, not on `osc7501`. See `docs/benchmarks.md`, "Kiwa rerun".

@@ -2,9 +2,80 @@
 
 [Back to the README](../README.md) · [Benchmark script](../tools/bench.py)
 
+## Kiwa rerun, October 9, 2026
+
+Only Kiwa was measured. The tmux, Zellij, and Herdr numbers below are still
+the October 6 snapshot, taken on the same machine.
+
+Kiwa's product code was at `e673b98` on the `osc7501` branch, built with
+ReleaseFast. This build adds OSC 7501 agent status and the ghostty-vt bump
+to `a4aacd9`. The command was:
+
+```sh
+mise exec -- zig build bench -Doptimize=ReleaseFast -- --programs kiwa --runs 5
+```
+
+Same machine, kernel, Zig, and Python as the snapshot. Five runs per
+scenario and variant, 6-second warmup, 12-second sample. Load average was
+0.24 at the start, mostly at or below 0.40 during the runs with one sample
+at 1.57, and `0.21 0.24 1.11` at the end. Before the run, two orphaned Herdr
+servers left by earlier prototypes were stopped. One kept a shell busy at
+about one core.
+
+| Scenario | Variant | Total CPU % of one core, median (range) | Ticks per run | Context switches | Outer bytes in 12 s | Outer bytes per frame | Server RSS MiB | Client RSS MiB |
+|---|---|---|---|---|---|---|---|---|
+| 1 idle pane | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | 0 | - | 2.2 | 1.2 |
+| 60 Hz one-cell spinner | outer with margins | 0.278 (0.274 to 0.284) | 4, 3, 3, 4, 3 | 742 (741 to 745) | 1,442 | 2.0 | 2.2 | 1.2 |
+| 30 lines/s of 80 bytes | outer with margins | 0.425 (0.417 to 0.425) | 5, 4, 4, 5, 6 | 385 (384 to 385) | 52,752 | 146.5 | 2.9 | 1.2 |
+| 30 lines/s of 80 bytes | outer without margins | 0.627 (0.618 to 0.651) | 7, 9, 8, 7, 7 | 385 (384 to 460) | 248,512 (248,512 to 249,892) | 690.3 | 2.9 | 1.2 |
+| 10 idle panes | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | 0 | - | 3.9 | 1.2 |
+| 1 idle pane, detached | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | - | - | 2.1 | - |
+| 10 idle panes, detached | outer with margins | 0.000 | 0, 0, 0, 0, 0 | 0 | - | - | 3.8 | - |
+| 10 hidden producers, focused pane idle | outer with margins | 0.900 (0.888 to 0.939) | 11, 12, 10, 10, 10 | 3,838 (3,831 to 3,852) | 0 | - | 10.4 | 1.2 |
+| 10 hidden producers, detached | outer with margins | 0.894 (0.890 to 0.932) | 11, 12, 10, 11, 11 | 3,836 (3,824 to 3,844) | - | - | 10.4 | - |
+
+The client used no measurable CPU in any run. The executable is 2,294,624
+bytes, and `kiwa-x86_64-linux-musl.tar.gz` is 903,778 bytes.
+
+### What changed since October 6
+
+| Measure | Oct 6 (`dcd6ecd`) | Oct 9 (`e673b98`) |
+|---|---|---|
+| Idle CPU and context switches, every idle scenario | 0 | 0 |
+| Spinner CPU | 0.247% | 0.278% |
+| Scrolling CPU, with margins | 0.423% | 0.425% |
+| Scrolling CPU, without margins | 0.444% | 0.627% |
+| Scrolling outer bytes, without margins | 82,552 | 248,512 |
+| Hidden producers CPU, attached / detached | 0.876% / 0.872% | 0.900% / 0.894% |
+| Server RSS, 1 idle / 10 idle / 10 producers | 1.9 / 3.6 / 10.1 MiB | 2.2 / 3.9 / 10.4 MiB |
+| Client RSS | 1.0 MiB | 1.2 MiB |
+| Executable / archive | 2,096,176 / 841,915 bytes | 2,294,624 / 903,778 bytes |
+
+Idle is unchanged: no CPU time and no wakes.
+
+Most of the spinner rise predates this branch. Interleaved three-run
+spinner samples on the same day measured `master` (`e8b4cac`, release
+0.3.0) at 0.271% and 0.270%, the ghostty-vt bump alone (`07c71ba`) at
+0.270% and 0.276%, and `e673b98` at 0.277% to 0.281%. The agent-status code
+adds at most about 0.01 percentage points of one core at 60 frames per
+second. This run does not show which of the 49 commits between `dcd6ecd` and
+`e8b4cac` accounts for the rest, or whether the machine itself changed.
+
+The no-margin scrolling regression predates this branch too. A one-run
+check of `master` measured 0.614% CPU and 248,512 outer bytes. It is the
+same behavior as the open `e2e-perf` failure in
+`.scratch/test-suite-cleanup/issues/01-no-margin-scroll-budget.md`. With
+margins, scrolling cost is unchanged. Without margins, Kiwa now uses more
+CPU than tmux's 0.429%. It still passes the scrolling gate, which allows
+1.5 times tmux's value plus 0.021, or 0.665%.
+
+Against the October 6 tmux values, the other gates still pass: spinner
+0.278% against 0.571%, hidden output 0.900% against 3.091% attached and
+0.894% against 2.920% detached, and every memory gate under 20 MiB.
+
 ## Recorded comparison
 
-These results are a historical snapshot from October 6, 2026. They are not a fresh measurement of the current source tree.
+These results are a historical snapshot from October 6, 2026, of all four programs. They are not a fresh measurement of the current source tree. The Kiwa rerun above updates only Kiwa's numbers.
 
 The original local record is `.scratch/bench/issues/01-compare-multiplexers.md`. The tables below preserve its reported values, including ranges. The benchmark code was at `1565702`, and Kiwa's product code was at `dcd6ecd`, built with ReleaseFast. The comparison used tmux 3.7c, Zellij 0.45.1, and Herdr 0.9.3.
 
