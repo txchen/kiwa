@@ -95,7 +95,8 @@ The default prefix is `Ctrl+b`. Release it, then press the next key. Press `Ctrl
 | Keys | Action |
 | --- | --- |
 | `prefix c` | New tab |
-| `prefix v` / `prefix -` | Split right / down |
+| `prefix \` / `prefix \|` / `prefix v` | Split left/right (new pane on the right) |
+| `prefix -` | Split top/bottom (new pane below) |
 | `prefix h/j/k/l` or arrows | Focus a pane by direction |
 | `prefix z` | Zoom or unzoom a pane |
 | `prefix f` | Toggle between compact and framed pane styles |
@@ -104,7 +105,7 @@ The default prefix is `Ctrl+b`. Release it, then press the next key. Press `Ctrl
 | `prefix w` | Navigate the sidebar's workspaces and agents |
 | `prefix b` | Collapse or expand the sidebar |
 | `prefix [` | Copy mode; `v` selects, `y` copies |
-| `prefix d` | Detach, leaving programs running |
+| `prefix d` / `prefix q` | Detach, leaving programs running |
 | `prefix ?` | Show current keybindings |
 | `Alt+h` / `Alt+l` | Previous / next tab, without prefix |
 | `Alt+Shift+h` / `Alt+Shift+l` | Move the tab left / right, without prefix |
