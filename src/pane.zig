@@ -6,6 +6,8 @@ const input = @import("input.zig");
 const encode = @import("encode.zig");
 const frame = @import("frame.zig");
 const PaneId = @import("layout.zig").PaneId;
+const agent = @import("agent.zig");
+const names = @import("names.zig");
 
 const Handler = vt.TerminalStream.Handler;
 
@@ -60,6 +62,12 @@ pub const Pane = struct {
     /// The OSC 52 sequence for the program's last clipboard write, waiting
     /// to go to the outer terminal; empty when there is none.
     clipboard: std.ArrayList(u8) = .empty,
+    /// The program's root OSC 7501 record; null when there is none.
+    agent: ?agent.Agent = null,
+    /// Set when `agent` changed what the sidebar shows; `drain` reports and clears it.
+    agent_changed: bool = false,
+    /// Rate-limits the check for an orphaned `agent`, which output marks.
+    agent_check: names.Limiter = .{},
 
     pub const SpawnOptions = struct {
         id: PaneId,
@@ -97,6 +105,8 @@ pub const Pane = struct {
         handler.effects.bell = &bell;
         handler.effects.clipboard_write = &clipboardWrite;
         handler.effects.pwd_changed = &pwdChanged;
+        handler.effects.program_status = &programStatus;
+        handler.effects.semantic_prompt = &semanticPrompt;
         p.stream = .init(.{ .allocator = gpa, .handler = handler });
         errdefer p.stream.deinit();
 
@@ -132,7 +142,7 @@ pub const Pane = struct {
         self.gpa.destroy(self);
     }
 
-    pub const Drain = struct { bytes: usize, closed: bool, bell: bool, moved: bool };
+    pub const Drain = struct { bytes: usize, closed: bool, bell: bool, moved: bool, agent_changed: bool };
 
     /// Reads and parses PTY output up to the per-wake budget.
     pub fn drain(self: *Pane) Drain {
@@ -151,8 +161,23 @@ pub const Pane = struct {
         defer {
             self.rang = false;
             self.moved = false;
+            self.agent_changed = false;
         }
-        return .{ .bytes = total, .closed = closed, .bell = self.rang, .moved = self.moved };
+        return .{ .bytes = total, .closed = closed, .bell = self.rang, .moved = self.moved, .agent_changed = self.agent_changed };
+    }
+
+    fn setAgent(self: *Pane, next: ?agent.Agent) void {
+        if (!agent.looksSame(self.agent, next)) self.agent_changed = true;
+        self.agent = next;
+    }
+
+    /// Drops the record when the program that reported it has left the
+    /// foreground. Returns whether it did.
+    pub fn dropOrphanedAgent(self: *Pane) bool {
+        const a = self.agent orelse return false;
+        if (!a.orphaned(self.foregroundGroup())) return false;
+        self.agent = null;
+        return true;
     }
 
     /// The directory the shell last reported with OSC 7, or else the
@@ -353,6 +378,19 @@ fn pwdChanged(h: *Handler) void {
     if (hash == p.pwd_hash) return;
     p.pwd_hash = hash;
     p.moved = true;
+}
+
+fn programStatus(h: *Handler, r: agent.Report) void {
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+    const p: *Pane = @fieldParentPtr("stream", stream);
+    p.setAgent(agent.afterReport(p.agent, r, p.foregroundGroup()));
+}
+
+fn semanticPrompt(h: *Handler, event: Handler.SemanticPrompt) void {
+    if (event.kind != .prompt_start) return;
+    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
+    const p: *Pane = @fieldParentPtr("stream", stream);
+    p.setAgent(agent.afterPrompt(p.agent));
 }
 
 /// Keeps the program's clipboard write as OSC 52 for the outer terminal.

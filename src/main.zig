@@ -116,6 +116,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("session.zig");
     _ = @import("pane.zig");
+    _ = @import("agent.zig");
     _ = @import("copy.zig");
     _ = @import("text_field.zig");
     _ = @import("dialog.zig");
