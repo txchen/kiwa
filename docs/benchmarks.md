@@ -62,9 +62,9 @@ second. This run does not show which of the 49 commits between `dcd6ecd` and
 `e8b4cac` accounts for the rest, or whether the machine itself changed.
 
 The no-margin scrolling regression predates this branch too. A one-run
-check of `master` measured 0.614% CPU and 248,512 outer bytes. It is the
-same behavior as the open `e2e-perf` failure in
-`.scratch/test-suite-cleanup/issues/01-no-margin-scroll-budget.md`. With
+check of `master` measured 0.614% CPU and 248,512 outer bytes. It is recorded with the open no-margin `e2e-perf` failure in
+`.scratch/test-suite-cleanup/issues/01-no-margin-scroll-budget.md`; that
+test failed before `dcd6ecd`, so the two may not share one cause. With
 margins, scrolling cost is unchanged. Without margins, Kiwa now uses more
 CPU than tmux's 0.429%. It still passes the scrolling gate, which allows
 1.5 times tmux's value plus 0.021, or 0.665%.
