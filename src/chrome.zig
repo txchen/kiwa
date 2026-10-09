@@ -87,6 +87,12 @@ pub const View = struct {
     /// The user's toggle; narrow frames collapse the sidebar regardless.
     collapsed: bool = false,
     sidebar_width: u16 = sidebar_cols,
+    /// Whether the outer terminal has left and right margins (DECLRMM).
+    /// Without them a pane's scroll moves the sidebar's rows too, and every
+    /// sidebar row that scrolls must be redrawn. So the bottom row stays
+    /// the mode bar's and the details block does not show: the only
+    /// sidebar text left beside the panes is the workspace list.
+    margins: bool = true,
     styles: Styles = default_styles,
 
     /// Whether the mode bar shows: in a mode, or with a notice. Otherwise
@@ -109,14 +115,21 @@ pub const Geometry = struct {
     /// Whether the frame is tall enough for the mode bar. The bar covers
     /// the tab area's bottom row only while it shows (`View.showsBar`).
     status_row: bool,
+    /// Whether the mode bar owns the bottom row even while it is hidden.
+    bar_row: bool = false,
     /// What the active tab's panes own.
     area: Rect,
 
     pub fn of(cols: u16, rows: u16, collapsed: bool) Geometry {
-        return sized(cols, rows, collapsed, sidebar_cols);
+        return sized(cols, rows, collapsed, sidebar_cols, true);
     }
 
-    pub fn sized(cols: u16, rows: u16, collapsed: bool, width: u16) Geometry {
+    pub fn ofView(v: View, cols: u16, rows: u16) Geometry {
+        return sized(cols, rows, v.collapsed, v.sidebar_width, v.margins);
+    }
+
+    /// Without `margins`, the mode bar keeps the bottom row (`View.margins`).
+    pub fn sized(cols: u16, rows: u16, collapsed: bool, width: u16, margins: bool) Geometry {
         const sidebar: u16 = if (cols >= expand_min_cols and !collapsed)
             std.math.clamp(width, min_sidebar_cols, cols - 20)
         else if (cols >= collapsed_cols + 2)
@@ -126,11 +139,13 @@ pub const Geometry = struct {
         const tab_row = rows >= 2;
         const top: u16 = @intFromBool(tab_row);
         const status_row = rows >= 3;
+        const bar: u16 = @intFromBool(status_row and !margins);
         return .{
             .sidebar = sidebar,
             .tab_row = tab_row,
             .status_row = status_row,
-            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top },
+            .bar_row = bar == 1,
+            .area = .{ .x = sidebar, .y = top, .cols = cols - sidebar, .rows = rows - top - bar },
         };
     }
 };
@@ -187,7 +202,7 @@ const nav_mark = 0x25b6;
 
 /// Draws the sidebar, tab row, and bottom mode bar, every cell of them.
 pub fn draw(f: *Frame, v: View) void {
-    const g: Geometry = .sized(f.cols, f.rows, v.collapsed, v.sidebar_width);
+    const g: Geometry = .ofView(v, f.cols, f.rows);
     switch (g.sidebar) {
         0 => {},
         collapsed_cols => drawCollapsed(f, v),
@@ -202,9 +217,10 @@ pub fn draw(f: *Frame, v: View) void {
 /// Draws the mode bar over the tab area's bottom row while `v` shows it.
 /// Called after the panes are composed, so that it stays on top of them.
 pub fn drawBar(f: *Frame, v: View) void {
-    const g: Geometry = .sized(f.cols, f.rows, v.collapsed, v.sidebar_width);
-    if (!g.status_row or !v.showsBar()) return;
+    const g: Geometry = .ofView(v, f.cols, f.rows);
+    if (!g.status_row or !(g.bar_row or v.showsBar())) return;
     f.clearRect(.{ .x = g.sidebar, .y = f.rows - 1, .cols = f.cols - g.sidebar, .rows = 1 });
+    if (!v.showsBar()) return;
     const footer = f.rowMut(f.rows - 1)[g.sidebar..];
     switch (v.mode) {
         .normal, .help => if (v.notice) {
@@ -235,7 +251,7 @@ pub const Hit = union(enum) {
 /// What the chrome drawn by `draw` shows at (x, y), or null when the point
 /// is in the tab area.
 pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
-    const g: Geometry = .sized(cols, rows, v.collapsed, v.sidebar_width);
+    const g: Geometry = .ofView(v, cols, rows);
     if (x < g.sidebar) {
         if (x == g.sidebar - 1) return .resize_sidebar;
         const expanded = g.sidebar > collapsed_cols;
@@ -261,7 +277,7 @@ pub fn hit(v: View, cols: u16, rows: u16, x: u16, y: u16) ?Hit {
         }
         return .none;
     }
-    if (g.status_row and v.showsBar() and y == rows - 1) return .none;
+    if (g.status_row and (g.bar_row or v.showsBar()) and y == rows - 1) return .none;
     if (!g.tab_row or y != 0) return null;
     const rel = x - g.sidebar;
     var slots: TabSlots = .init(v.tabs, cols - g.sidebar);
@@ -319,7 +335,7 @@ fn hostRows(text: []const u8, cols: usize) usize {
 
 /// Show details only in spare space; never displace workspace entries.
 fn infoTop(v: View, rows: u16, sidebar: u16) ?u16 {
-    if (v.hostname.len == 0 or rows < 12) return null;
+    if (!v.margins or v.hostname.len == 0 or rows < 12) return null;
     var used: usize = 1;
     for (v.workspaces) |ws| used += entryRows(ws, true);
     const count = hostRows(v.hostname, sidebar - 3);
@@ -1199,9 +1215,9 @@ test "resized sidebar draws and hits the same divider and preserves terminal spa
     defer s.deinit();
     try testing.expectEqual(@as(u21, 0x2502), s.at(37, 10).cp);
     try testing.expectEqual(Hit.resize_sidebar, hit(v, 100, 24, 37, 10).?);
-    try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 23 }, Geometry.sized(100, 24, false, 38).area);
-    try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500).sidebar);
-    try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38).sidebar);
+    try testing.expectEqual(Rect{ .x = 38, .y = 1, .cols = 62, .rows = 23 }, Geometry.sized(100, 24, false, 38, true).area);
+    try testing.expectEqual(@as(u16, 44), Geometry.sized(64, 24, false, 500, true).sidebar);
+    try testing.expectEqual(@as(u16, collapsed_cols), Geometry.sized(40, 24, false, 38, true).sidebar);
 }
 
 test "zoom markers reserve the number and all marker cells before long or wide names" {
@@ -1245,6 +1261,21 @@ test "tab activity markers survive truncation and share their tab hit target" {
     const got = try s.text();
     defer testing.allocator.free(got);
     try testing.expect(std.mem.indexOf(u8, got, "…") != null);
+}
+
+test "without side margins the mode bar keeps the bottom row and the details stay hidden" {
+    const v: View = .{ .workspaces = &one, .tabs = &tabs2, .hostname = "devbox", .directory = "/code/kiwa", .margins = false };
+    const g: Geometry = .ofView(v, 80, 24);
+    try testing.expect(g.bar_row);
+    try testing.expectEqual(Rect{ .x = sidebar_cols, .y = 1, .cols = 80 - sidebar_cols, .rows = 22 }, g.area);
+    try testing.expectEqual(@as(u16, 23), Geometry.ofView(.{ .workspaces = &one, .tabs = &tabs2 }, 80, 24).area.rows);
+    var s = try render(80, 24, v);
+    defer s.deinit();
+    const text = try s.text();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "devbox") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Host") == null);
+    try testing.expectEqualDeep(@as(?Hit, .none), hit(v, 80, 24, 40, 23));
 }
 
 test "sidebar details use spare space and directory and menu clicks match their labels" {

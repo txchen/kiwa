@@ -238,6 +238,10 @@ const Server = struct {
     configuration: config.Config = .{},
     config_path: []const u8 = "",
     hostname: []const u8,
+    /// Whether the last attached outer terminal has left and right
+    /// margins, which decides the tab area (`chrome.View.margins`). Kept
+    /// across attaches, so a terminal that reattaches resizes no pane.
+    margins: bool = true,
     chrome_workspaces: std.ArrayList(chrome.Workspace) = .empty,
     chrome_tabs: std.ArrayList(chrome.Tab) = .empty,
     chrome_agents: std.ArrayList(chrome.Agent) = .empty,
@@ -588,7 +592,7 @@ const Server = struct {
 
     /// The area the current tab owns in a frame of `size`.
     fn tabArea(s: *const Server, size: protocol.Size) Rect {
-        return chrome.Geometry.sized(size.cols, size.rows, s.collapsed, s.sidebar_width).area;
+        return chrome.Geometry.sized(size.cols, size.rows, s.collapsed, s.sidebar_width, s.margins).area;
     }
 
     /// Lays out the current tab for the last client size and resizes its
@@ -1167,7 +1171,7 @@ const Server = struct {
     /// stop on: each workspace, then its agent rows when the sidebar shows them.
     fn navigate(s: *Server, c: *Conn, n: prefix.Nav) !void {
         const view = try s.chromeView(c);
-        const g: chrome.Geometry = .sized(c.size.cols, c.size.rows, s.collapsed, s.sidebar_width);
+        const g: chrome.Geometry = .sized(c.size.cols, c.size.rows, s.collapsed, s.sidebar_width, s.margins);
         const expanded = g.sidebar > chrome.collapsed_cols;
         s.nav_stops.clearRetainingCapacity();
         for (view.workspaces, 0..) |ws, i| {
@@ -1454,6 +1458,11 @@ const Server = struct {
                 if (c.keyboard == .kitty) s.stats.kitty_probes += 1;
                 if (c.lr_margins) s.stats.margin_probes += 1;
                 std.log.info("outer terminal keyboard: {t}, left and right margins: {}", .{ c.keyboard, c.lr_margins });
+                if (s.margins != c.lr_margins) {
+                    s.margins = c.lr_margins;
+                    try s.relayout(false);
+                    try s.markStale();
+                }
             },
         }
     }
@@ -1724,6 +1733,7 @@ const Server = struct {
             .tabs = s.chrome_tabs.items,
             .collapsed = s.collapsed,
             .sidebar_width = s.sidebar_width,
+            .margins = s.margins,
             .styles = .of(s.theme(c)),
             .custom_keys = s.configuration.keys.len != 0 or !std.meta.eql(s.configuration.keys.prefix_key, (prefix.Keymap{}).prefix_key),
             .mode = switch (c.prefix.mode) {

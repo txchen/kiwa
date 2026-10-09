@@ -1336,6 +1336,14 @@ const framed_left = left_half.framed(area);
 const framed_right = right_half.framed(area);
 const framed_top = right_top.framed(area);
 const framed_bottom = right_bottom.framed(area);
+/// Without left and right margins the mode bar keeps the bottom row, so
+/// the same splits are one row shorter.
+const plain_area = tabArea(80, 23);
+const plain_framed = [_]Box{
+    plain_area.splitRight()[0].framed(plain_area),
+    plain_area.splitRight()[1].splitDown()[0].framed(plain_area),
+    plain_area.splitRight()[1].splitDown()[1].framed(plain_area),
+};
 /// The tab row above the default tab area.
 const tab_row_box: Box = .{ .x = area.x, .y = tab_row, .cols = area.cols, .rows = 1 };
 
@@ -2854,24 +2862,26 @@ fn paneStyleMouseCapture(ctx: *Ctx) !void {
 fn paneStyleScroll(ctx: *Ctx, margins: bool) !void {
     const o = try ctx.attachWith(.{ .margins = margins });
     try o.waitLine("$");
+    const boxes: []const Box = if (margins) &.{ framed_left, framed_top, framed_bottom } else &plain_framed;
+    const bottom = boxes[2];
     try paneStyleConfig(ctx, framed_config);
     try expect(try ctx.run("reload-config") == 0, "framed configuration reloads");
     try prefixed(o, "v");
     try prefixed(o, "-");
-    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try waitFrames(o, boxes);
     var seen: std.ArrayList(u8) = .empty;
     defer seen.deinit(ctx.gpa);
     o.capture = &seen;
     defer o.capture = null;
     try o.send("python3 -c 'import time; [(print(\"scroll-%03d\" % i, flush=True), time.sleep(0.01)) for i in range(80)]'\r");
     try o.waitText("scroll-079");
-    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
-    try o.wheel(true, framed_bottom.x + 7, framed_bottom.y + 3);
+    try waitFrames(o, boxes);
+    try o.wheel(true, bottom.x + 7, bottom.y + 3);
     try o.waitGone("scroll-079");
-    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try waitFrames(o, boxes);
     try o.send("clear; echo SCROLL-$((40+2))\r");
     try o.waitText("SCROLL-42");
-    try waitFrames(o, &.{ framed_left, framed_top, framed_bottom });
+    try waitFrames(o, boxes);
     if (!margins) {
         try expect(std.mem.indexOf(u8, seen.items, "S\x1b[r") == null, "framed scrolling without margins emits no widened scroll-up commands");
         try expect(std.mem.indexOf(u8, seen.items, "T\x1b[r") == null, "framed scrolling without margins emits no widened scroll-down commands");
