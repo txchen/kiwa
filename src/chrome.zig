@@ -659,7 +659,13 @@ fn drawTabs(row: []Cell, tabs: []const Tab, st: *const Styles) void {
             _ = put(cell, 0, std.fmt.bufPrint(&num, "{d}[Z]", .{slot.index + 1}) catch unreachable, style);
             continue;
         }
-        const after = put(cell, 1, std.fmt.bufPrint(&num, "{d} ", .{slot.index + 1}) catch unreachable, style);
+        // A bold number, in the accent on inactive tabs, marks where each
+        // tab starts, since names such as `vim · src` hold spaces too.
+        var num_style = style;
+        num_style.flags.bold = true;
+        if (!t.active) num_style.fg_color = st.accent;
+        _ = put(cell, 1, std.fmt.bufPrint(&num, "{d}", .{slot.index + 1}) catch unreachable, num_style);
+        const after = 2 + digits(slot.index + 1);
         const end = slot.cols - 1 - @as(usize, if (t.activity == .none) 0 else 2);
         const name_end = end - @as(usize, if (t.zoomed) 4 else 0);
         fit(cell[0..name_end], after, t.name, style);
@@ -1438,11 +1444,27 @@ test "the tab row is a dark band: inactive tabs and the empty rest share its bac
     defer s.deinit();
     for (s.f.row(0)[26..]) |cell| {
         try testing.expectEqual(.none, cell.style.flags.underline);
-        if (!cell.style.eql(default_styles.highlight)) try testing.expectEqualDeep(default_styles.tab_bar.bg_color, cell.style.bg_color);
+        if (!cell.style.bg_color.eql(default_styles.highlight.bg_color)) try testing.expectEqualDeep(default_styles.tab_bar.bg_color, cell.style.bg_color);
     }
     const geometry = Geometry.of(80, 24, false);
     try testing.expectEqual(1, geometry.area.y);
     try testing.expectEqual(23, geometry.area.rows);
+}
+
+test "tab numbers are bold, and in the accent on inactive tabs" {
+    var s = try render(80, 24, .{ .workspaces = &one, .tabs = &tabs2 });
+    defer s.deinit();
+    // Row 0 from column 26: " 1 sh  " then " 2 vim  ".
+    const active_num = s.at(27, 0);
+    try testing.expectEqual('1', active_num.cp);
+    try testing.expect(active_num.style.flags.bold);
+    try testing.expectEqualDeep(default_styles.highlight.bg_color, active_num.style.bg_color);
+    try testing.expect(!s.at(29, 0).style.flags.bold);
+    const inactive_num = s.at(33, 0);
+    try testing.expectEqual('2', inactive_num.cp);
+    try testing.expect(inactive_num.style.flags.bold);
+    try testing.expectEqualDeep(default_styles.accent, inactive_num.style.fg_color);
+    try testing.expect(!s.at(35, 0).style.fg_color.eql(default_styles.accent));
 }
 
 test "a theme recolors the tab row, the active tab, and the sidebar" {
