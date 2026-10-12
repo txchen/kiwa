@@ -27,6 +27,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      # Zig 0.16 unpacks dependencies into zig-pkg/. Restoring it skips the
+      # download, so a flaky upstream host cannot fail the build.
+      - name: Cache Zig packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: zig-pkg
+          key: zig-pkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig.zon') }}
       - name: Install end-to-end test dependencies
         run: brew install htop fzf
       - name: Build and run unit and end-to-end tests
