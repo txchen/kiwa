@@ -8,7 +8,7 @@ const frame = @import("frame.zig");
 const Frame = frame.Frame;
 const Cell = frame.Cell;
 const Cursor = frame.Cursor;
-const Graphemes = frame.Graphemes;
+const Extras = frame.Extras;
 const Style = frame.Style;
 const rowsEqual = frame.rowsEqual;
 const Rect = frame.Rect;
@@ -24,7 +24,7 @@ const replacement = "\u{fffd}";
 /// frames write nothing. Assumes the outer cursor is at `old.cursor` with
 /// the default pen, which is where every diff and full redraw leaves it.
 /// Only `new`'s dirty rows are compared; the others are taken as equal.
-pub fn diff(old: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
+pub fn diff(old: *const Frame, new: *const Frame, g: *const Extras, w: *Writer) Writer.Error!void {
     return emit(old, new, g, w, &.{}, .{ .x = old.cursor.x, .y = old.cursor.y });
 }
 
@@ -186,7 +186,7 @@ pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 /// applies it, so `old` keeps modeling the outer terminal. Rows that the
 /// scroll leaves equal to `new` are unmarked: they need no write and no
 /// copy into `old`.
-pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
+pub fn diffScrolling(gpa: std.mem.Allocator, sc: *Scratch, old: *Frame, new: *Frame, g: *const Extras, w: *Writer, scrolls: []const Scroll, lr_margins: bool) DiffError!void {
     if (scrolls.len == 0) return diff(old, new, g, w);
     for (scrolls) |s| new.markRows(s.rect.y, s.rect.rows);
     try sc.ensureSize(gpa, old.cols, old.rows);
@@ -284,7 +284,7 @@ fn besideEqual(a: []const Cell, b: []const Cell, r: Rect) bool {
 /// stops once it passes `limit`, returning some larger number. Sets in
 /// `equal` the band's rows that cost nothing, which are the rows with no
 /// changed cell.
-fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Graphemes, r: Rect, limit: u64, equal: *RowSet) u64 {
+fn bandBytes(moved: *const Moved, new: *const Frame, g: *const Extras, r: Rect, limit: u64, equal: *RowSet) u64 {
     var buf: [256]u8 = undefined;
     var d: Writer.Discarding = .init(&buf);
     var o: Out = .{ .w = &d.writer, .g = g, .cols = new.cols, .pos = null, .sync = false };
@@ -318,7 +318,7 @@ fn rowFloor(old: []const Cell, new: []const Cell) u64 {
 /// Writes `scrolls`, then what turns `moved`, the old frame with `scrolls`
 /// applied, into `new`, comparing only `new`'s dirty rows. The outer
 /// cursor starts at `start`.
-fn emit(moved: *const Frame, new: *const Frame, g: *const Graphemes, w: *Writer, scrolls: []const Scroll, start: Pos) Writer.Error!void {
+fn emit(moved: *const Frame, new: *const Frame, g: *const Extras, w: *Writer, scrolls: []const Scroll, start: Pos) Writer.Error!void {
     std.debug.assert(moved.cols == new.cols and moved.rows == new.rows);
     // One row's write cannot tear, so it needs no synchronized output.
     const sync = scrolls.len > 0 or changedRows(moved, new) > 1;
@@ -350,7 +350,7 @@ fn changedRows(old: *const Frame, new: *const Frame) usize {
 }
 
 /// Redraws `new` on an outer terminal whose contents are unknown.
-pub fn full(new: *const Frame, g: *const Graphemes, w: *Writer) Writer.Error!void {
+pub fn full(new: *const Frame, g: *const Extras, w: *Writer) Writer.Error!void {
     var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = 0, .y = 0 }, .sync = true };
     try o.begin();
     try w.writeAll(reset_pen ++ "\x1b[H\x1b[2J");
@@ -363,7 +363,7 @@ const Pos = struct { x: u16, y: u16 };
 
 const Out = struct {
     w: *Writer,
-    g: *const Graphemes,
+    g: *const Extras,
     cols: u16,
     /// Whether the output is wrapped in synchronized output.
     sync: bool,
@@ -541,7 +541,7 @@ const fuzz = @import("fuzz.zig");
 const alloc = testing.allocator;
 
 const Fixture = struct {
-    g: Graphemes = .{},
+    g: Extras = .{},
     old: Frame = .{},
     new: Frame = .{},
     /// The copy of `old` a scrolling diff works on, so that `old` stays
@@ -647,7 +647,7 @@ const Outer = struct {
         o.term.deinit(alloc);
     }
 
-    fn expectShows(o: *Outer, g: *Graphemes, want: *const Frame) !void {
+    fn expectShows(o: *Outer, g: *Extras, want: *const Frame) !void {
         try o.rs.update(alloc, &o.term);
         try o.seen.resize(alloc, want.cols, want.rows);
         const rect: frame.Rect = .{ .cols = want.cols, .rows = want.rows };
@@ -863,7 +863,7 @@ fn randomStyle(r: Rng) Style {
     return s;
 }
 
-fn randomCell(r: Rng, g: *Graphemes) !Cell {
+fn randomCell(r: Rng, g: *Extras) !Cell {
     const t = texts[r.uintLessThan(usize, texts.len)];
     return .{
         .cp = t[0],
@@ -873,13 +873,13 @@ fn randomCell(r: Rng, g: *Graphemes) !Cell {
     };
 }
 
-fn fillRandom(r: Rng, g: *Graphemes, f: *Frame) !void {
+fn fillRandom(r: Rng, g: *Extras, f: *Frame) !void {
     for (0..f.rows) |y| try writeRandom(r, g, f.rowMut(y), 0, f.cols);
     f.cursor = randomCursor(r, f);
 }
 
 /// Changes a few random runs, so that the result is a plausible next frame.
-fn editRandom(r: Rng, g: *Graphemes, f: *Frame, edits: usize) !void {
+fn editRandom(r: Rng, g: *Extras, f: *Frame, edits: usize) !void {
     for (0..edits) |_| {
         const row = f.rowMut(r.uintLessThan(usize, f.rows));
         try writeRandom(r, g, row, r.uintLessThan(usize, f.cols), 1 + r.uintLessThan(usize, 3));
@@ -888,7 +888,7 @@ fn editRandom(r: Rng, g: *Graphemes, f: *Frame, edits: usize) !void {
 }
 
 /// Writes up to `len` random cells from `x`, then sometimes blanks a tail.
-fn writeRandom(r: Rng, g: *Graphemes, row: []Cell, x: usize, len: usize) !void {
+fn writeRandom(r: Rng, g: *Extras, row: []Cell, x: usize, len: usize) !void {
     var i = x;
     while (i < @min(x + len, row.len)) {
         var c = try randomCell(r, g);
@@ -950,7 +950,7 @@ test "random frame pairs round-trip through a ghostty-vt outer terminal" {
 test "a row's floor never exceeds the bytes its repaint writes" {
     var prng: Rng.DefaultPrng = .init(0x666c6f6f);
     const r = prng.random();
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(alloc);
     var old: Frame = .{};
     defer old.deinit(alloc);
@@ -1095,7 +1095,7 @@ test "without side margins, a scroll leaves out the sidebar row it would move" {
 
 /// Writes `new` a few times the way the server's writers do: random cells,
 /// a box, or a scroll of a rect, each through `rowMut`. Returns the scroll.
-fn writeRandomly(r: Rng, g: *Graphemes, f: *Frame) !?Scroll {
+fn writeRandomly(r: Rng, g: *Extras, f: *Frame) !?Scroll {
     var scroll: ?Scroll = null;
     for (0..1 + r.uintLessThan(usize, 4)) |_| switch (r.uintLessThan(u8, 4)) {
         0 => {
@@ -1177,7 +1177,7 @@ test "random writes diffed by their dirty rows send what a full-frame diff sends
 test "reading a frame's rows through a scroll matches scrolling a copy in place" {
     var prng: Rng.DefaultPrng = .init(0x6170706c);
     const r = prng.random();
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(alloc);
     var src: Frame = .{};
     defer src.deinit(alloc);

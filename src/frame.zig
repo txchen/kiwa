@@ -6,12 +6,12 @@ const vt = @import("ghostty-vt");
 pub const Width = enum(u2) { narrow, wide, tail };
 
 /// One outer-terminal cell. A grapheme's extra codepoints live in the
-/// client's `Graphemes` table and the cell holds only their id. Cells are
+/// client's `Extras` table and the cell holds only their id. Cells are
 /// 16-byte values without padding.
 pub const Cell = packed struct(u128) {
     cp: u21 = ' ',
     width: Width = .narrow,
-    extra: Graphemes.Id = .none,
+    extra: Extras.Id = .none,
     style: Style = .{},
 
     pub const blank: Cell = .{};
@@ -111,7 +111,7 @@ pub const Style = packed struct(u89) {
 
 /// Interns the extra codepoints of graphemes as UTF-8. The table is shared
 /// by a client's frames so that equal text has equal ids in both.
-pub const Graphemes = struct {
+pub const Extras = struct {
     map: std.StringArrayHashMapUnmanaged(void) = .empty,
     scratch: std.ArrayList(u8) = .empty,
 
@@ -124,22 +124,22 @@ pub const Graphemes = struct {
     /// this many shows its first codepoint alone until the reset.
     pub const max_ids = std.math.maxInt(u16) - 1;
 
-    pub fn deinit(g: *Graphemes, gpa: std.mem.Allocator) void {
+    pub fn deinit(g: *Extras, gpa: std.mem.Allocator) void {
         g.reset(gpa);
         g.map.deinit(gpa);
         g.scratch.deinit(gpa);
     }
 
-    pub fn reset(g: *Graphemes, gpa: std.mem.Allocator) void {
+    pub fn reset(g: *Extras, gpa: std.mem.Allocator) void {
         for (g.map.keys()) |k| gpa.free(k);
         g.map.clearRetainingCapacity();
     }
 
-    pub fn count(g: *const Graphemes) usize {
+    pub fn count(g: *const Extras) usize {
         return g.map.count();
     }
 
-    pub fn intern(g: *Graphemes, gpa: std.mem.Allocator, extra: []const u21) !Id {
+    pub fn intern(g: *Extras, gpa: std.mem.Allocator, extra: []const u21) !Id {
         g.scratch.clearRetainingCapacity();
         for (extra) |cp| {
             var buf: [4]u8 = undefined;
@@ -161,7 +161,7 @@ pub const Graphemes = struct {
         return @enumFromInt(gop.index + 1);
     }
 
-    pub fn bytes(g: *const Graphemes, id: Id) []const u8 {
+    pub fn bytes(g: *const Extras, id: Id) []const u8 {
         if (id == .none) return "";
         return g.map.keys()[@intFromEnum(id) - 1];
     }
@@ -328,7 +328,7 @@ pub const Frame = struct {
 
     /// Copies a pane's rows into `rect`. The other rows keep their cells.
     /// Consumes the render state's dirty flags.
-    pub fn composePane(f: *Frame, gpa: std.mem.Allocator, g: *Graphemes, rect: Rect, rs: *vt.RenderState, which: Which) !void {
+    pub fn composePane(f: *Frame, gpa: std.mem.Allocator, g: *Extras, rect: Rect, rs: *vt.RenderState, which: Which) !void {
         defer rs.clean();
         if (which == .changed and rs.dirty == .false) return;
         const rows = rs.row_data.slice();
@@ -359,7 +359,7 @@ pub fn scrollSource(rows: usize, n: i32, i: usize) ?usize {
 }
 
 /// `selection` is the row's selected columns, inclusive, drawn in reverse video.
-fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16) !void {
+fn composeRow(gpa: std.mem.Allocator, g: *Extras, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16) !void {
     const raws = cells.items(.raw);
     const styles = cells.items(.style);
     const graphemes = cells.items(.grapheme);
@@ -375,7 +375,7 @@ fn composeRow(gpa: std.mem.Allocator, g: *Graphemes, out: []Cell, cells: std.Mul
     if (n > 0 and out[n - 1].width == .wide) out[n - 1] = .blank;
 }
 
-fn fromRender(gpa: std.mem.Allocator, g: *Graphemes, raw: vt.Cell, style: vt.Style, grapheme: []const u21) !Cell {
+fn fromRender(gpa: std.mem.Allocator, g: *Extras, raw: vt.Cell, style: vt.Style, grapheme: []const u21) !Cell {
     switch (raw.content_tag) {
         .bg_color_palette => return .{ .style = .{ .bg_color = .palette(raw.content.color_palette.data) } },
         .bg_color_rgb => return .{ .style = .{ .bg_color = .rgb(raw.content.color_rgb.r, raw.content.color_rgb.g, raw.content.color_rgb.b) } },
@@ -506,18 +506,18 @@ test "a full grapheme table hands out no id instead of wrapping" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(gpa);
-    var last: Graphemes.Id = .none;
-    for (0..Graphemes.max_ids) |i| {
+    var last: Extras.Id = .none;
+    for (0..Extras.max_ids) |i| {
         last = try g.intern(gpa, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) });
     }
-    try testing.expectEqual(Graphemes.max_ids, @intFromEnum(last));
-    try testing.expectEqual(Graphemes.max_ids, g.count());
+    try testing.expectEqual(Extras.max_ids, @intFromEnum(last));
+    try testing.expectEqual(Extras.max_ids, g.count());
     try testing.expectEqual(.none, try g.intern(gpa, &.{0x301}));
-    try testing.expectEqual(Graphemes.max_ids, g.count());
+    try testing.expectEqual(Extras.max_ids, g.count());
     // A known grapheme still has its id.
-    try testing.expectEqual(last, try g.intern(gpa, &.{ 0x300 + @as(u21, (Graphemes.max_ids - 1) % 0x100), @intCast(0x1000 + (Graphemes.max_ids - 1) / 0x100) }));
+    try testing.expectEqual(last, try g.intern(gpa, &.{ 0x300 + @as(u21, (Extras.max_ids - 1) % 0x100), @intCast(0x1000 + (Extras.max_ids - 1) / 0x100) }));
 }
 
 test "composing copies dirty rows and keeps clean ones" {
@@ -527,7 +527,7 @@ test "composing copies dirty rows and keeps clean ones" {
     defer s.deinit();
     var rs: vt.RenderState = .empty;
     defer rs.deinit(testing.allocator);
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(testing.allocator);
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
@@ -596,7 +596,7 @@ test "writers mark the rows they write and no others" {
     defer s.deinit();
     var rs: vt.RenderState = .empty;
     defer rs.deinit(testing.allocator);
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(testing.allocator);
     s.nextSlice("\x1b[3;1H");
     try rs.update(testing.allocator, &t);
@@ -616,7 +616,7 @@ test "selected cells are drawn in reverse video" {
     defer s.deinit();
     var rs: vt.RenderState = .empty;
     defer rs.deinit(testing.allocator);
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(testing.allocator);
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
@@ -692,7 +692,7 @@ test "scrolling rows moves a rect's cells and blanks the rows that come in" {
 }
 
 /// Composes `rs` into a fresh frame the slow way, for comparison.
-fn composeAll(gpa: std.mem.Allocator, g: *Graphemes, f: *Frame, rect: Rect, rs: *vt.RenderState) !void {
+fn composeAll(gpa: std.mem.Allocator, g: *Extras, f: *Frame, rect: Rect, rs: *vt.RenderState) !void {
     try f.resize(gpa, rect.x + rect.cols, rect.y + rect.rows);
     try f.composePane(gpa, g, rect, rs, .all);
 }
@@ -714,7 +714,7 @@ test "a scrolled frame composes only the rows the shift did not carry" {
     defer rs.deinit(gpa);
     var d: DrawnRows = .{};
     defer d.deinit(gpa);
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(gpa);
     var f: Frame = .{};
     defer f.deinit(gpa);
@@ -773,7 +773,7 @@ test "random output composed by shift and carried rows matches composing every r
     defer rs.deinit(gpa);
     var d: DrawnRows = .{};
     defer d.deinit(gpa);
-    var g: Graphemes = .{};
+    var g: Extras = .{};
     defer g.deinit(gpa);
     var f: Frame = .{};
     defer f.deinit(gpa);

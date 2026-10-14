@@ -68,7 +68,7 @@ pub const Dialog = union(enum) {
     }
 
     /// Draws the dialog over `area` and returns where the outer cursor goes.
-    pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, area: Rect, st: *const chrome.Styles) !frame_mod.Cursor {
+    pub fn draw(d: *const Dialog, f: *Frame, gpa: std.mem.Allocator, g: *frame_mod.Extras, area: Rect, st: *const chrome.Styles) !frame_mod.Cursor {
         const b = d.box(area);
         f.clearRect(b);
         f.drawBox(b, st.box_border);
@@ -342,7 +342,7 @@ fn centered(area: Rect, cols: u16, rows: u16) Rect {
 
 /// Draws the field's visible graphemes into `line` and returns the
 /// cursor's column in it.
-fn drawField(line: []frame_mod.Cell, gpa: std.mem.Allocator, g: *frame_mod.Graphemes, field: *const TextField) !usize {
+fn drawField(line: []frame_mod.Cell, gpa: std.mem.Allocator, g: *frame_mod.Extras, field: *const TextField) !usize {
     const v = field.view(line.len);
     const cps = field.codepoints();
     var col: usize = 0;
@@ -406,7 +406,7 @@ test "rename keys edit the field, save on enter, and cancel on esc" {
 test "the rename box is centered over the tab area with its title, field, hint, and cursor" {
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
-    var g: frame_mod.Graphemes = .{};
+    var g: frame_mod.Extras = .{};
     defer g.deinit(testing.allocator);
     try f.resize(testing.allocator, 80, 24);
     const area: Rect = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
@@ -442,7 +442,7 @@ test "a close confirmation names what runs; y confirms, and n or esc cancels" {
 
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
-    var g: frame_mod.Graphemes = .{};
+    var g: frame_mod.Extras = .{};
     defer g.deinit(testing.allocator);
     try f.resize(testing.allocator, 80, 24);
     const area: Rect = .{ .x = 26, .y = 1, .cols = 54, .rows = 23 };
@@ -472,7 +472,7 @@ test "the theme picker previews as it moves, keeps on enter, and marks the theme
     var f: Frame = .{};
     defer f.deinit(testing.allocator);
     try f.resize(testing.allocator, 40, 12);
-    var g: frame_mod.Graphemes = .{};
+    var g: frame_mod.Extras = .{};
     defer g.deinit(testing.allocator);
     var d: Dialog = .{ .theme = p };
     const area: Rect = .{ .x = 0, .y = 0, .cols = 40, .rows = 12 };

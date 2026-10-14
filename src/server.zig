@@ -139,7 +139,7 @@ const Conn = struct {
     /// scroll instead of repainting.
     scrolls: std.ArrayList(diff.Scroll) = .empty,
     diff_scratch: diff.Scratch = .{},
-    graphemes: frame_mod.Graphemes = .{},
+    extras: frame_mod.Extras = .{},
     /// The panes `frame` holds and where. A pane drawn at the same place
     /// again copies only its dirty rows.
     drawn: std.ArrayList(Placement) = .empty,
@@ -185,7 +185,7 @@ const Conn = struct {
         c.last_frame.deinit(gpa);
         c.scrolls.deinit(gpa);
         c.diff_scratch.deinit(gpa);
-        c.graphemes.deinit(gpa);
+        c.extras.deinit(gpa);
         gpa.destroy(c);
     }
 };
@@ -1554,8 +1554,8 @@ const Server = struct {
             compose_all = true;
             c.redraw_pending = true;
         }
-        if (c.graphemes.count() > frame_mod.Graphemes.limit) {
-            c.graphemes.reset(s.gpa);
+        if (c.extras.count() > frame_mod.Extras.limit) {
+            c.extras.reset(s.gpa);
             compose_all = true;
             c.redraw_pending = true;
         }
@@ -1588,7 +1588,7 @@ const Server = struct {
             }
         }
         c.drawn_help = help;
-        if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.graphemes, s.tabArea(c.size), &st);
+        if (dialog) |d| c.frame.cursor = try d.draw(&c.frame, s.gpa, &c.extras, s.tabArea(c.size), &st);
         c.drawn_dialog = dialog != null;
         if (menu) |m| m.draw(&c.frame, s.session.activeTab().zoomed, &st);
         c.drawn_menu = menu;
@@ -1598,9 +1598,9 @@ const Server = struct {
         s.scratch.clearRetainingCapacity();
         var aw: std.Io.Writer.Allocating = .fromArrayList(s.gpa, &s.scratch);
         const written = if (c.redraw_pending)
-            diff.full(&c.frame, &c.graphemes, &aw.writer)
+            diff.full(&c.frame, &c.extras, &aw.writer)
         else
-            diff.diffScrolling(s.gpa, &c.diff_scratch, &c.last_frame, &c.frame, &c.graphemes, &aw.writer, c.scrolls.items, c.lr_margins);
+            diff.diffScrolling(s.gpa, &c.diff_scratch, &c.last_frame, &c.frame, &c.extras, &aw.writer, c.scrolls.items, c.lr_margins);
         // Taken back before the error check so that `scratch` keeps its buffer.
         s.scratch = aw.toArrayList();
         written catch return error.OutOfMemory;
@@ -1654,7 +1654,7 @@ const Server = struct {
             } else {
                 which = .all;
             };
-            try c.frame.composePane(s.gpa, &c.graphemes, pl.inner, &p.render, which);
+            try c.frame.composePane(s.gpa, &c.extras, pl.inner, &p.render, which);
             if (p.scrolled()) |sb| chrome.drawScrollMarker(&c.frame, pl.inner, sb.back, sb.history, &st);
             if (pl.pane == focus) {
                 c.frame.cursor = frame_mod.paneCursor(pl.inner, &p.render, p.terminal.cursor.is_default);
