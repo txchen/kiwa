@@ -95,6 +95,36 @@ against 0.571%, hidden output 0.905% against 3.091% attached and 0.894%
 against 2.920% detached, scrolling 0.414% and 0.413% against 0.665%, and
 every memory gate under 20 MiB.
 
+## OSC 8 hyperlinks, October 14, 2026
+
+Kiwa now passes OSC 8 hyperlinks from panes to the outer terminal. The
+bench gained a scenario for it, "30 lines/s with 3 OSC 8 links each": every
+line names three files, each in its own link with a new URI, as
+`ls --hyperlink` writes them. Kiwa and tmux were measured on the same
+machine, ReleaseFast, five runs:
+
+```sh
+python3 tools/bench.py zig-out/bin/kiwa --build ReleaseFast --programs kiwa,tmux --only "30 lines/s" --runs 5 --check
+```
+
+| Scenario | Before (`5dcb693`) | After | Outer bytes in 12 s, before / after |
+|---|---|---|---|
+| 30 lines/s of 80 bytes, with margins | 0.421% to 0.433% | 0.428% | 52,752 / 52,752 |
+| 30 lines/s of 80 bytes, without margins | 0.428% to 0.438% | 0.427% | 68,872 / 68,872 |
+| 30 lines/s with 3 OSC 8 links each | 0.804% to 0.812% | 0.857% | 49,444 / 131,734 |
+
+The before column gives the medians of two runs on the same day. Before
+the change, Kiwa dropped the links, so its link scenario sent only the
+text. Passing them costs about 6% more CPU and the URI bytes. tmux 3.8
+under `-f /dev/null` also drops them, at 0.583% and 27,720 bytes, and
+Kiwa passes the scrolling gate at 0.857% against a 0.903% limit.
+
+CPU percentages vary by a few percent between runs, so the scrolling
+scenario without links was also compared by user-space instructions in
+the server over 10 s (`perf stat -e instructions:u`), which repeat to
+within 0.1 million. Before: 104.4 million. After: 104.9 million, or 0.4%
+more. The 60 Hz spinner went from 12.4 to 12.3 million.
+
 ## Recorded comparison
 
 These results are a historical snapshot from October 6, 2026, of all four programs. They are not a fresh measurement of the current source tree. The Kiwa rerun above updates only Kiwa's numbers.

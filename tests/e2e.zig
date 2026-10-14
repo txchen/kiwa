@@ -806,6 +806,29 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
     try expect(raw[6].content.codepoint.data == '|', "the next character follows the wide one");
 }
 
+fn hyperlinksReachTheOuterTerminal(ctx: *Ctx) !void {
+    const o = try attachedWithPrompt(ctx);
+    try o.send("clear; printf '\\033]8;;https://kiwa.example/x\\033\\\\link\\033]8;;\\033\\\\\\n'\r");
+    try o.waitLine("link");
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(ctx.gpa);
+    try rs.update(ctx.gpa, &o.term);
+    const x = area.x;
+    const rows = rs.row_data.slice();
+    const y = for (rows.items(.cells), 0..) |cells, y| {
+        if (cells.items(.raw)[x].content.codepoint.data == 'l') break y;
+    } else return error.RowNotFound;
+    const pin = rows.items(.pin)[y];
+    const page = pin.node.page();
+    for (0..4) |i| {
+        const cell = page.getRowAndCell(x + i, pin.y).cell;
+        const id = page.lookupHyperlink(cell) orelse return expect(false, "every cell of \"link\" has a hyperlink");
+        const uri = page.hyperlink_set.get(page.memory, id).uri.slice(page.memory);
+        try expect(std.mem.eql(u8, uri, "https://kiwa.example/x"), "the hyperlink has the pane's URI");
+    }
+    try expect(!rows.items(.cells)[y].items(.raw)[x + 4].hyperlink, "the link ends after \"link\"");
+}
+
 fn loneEscLeavesInsertMode(ctx: *Ctx) !void {
     const o = try ctx.attachWith(.{ .keyboard = .legacy });
     try o.waitLine("$");
@@ -3792,6 +3815,7 @@ const cases = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!void,
     .{ .name = "kill-server gives up on a server that survives SIGTERM after 5 s", .run = killServerGivesUpOnAServerThatStays },
     .{ .name = "the pane starts in the client's directory with Kiwa's environment", .run = paneStartsWithClientDirAndEnv },
     .{ .name = "colors and wide characters reach the outer terminal", .run = colorsAndWideChars },
+    .{ .name = "hyperlinks reach the outer terminal", .run = hyperlinksReachTheOuterTerminal },
     .{ .name = "a lone esc reaches vim and leaves insert mode", .run = loneEscLeavesInsertMode },
     .{ .name = "vim navigates, edits, and quits (kitty outer)", .run = vimEditsKitty },
     .{ .name = "vim navigates, edits, and quits (legacy outer)", .run = vimEditsLegacy },

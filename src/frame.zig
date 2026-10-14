@@ -5,9 +5,9 @@ const vt = @import("ghostty-vt");
 
 pub const Width = enum(u2) { narrow, wide, tail };
 
-/// One outer-terminal cell. A grapheme's extra codepoints live in the
-/// client's `Extras` table and the cell holds only their id. Cells are
-/// 16-byte values without padding.
+/// One outer-terminal cell. A grapheme's extra codepoints and the cell's
+/// hyperlink live in the client's `Extras` table, and the cell holds only
+/// their id. Cells are 16-byte values without padding.
 pub const Cell = packed struct(u128) {
     cp: u21 = ' ',
     width: Width = .narrow,
@@ -109,61 +109,96 @@ pub const Style = packed struct(u89) {
     }
 };
 
-/// Interns the extra codepoints of graphemes as UTF-8. The table is shared
-/// by a client's frames so that equal text has equal ids in both.
+/// Interns what a cell carries beyond its codepoint and style: a
+/// grapheme's extra codepoints and its hyperlink. Each entry is keyed by
+/// the link and the grapheme's UTF-8; URIs are interned separately. The
+/// table is shared by a client's frames so that equal cells have equal ids
+/// in both.
 pub const Extras = struct {
     map: std.StringArrayHashMapUnmanaged(void) = .empty,
+    links: std.StringArrayHashMapUnmanaged(void) = .empty,
     scratch: std.ArrayList(u8) = .empty,
 
     pub const Id = enum(u16) { none = 0, _ };
+    /// An interned hyperlink URI.
+    pub const Link = enum(u16) { none = 0, _ };
 
     /// Ids are never freed one by one. Past this many entries the client
     /// resets the table, which invalidates both of its frames.
     pub const limit = 4096;
-    /// The ids one table can hand out before that reset. A grapheme past
-    /// this many shows its first codepoint alone until the reset.
+    /// The ids one table can hand out before that reset. A cell past this
+    /// many loses its extra codepoints or link until the reset.
     pub const max_ids = std.math.maxInt(u16) - 1;
 
-    pub fn deinit(g: *Extras, gpa: std.mem.Allocator) void {
-        g.reset(gpa);
-        g.map.deinit(gpa);
-        g.scratch.deinit(gpa);
+    pub fn deinit(e: *Extras, gpa: std.mem.Allocator) void {
+        e.reset(gpa);
+        e.map.deinit(gpa);
+        e.links.deinit(gpa);
+        e.scratch.deinit(gpa);
     }
 
-    pub fn reset(g: *Extras, gpa: std.mem.Allocator) void {
-        for (g.map.keys()) |k| gpa.free(k);
-        g.map.clearRetainingCapacity();
+    pub fn reset(e: *Extras, gpa: std.mem.Allocator) void {
+        for (e.map.keys()) |k| gpa.free(k);
+        e.map.clearRetainingCapacity();
+        for (e.links.keys()) |k| gpa.free(k);
+        e.links.clearRetainingCapacity();
     }
 
-    pub fn count(g: *const Extras) usize {
-        return g.map.count();
+    pub fn count(e: *const Extras) usize {
+        return e.map.count();
     }
 
-    pub fn intern(g: *Extras, gpa: std.mem.Allocator, extra: []const u21) !Id {
-        g.scratch.clearRetainingCapacity();
+    pub fn intern(e: *Extras, gpa: std.mem.Allocator, extra: []const u21, link: Link) !Id {
+        e.scratch.clearRetainingCapacity();
+        var le: [2]u8 = undefined;
+        std.mem.writeInt(u16, &le, @intFromEnum(link), .little);
+        try e.scratch.appendSlice(gpa, &le);
         for (extra) |cp| {
             var buf: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(cp, &buf) catch continue;
-            try g.scratch.appendSlice(gpa, buf[0..n]);
+            try e.scratch.appendSlice(gpa, buf[0..n]);
         }
-        if (g.scratch.items.len == 0) return .none;
-        const gop = try g.map.getOrPut(gpa, g.scratch.items);
-        if (!gop.found_existing) {
-            if (gop.index == max_ids) {
-                g.map.swapRemoveAt(gop.index);
-                return .none;
-            }
-            gop.key_ptr.* = gpa.dupe(u8, g.scratch.items) catch |e| {
-                g.map.swapRemoveAt(gop.index);
-                return e;
-            };
-        }
-        return @enumFromInt(gop.index + 1);
+        if (e.scratch.items.len == 2 and link == .none) return .none;
+        return @enumFromInt(try internKey(&e.map, gpa, e.scratch.items));
     }
 
-    pub fn bytes(g: *const Extras, id: Id) []const u8 {
+    pub fn internLink(e: *Extras, gpa: std.mem.Allocator, uri_bytes: []const u8) !Link {
+        return @enumFromInt(try internKey(&e.links, gpa, uri_bytes));
+    }
+
+    /// The grapheme's extra codepoints as UTF-8.
+    pub fn bytes(e: *const Extras, id: Id) []const u8 {
         if (id == .none) return "";
-        return g.map.keys()[@intFromEnum(id) - 1];
+        return e.map.keys()[@intFromEnum(id) - 1][2..];
+    }
+
+    pub fn linkOf(e: *const Extras, id: Id) Link {
+        if (id == .none) {
+            @branchHint(.likely);
+            return .none;
+        }
+        return @enumFromInt(std.mem.readInt(u16, e.map.keys()[@intFromEnum(id) - 1][0..2], .little));
+    }
+
+    pub fn uri(e: *const Extras, link: Link) []const u8 {
+        if (link == .none) return "";
+        return e.links.keys()[@intFromEnum(link) - 1];
+    }
+
+    /// Returns the key's index plus one, or 0 when the map is full.
+    fn internKey(map: *std.StringArrayHashMapUnmanaged(void), gpa: std.mem.Allocator, key: []const u8) !u16 {
+        const gop = try map.getOrPut(gpa, key);
+        if (!gop.found_existing) {
+            if (gop.index == max_ids) {
+                map.swapRemoveAt(gop.index);
+                return 0;
+            }
+            gop.key_ptr.* = gpa.dupe(u8, key) catch |err| {
+                map.swapRemoveAt(gop.index);
+                return err;
+            };
+        }
+        return @intCast(gop.index + 1);
     }
 };
 
@@ -345,7 +380,8 @@ pub const Frame = struct {
                 @memset(out, .blank);
                 continue;
             }
-            try composeRow(gpa, g, out, rows.items(.cells)[ry], rows.items(.selection)[ry]);
+            const pin: ?vt.Pin = if (rows.items(.raw)[ry].hyperlink) rows.items(.pin)[ry] else null;
+            try composeRow(gpa, g, out, rows.items(.cells)[ry], rows.items(.selection)[ry], pin);
         }
     }
 };
@@ -358,14 +394,54 @@ pub fn scrollSource(rows: usize, n: i32, i: usize) ?usize {
     return if (i >= d) i - d else null;
 }
 
-/// `selection` is the row's selected columns, inclusive, drawn in reverse video.
-fn composeRow(gpa: std.mem.Allocator, g: *Extras, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16) !void {
+/// A hyperlink's id within its page.
+const PageLink = vt.size.HyperlinkCountInt;
+
+/// The last page hyperlink a row resolved, so a run of cells in one link
+/// interns once.
+const LinkRun = struct {
+    page_link: PageLink,
+    link: Extras.Link,
+    /// The id of a cell in this link without a grapheme.
+    plain: Extras.Id,
+};
+
+/// `selection` is the row's selected columns, inclusive, drawn in reverse
+/// video. `pin` is the row's page pin when some of its cells have links.
+fn composeRow(gpa: std.mem.Allocator, g: *Extras, out: []Cell, cells: std.MultiArrayList(vt.RenderState.Cell), selection: ?[2]u16, pin: ?vt.Pin) !void {
     const raws = cells.items(.raw);
     const styles = cells.items(.style);
     const graphemes = cells.items(.grapheme);
     const n = @min(out.len, raws.len);
-    for (out[0..n], raws[0..n], styles[0..n], graphemes[0..n]) |*cell, raw, style, grapheme| {
-        cell.* = try fromRender(gpa, g, raw, style, grapheme);
+    if (pin) |p| {
+        const page = p.node.page();
+        var run: ?LinkRun = null;
+        for (out[0..n], raws[0..n], styles[0..n], graphemes[0..n], 0..) |*cell, raw, style, grapheme, x| {
+            const linked = raw.hyperlink and raw.wide != .spacer_tail and switch (raw.content_tag) {
+                .codepoint, .codepoint_grapheme => true,
+                .bg_color_palette, .bg_color_rgb => false,
+            };
+            if (!linked) {
+                cell.* = try fromRender(gpa, g, raw, style, grapheme, .none);
+                continue;
+            }
+            const page_link = page.lookupHyperlink(page.getRowAndCell(x, p.y).cell) orelse {
+                cell.* = try fromRender(gpa, g, raw, style, grapheme, .none);
+                continue;
+            };
+            if (run == null or run.?.page_link != page_link) {
+                const link = try g.internLink(gpa, page.hyperlink_set.get(page.memory, page_link).uri.slice(page.memory));
+                run = .{ .page_link = page_link, .link = link, .plain = try g.intern(gpa, &.{}, link) };
+            }
+            if (raw.content_tag == .codepoint_grapheme) {
+                cell.* = try fromRender(gpa, g, raw, style, grapheme, run.?.link);
+            } else {
+                cell.* = try fromRender(gpa, g, raw, style, &.{}, .none);
+                cell.extra = run.?.plain;
+            }
+        }
+    } else for (out[0..n], raws[0..n], styles[0..n], graphemes[0..n]) |*cell, raw, style, grapheme| {
+        cell.* = try fromRender(gpa, g, raw, style, grapheme, .none);
     }
     if (selection) |sel| if (sel[0] < n) {
         for (out[sel[0]..@min(@as(usize, sel[1]) + 1, n)]) |*cell| cell.style.flags.inverse = !cell.style.flags.inverse;
@@ -375,7 +451,7 @@ fn composeRow(gpa: std.mem.Allocator, g: *Extras, out: []Cell, cells: std.MultiA
     if (n > 0 and out[n - 1].width == .wide) out[n - 1] = .blank;
 }
 
-fn fromRender(gpa: std.mem.Allocator, g: *Extras, raw: vt.Cell, style: vt.Style, grapheme: []const u21) !Cell {
+inline fn fromRender(gpa: std.mem.Allocator, g: *Extras, raw: vt.Cell, style: vt.Style, grapheme: []const u21, link: Extras.Link) !Cell {
     switch (raw.content_tag) {
         .bg_color_palette => return .{ .style = .{ .bg_color = .palette(raw.content.color_palette.data) } },
         .bg_color_rgb => return .{ .style = .{ .bg_color = .rgb(raw.content.color_rgb.r, raw.content.color_rgb.g, raw.content.color_rgb.b) } },
@@ -387,7 +463,7 @@ fn fromRender(gpa: std.mem.Allocator, g: *Extras, raw: vt.Cell, style: vt.Style,
         // A spacer head pads a wide character that wrapped to the next row.
         .cp = if (cp == 0 or raw.wide == .spacer_head) ' ' else cp,
         .width = if (raw.wide == .wide) .wide else .narrow,
-        .extra = if (raw.content_tag == .codepoint_grapheme) try g.intern(gpa, grapheme) else .none,
+        .extra = if (raw.content_tag == .codepoint_grapheme or link != .none) try g.intern(gpa, if (raw.content_tag == .codepoint_grapheme) grapheme else &.{}, link) else .none,
         .style = if (raw.style_id == 0) .{} else .fromVt(style),
     };
 }
@@ -510,14 +586,43 @@ test "a full grapheme table hands out no id instead of wrapping" {
     defer g.deinit(gpa);
     var last: Extras.Id = .none;
     for (0..Extras.max_ids) |i| {
-        last = try g.intern(gpa, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) });
+        last = try g.intern(gpa, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) }, .none);
     }
     try testing.expectEqual(Extras.max_ids, @intFromEnum(last));
     try testing.expectEqual(Extras.max_ids, g.count());
-    try testing.expectEqual(.none, try g.intern(gpa, &.{0x301}));
+    try testing.expectEqual(.none, try g.intern(gpa, &.{0x301}, .none));
     try testing.expectEqual(Extras.max_ids, g.count());
     // A known grapheme still has its id.
-    try testing.expectEqual(last, try g.intern(gpa, &.{ 0x300 + @as(u21, (Extras.max_ids - 1) % 0x100), @intCast(0x1000 + (Extras.max_ids - 1) / 0x100) }));
+    try testing.expectEqual(last, try g.intern(gpa, &.{ 0x300 + @as(u21, (Extras.max_ids - 1) % 0x100), @intCast(0x1000 + (Extras.max_ids - 1) / 0x100) }, .none));
+}
+
+test "composing resolves hyperlinks and keeps graphemes inside them" {
+    var t: vt.Terminal = try .init(testing.io, testing.allocator, .{ .cols = 6, .rows = 2 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    var rs: vt.RenderState = .empty;
+    defer rs.deinit(testing.allocator);
+    var g: Extras = .{};
+    defer g.deinit(testing.allocator);
+    var f: Frame = .{};
+    defer f.deinit(testing.allocator);
+    try f.resize(testing.allocator, 6, 2);
+
+    s.nextSlice("\x1b]8;;https://a.example\x1b\\abe\xcc\x81\x1b]8;;\x1b\\c\r\nab");
+    try rs.update(testing.allocator, &t);
+    try f.composePane(testing.allocator, &g, .{ .cols = 6, .rows = 2 }, &rs, .all);
+    const r0 = f.row(0);
+    const link = g.linkOf(r0[0].extra);
+    try testing.expect(link != .none);
+    try testing.expectEqualStrings("https://a.example", g.uri(link));
+    try testing.expectEqual(r0[0].extra, r0[1].extra);
+    try testing.expectEqual('e', r0[2].cp);
+    try testing.expectEqualStrings("\u{301}", g.bytes(r0[2].extra));
+    try testing.expectEqual(link, g.linkOf(r0[2].extra));
+    try testing.expect(r0[3].cp == 'c' and r0[3].extra == .none);
+    const r1 = f.row(1);
+    try testing.expect(r1[0].cp == 'a' and r1[0].extra == .none and r1[1].extra == .none);
 }
 
 test "composing copies dirty rows and keeps clean ones" {

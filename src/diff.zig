@@ -18,6 +18,7 @@ const sync_begin = "\x1b[?2026h";
 const sync_end = "\x1b[?2026l";
 const erase_line = "\x1b[K";
 const reset_pen = "\x1b[0m";
+const close_link = "\x1b]8;;\x1b\\";
 const replacement = "\u{fffd}";
 
 /// Writes what turns an outer terminal showing `old` into `new`. Identical
@@ -353,7 +354,7 @@ fn changedRows(old: *const Frame, new: *const Frame) usize {
 pub fn full(new: *const Frame, g: *const Extras, w: *Writer) Writer.Error!void {
     var o: Out = .{ .w = w, .g = g, .cols = new.cols, .pos = .{ .x = 0, .y = 0 }, .sync = true };
     try o.begin();
-    try w.writeAll(reset_pen ++ "\x1b[H\x1b[2J");
+    try w.writeAll(reset_pen ++ close_link ++ "\x1b[H\x1b[2J");
     for (0..new.rows) |y| try o.row(null, new.row(y), @intCast(y));
     try o.cursor(null, new.cursor);
     try o.finish();
@@ -369,6 +370,7 @@ const Out = struct {
     sync: bool,
     started: bool = false,
     pen: Style = .{},
+    link: Extras.Link = .none,
     /// Null when unknown: after a scroll, or after a write to the last
     /// column, which leaves the outer cursor in pending wrap.
     pos: ?Pos,
@@ -381,6 +383,7 @@ const Out = struct {
 
     fn finish(o: *Out) Writer.Error!void {
         if (!o.started) return;
+        try o.setLink(.none);
         if (!o.pen.eql(.{})) try o.w.writeAll(reset_pen);
         if (o.sync) try o.w.writeAll(sync_end);
     }
@@ -412,11 +415,26 @@ const Out = struct {
         o.pen = style;
     }
 
+    fn setLink(o: *Out, link: Extras.Link) Writer.Error!void {
+        if (o.link == link) return;
+        try o.begin();
+        if (link == .none) {
+            try o.w.writeAll(close_link);
+        } else {
+            // The id groups the pieces of one link that rows or partial
+            // rewrites split, so the outer terminal highlights all of it.
+            try o.w.print("\x1b]8;id=k{d};{s}\x1b\\", .{ @intFromEnum(link), o.g.uri(link) });
+        }
+        o.link = link;
+    }
+
     fn put(o: *Out, c: Cell) Writer.Error!void {
         try o.begin();
         try o.setPen(c.style);
+        const link = o.g.linkOf(c.extra);
+        if (link != o.link) try o.setLink(link);
         try writeCodepoint(o.w, c.cp);
-        try o.w.writeAll(o.g.bytes(c.extra));
+        if (c.extra != .none) try o.w.writeAll(o.g.bytes(c.extra));
         const p = o.pos.?;
         const x = p.x + @as(u16, @intCast(unitWidth(c)));
         o.pos = if (x >= o.cols) null else .{ .x = x, .y = p.y };
@@ -435,6 +453,7 @@ const Out = struct {
                     try o.moveTo(@intCast(start), y);
                     // Erase-in-line fills with the pen's background.
                     if (o.pen.bg_color.kind != .none) try o.setPen(.{});
+                    try o.setLink(.none);
                     try o.w.writeAll(erase_line);
                     return;
                 }
@@ -459,19 +478,20 @@ const Out = struct {
             if (!oldAt(old, i).eql(new[i])) changed += 1;
         }
         const write_cost = changed + if (o.pen.eql(.{})) 0 else reset_pen.len;
-        const erase_cost = erase_line.len + if (o.pen.bg_color.kind == .none) 0 else reset_pen.len;
+        const erase_cost = erase_line.len + (if (o.pen.bg_color.kind == .none) 0 else reset_pen.len) + (if (o.link == .none) 0 else close_link.len);
         return erase_cost < write_cost;
     }
 
-    /// Only gaps in the style of the cell before them qualify, so that
-    /// rewriting them needs no SGR.
+    /// Only gaps in the style and link of the cell before them qualify,
+    /// so that rewriting them needs no SGR or OSC 8.
     fn gapIsCheaper(o: *const Out, new: []const Cell, end: usize, next: usize) bool {
-        const last = new[end - 1];
-        const pen = if (last.width == .tail) new[end - 2].style else last.style;
+        const last = if (new[end - 1].width == .tail) new[end - 2] else new[end - 1];
+        const link = o.g.linkOf(last.extra);
         var bytes: usize = 0;
         for (new[end..next]) |c| {
             if (c.width == .tail) continue;
-            if (!c.style.eql(pen)) return false;
+            if (!c.style.eql(last.style)) return false;
+            if (c.extra != last.extra and o.g.linkOf(c.extra) != link) return false;
             bytes += codepointLen(c.cp) + o.g.bytes(c.extra).len;
         }
         return bytes < "\x1b[G".len + digits(next + 1);
@@ -663,6 +683,65 @@ const Outer = struct {
     }
 };
 
+fn linkText(f: *Fixture, fr: *Frame, x: usize, y: usize, text: []const u8, uri: []const u8) !void {
+    const id = try f.g.intern(alloc, &.{}, try f.g.internLink(alloc, uri));
+    for (text, 0..) |ch, i| fr.rowMut(y)[x + i] = .{ .cp = ch, .extra = id };
+}
+
+test "a linked run opens and closes its link once" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(10, 2);
+    try linkText(&f, &f.new, 1, 0, "abc", "https://a.example");
+    try testing.expectEqualStrings("\x1b[2G\x1b]8;id=k1;https://a.example\x1b\\abc\r\x1b]8;;\x1b\\", try f.diffBytes());
+    try f.expectRoundTrip();
+}
+
+test "output ends with no link open" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(10, 2);
+    try linkText(&f, &f.new, 0, 0, "ab", "https://a.example");
+    var outer: Outer = undefined;
+    try outer.init(10, 2);
+    defer outer.deinit();
+    outer.stream.nextSlice(try f.diffBytes());
+    outer.stream.nextSlice("\x1b[2;1Hz");
+    f.new.rowMut(1)[0] = .{ .cp = 'z' };
+    f.new.cursor = .{ .x = 1, .y = 1 };
+    try outer.expectShows(&f.g, &f.new);
+}
+
+test "erasing after a link closes it first" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(20, 1);
+    f.both(0, 0, "xxxxxxxxxxxxxxxxxxxx");
+    try linkText(&f, &f.new, 0, 0, "ab", "https://a.example");
+    @memset(f.new.rowMut(0)[2..], .blank);
+    const out = try f.diffBytes();
+    const erase = std.mem.indexOf(u8, out, erase_line).?;
+    try testing.expect(std.mem.endsWith(u8, out[0..erase], close_link));
+    try f.expectRoundTrip();
+}
+
+test "a gap with a different link is not bridged" {
+    var f: Fixture = .create();
+    defer f.deinit();
+    try f.init(10, 1);
+    f.both(0, 0, "abcde");
+    try linkText(&f, &f.old, 0, 0, "abcde", "https://a.example");
+    try linkText(&f, &f.new, 0, 0, "abcde", "https://a.example");
+    f.new.rowMut(0)[0].cp = 'A';
+    f.new.rowMut(0)[2].cp = 'C';
+    f.new.rowMut(0)[1].extra = .none;
+    f.old.rowMut(0)[1].extra = .none;
+    const out = try f.diffBytes();
+    try testing.expectEqual(1, std.mem.count(u8, out, "\x1b]8;id="));
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3G") != null);
+    try f.expectRoundTrip();
+}
+
 test "an identical frame emits nothing" {
     var f: Fixture = .create();
     defer f.deinit();
@@ -829,7 +908,7 @@ test "a full redraw clears the screen first and sets every cursor property" {
     f.new.cursor = .{ .x = 1, .y = 1, .shape = .default, .visible = true };
     f.out.clearRetainingCapacity();
     try full(&f.new, &f.g, &f.out.writer);
-    try testing.expectEqualStrings("\x1b[?2026h\x1b[0m\x1b[H\x1b[2J\x1b[2Hz\x1b[0 q\x1b[?25h\x1b[?2026l", f.out.written());
+    try testing.expectEqualStrings("\x1b[?2026h\x1b[0m\x1b]8;;\x1b\\\x1b[H\x1b[2J\x1b[2Hz\x1b[0 q\x1b[?25h\x1b[?2026l", f.out.written());
 }
 
 const Rng = std.Random;
@@ -865,10 +944,12 @@ fn randomStyle(r: Rng) Style {
 
 fn randomCell(r: Rng, g: *Extras) !Cell {
     const t = texts[r.uintLessThan(usize, texts.len)];
+    const uris = [_][]const u8{ "https://a.example", "https://b.example/x" };
+    const link: Extras.Link = if (r.uintLessThan(u8, 4) == 0) try g.internLink(alloc, uris[r.uintLessThan(usize, uris.len)]) else .none;
     return .{
         .cp = t[0],
         .width = if (t[0] >= 0x1100) .wide else .narrow,
-        .extra = try g.intern(alloc, t[1..]),
+        .extra = try g.intern(alloc, t[1..], link),
         .style = randomStyle(r),
     };
 }

@@ -350,7 +350,7 @@ fn drawField(line: []frame_mod.Cell, gpa: std.mem.Allocator, g: *frame_mod.Extra
     while (i < cps.len) {
         const c = field.cluster(i);
         if (col + c.width > line.len) break;
-        const extra = try g.intern(gpa, cps[c.start + 1 .. c.end]);
+        const extra = try g.intern(gpa, cps[c.start + 1 .. c.end], .none);
         if (c.width == 2) {
             line[col] = .{ .cp = cps[c.start], .width = .wide, .extra = extra };
             line[col + 1] = .tail;

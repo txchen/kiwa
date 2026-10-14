@@ -968,8 +968,11 @@ def check_work(scenario, variant, result):
         raise RuntimeError(f"{name}: the spinner produced no outer bytes")
     if scenario.hidden and b"lorem" in tail:
         raise RuntimeError(f"{name}: {variant} drew a hidden producer's lines")
-    if scenario.focused == "linker.py" and b".txt" not in tail:
-        raise RuntimeError(f"{name}: linker lines never reached the outer terminal")
+    if scenario.focused == "linker.py":
+        if b".txt" not in tail:
+            raise RuntimeError(f"{name}: linker lines never reached the outer terminal")
+        if variant.startswith("kiwa") and b"\x1b]8;id=" not in tail:
+            raise RuntimeError(f"{name}: {variant} never passed a hyperlink to the outer terminal")
     if scenario.focused == "producer.py":
         if b"lorem" not in tail:
             raise RuntimeError(f"{name}: producer lines never reached the outer terminal")

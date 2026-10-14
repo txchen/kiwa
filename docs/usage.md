@@ -220,6 +220,9 @@ drag; most terminals then bypass Kiwa's mouse capture.
 Kiwa always captures the mouse, so the outer terminal's link opening also
 needs `shift`. In Ghostty, hold `cmd+shift` (`ctrl+shift` on Linux) and
 click a URL to open it; `cmd` or `ctrl` alone does nothing in Kiwa.
+Hyperlinks that a pane's program writes with OSC 8, such as
+`ls --hyperlink`, reach the outer terminal too, so link text opens its
+target the same way.
 
 Kiwa decodes the outer terminal's keys and encodes them again for the
 pane from the pane's own modes. A program that asks for the kitty keyboard
