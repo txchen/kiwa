@@ -93,10 +93,28 @@ while True:
     time.sleep(max(0.0, t - time.monotonic()))
 """
 
+# Like the producer, but each line names three files, each wrapped in its
+# own OSC 8 hyperlink, as `ls --hyperlink` writes them. Every line's URIs
+# are new.
+LINKER = """\
+import sys, time
+i = 0
+t = time.monotonic()
+while True:
+    names = ["file_%08d_%s.txt" % (i, k) for k in "abc"]
+    links = ["\\033]8;;file:///home/user/project/src/%s\\033\\\\%s\\033]8;;\\033\\\\" % (n, n) for n in names]
+    sys.stdout.write("%08d " % i + " ".join(links) + "\\n")
+    sys.stdout.flush()
+    i += 1
+    t += 1 / 30
+    time.sleep(max(0.0, t - time.monotonic()))
+"""
+
 # Script text and the bytes per second it writes to its pane.
 SCRIPTS = {
     "spinner.py": (SPINNER, 60 * 2),
     "producer.py": (PRODUCER, 30 * 80),
+    "linker.py": (LINKER, 30 * 258),
 }
 
 
@@ -123,6 +141,7 @@ SCENARIOS = [
     Scenario("1 idle pane"),
     Scenario("60 Hz one-cell spinner", focused="spinner.py", fps=60),
     Scenario("30 lines/s of 80 bytes", focused="producer.py", fps=30, plain=True),
+    Scenario("30 lines/s with 3 OSC 8 links each", focused="linker.py", fps=30),
     Scenario("10 idle panes", tabs=10),
     Scenario("1 idle pane, detached", attached=False),
     Scenario("10 idle panes, detached", tabs=10, attached=False),
@@ -173,7 +192,7 @@ GATES = [
     ("Idle", lambda s: not s.focused and not s.hidden, idle_budget),
     ("Spinner", lambda s: s.focused == "spinner.py", cpu_budget(1.0)),
     ("Hidden output", lambda s: s.hidden, cpu_budget(1.0)),
-    ("Scrolling", lambda s: s.focused == "producer.py", cpu_budget(1.5)),
+    ("Scrolling", lambda s: s.focused in ("producer.py", "linker.py"), cpu_budget(1.5)),
     ("Memory", lambda s: s.tabs >= 10, rss_budget(20)),
 ]
 
@@ -949,6 +968,8 @@ def check_work(scenario, variant, result):
         raise RuntimeError(f"{name}: the spinner produced no outer bytes")
     if scenario.hidden and b"lorem" in tail:
         raise RuntimeError(f"{name}: {variant} drew a hidden producer's lines")
+    if scenario.focused == "linker.py" and b".txt" not in tail:
+        raise RuntimeError(f"{name}: linker lines never reached the outer terminal")
     if scenario.focused == "producer.py":
         if b"lorem" not in tail:
             raise RuntimeError(f"{name}: producer lines never reached the outer terminal")
