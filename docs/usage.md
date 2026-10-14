@@ -217,6 +217,10 @@ program. A right-click on the pane's border still opens the pane menu. To
 use the outer terminal's own selection instead, hold `shift` while you
 drag; most terminals then bypass Kiwa's mouse capture.
 
+Kiwa always captures the mouse, so the outer terminal's link opening also
+needs `shift`. In Ghostty, hold `cmd+shift` (`ctrl+shift` on Linux) and
+click a URL to open it; `cmd` or `ctrl` alone does nothing in Kiwa.
+
 Kiwa decodes the outer terminal's keys and encodes them again for the
 pane from the pane's own modes. A program that asks for the kitty keyboard
 protocol gets it when the outer terminal supports the protocol, so keys
