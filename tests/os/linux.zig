@@ -27,8 +27,8 @@ pub const Processes = struct {
             const pid = std.fmt.parseInt(sys.pid_t, entry.name, 10) catch continue;
             var path: [64]u8 = undefined;
             const half = buf.len / 2;
-            const argv = ps.proc.readFile(ps.io, try std.fmt.bufPrint(&path, "{d}/cmdline", .{pid}), buf[0..half]) catch continue;
-            const env = ps.proc.readFile(ps.io, try std.fmt.bufPrint(&path, "{d}/environ", .{pid}), buf[half..]) catch "";
+            const argv = ps.proc.readFile(ps.io, try std.mem.print(&path, "{d}/cmdline", .{pid}), buf[0..half]) catch continue;
+            const env = ps.proc.readFile(ps.io, try std.mem.print(&path, "{d}/environ", .{pid}), buf[half..]) catch "";
             return .{ .pid = pid, .argv = argv, .env = env };
         }
         return null;
@@ -39,7 +39,7 @@ pub fn sample(io: std.Io, pid: sys.pid_t) !e2e.Sample {
     var path: [64]u8 = undefined;
     var buf: [4096]u8 = undefined;
     var s: e2e.Sample = .{ .switches = 0, .ticks = 0 };
-    const status = try std.Io.Dir.cwd().readFile(io, try std.fmt.bufPrint(&path, "/proc/{d}/status", .{pid}), &buf);
+    const status = try std.Io.Dir.cwd().readFile(io, try std.mem.print(&path, "/proc/{d}/status", .{pid}), &buf);
     var lines = std.mem.splitScalar(u8, status, '\n');
     while (lines.next()) |line| {
         inline for (.{ "voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:" }) |key| {
@@ -48,7 +48,7 @@ pub fn sample(io: std.Io, pid: sys.pid_t) !e2e.Sample {
             }
         }
     }
-    const stat = try std.Io.Dir.cwd().readFile(io, try std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}), &buf);
+    const stat = try std.Io.Dir.cwd().readFile(io, try std.mem.print(&path, "/proc/{d}/stat", .{pid}), &buf);
     // Fields after the parenthesized command: state is field 3, utime 14, stime 15.
     var fields = std.mem.tokenizeScalar(u8, stat[std.mem.lastIndexOfScalar(u8, stat, ')').? + 2 ..], ' ');
     var i: usize = 3;
@@ -63,7 +63,7 @@ pub fn sample(io: std.Io, pid: sys.pid_t) !e2e.Sample {
 /// parent's wait is left.
 pub fn exited(io: std.Io, pid: sys.pid_t) bool {
     var path: [32]u8 = undefined;
-    const p = std.fmt.bufPrint(&path, "/proc/{d}/stat", .{pid}) catch unreachable;
+    const p = std.mem.print(&path, "/proc/{d}/stat", .{pid}) catch unreachable;
     var buf: [512]u8 = undefined;
     const stat = std.Io.Dir.cwd().readFile(io, p, &buf) catch return true;
     return std.mem.indexOf(u8, stat, ") Z ") != null;
@@ -72,7 +72,7 @@ pub fn exited(io: std.Io, pid: sys.pid_t) bool {
 /// The panes' shell. `/bin/sh` runs as `sh`, the name the cases expect
 /// in dynamic tab names.
 pub fn paneShell(gpa: std.mem.Allocator) ![:0]u8 {
-    return gpa.dupeZ(u8, "/bin/sh");
+    return gpa.dupeSentinel(u8, "/bin/sh", 0);
 }
 
 pub fn removePaneShell(path: [:0]const u8) void {

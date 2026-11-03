@@ -487,7 +487,7 @@ const Server = struct {
             try s.scratch.print(s.gpa, "error: {s}:{d}: {t}; live configuration unchanged\n", .{ s.config_path, line, e });
             if (attached) {
                 var message: dialog_mod.Message = .{};
-                const text = std.fmt.bufPrint(&message.text, "Line {d}: {t}. Live configuration unchanged.", .{ line, e }) catch unreachable;
+                const text = std.mem.print(&message.text, "Line {d}: {t}. Live configuration unchanged.", .{ line, e }) catch unreachable;
                 message.len = text.len;
                 return s.openDialog(c, .{ .message = message });
             }
@@ -525,8 +525,8 @@ const Server = struct {
     /// Answers `kiwa __stats` with one `name value` line per counter.
     fn printStats(s: *Server, c: *Conn) !void {
         s.scratch.clearRetainingCapacity();
-        inline for (@typeInfo(Stats).@"struct".fields) |f| {
-            try s.scratch.print(s.gpa, "{s} {d}\n", .{ f.name, @field(s.stats, f.name) });
+        inline for (@typeInfo(Stats).@"struct".field_names) |name| {
+            try s.scratch.print(s.gpa, "{s} {d}\n", .{ name, @field(s.stats, name) });
         }
         try s.scratch.print(s.gpa, "head_reads {d}\n", .{s.git.head_reads});
         try s.answer(c);
@@ -545,7 +545,7 @@ const Server = struct {
         if (c.state != .open) return s.dropConn(c);
         if (h.version != protocol.version) {
             var buf: [64]u8 = undefined;
-            const reason = std.fmt.bufPrint(&buf, "{s} (server {d}, client {d})", .{ protocol.version_mismatch, protocol.version, h.version }) catch unreachable;
+            const reason = std.mem.print(&buf, "{s} (server {d}, client {d})", .{ protocol.version_mismatch, protocol.version, h.version }) catch unreachable;
             return s.detach(c, reason);
         }
         c.prefix.keymap = s.configuration.keys;
@@ -822,9 +822,9 @@ const Server = struct {
         const block = try env.createPosixBlock(s.gpa, .{});
         defer block.deinit(s.gpa);
 
-        const shell = try s.gpa.dupeZ(u8, s.env.get("SHELL") orelse "/bin/sh");
+        const shell = try s.gpa.dupeSentinel(u8, s.env.get("SHELL") orelse "/bin/sh", 0);
         defer s.gpa.free(shell);
-        const cwd_z = try s.gpa.dupeZ(u8, cwd);
+        const cwd_z = try s.gpa.dupeSentinel(u8, cwd, 0);
         defer s.gpa.free(cwd_z);
 
         try s.panes.ensureUnusedCapacity(s.gpa, 1);
@@ -1045,7 +1045,7 @@ const Server = struct {
         c.prefix.mode = .normal;
         config.saveTheme(s.gpa, s.io, s.config_path, picked.name) catch |e| {
             var message: dialog_mod.Message = .{};
-            const text = std.fmt.bufPrint(&message.text, "Saving the theme to {s} failed: {t}. The theme is unchanged.", .{ s.config_path, e }) catch "Saving the theme failed. The theme is unchanged.";
+            const text = std.mem.print(&message.text, "Saving the theme to {s} failed: {t}. The theme is unchanged.", .{ s.config_path, e }) catch "Saving the theme failed. The theme is unchanged.";
             if (text.ptr != &message.text) @memcpy(message.text[0..text.len], text);
             message.len = text.len;
             return s.openDialog(c, .{ .message = message });
@@ -1102,7 +1102,7 @@ const Server = struct {
                 d.message = "HOME is not set";
                 return false;
             };
-            expanded = try std.fmt.allocPrint(s.gpa, "{s}{s}", .{ home, typed[1..] });
+            expanded = try s.gpa.print("{s}{s}", .{ home, typed[1..] });
         }
         const resolved = try std.fs.path.resolve(s.gpa, &.{ d.base[0..d.base_len], expanded orelse typed });
         defer s.gpa.free(resolved);

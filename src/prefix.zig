@@ -264,19 +264,19 @@ pub const HelpList = struct {
         const i = h.len;
         var keybuf: [16]u8 = undefined;
         const key = switch (t.code) {
-            .char => |c| if (c == ' ') "space" else std.fmt.bufPrint(&keybuf, "{u}", .{c}) catch unreachable,
+            .char => |c| if (c == ' ') "space" else std.mem.print(&keybuf, "{u}", .{c}) catch unreachable,
             .named => |n| @tagName(n),
         };
-        const label = std.fmt.bufPrint(&h.labels[i], "{s}{s}{s}{s}{s}", .{
+        const label = std.mem.print(&h.labels[i], "{s}{s}{s}{s}{s}", .{
             if (prefixed) "prefix+" else "", if (t.mods.ctrl) "ctrl+" else "",
             if (t.mods.alt) "alt+" else "",  if (t.mods.shift) "shift+" else "",
             key,
         }) catch unreachable;
         const text = switch (a) {
-            .split => |d| std.fmt.bufPrint(&h.texts[i], "split_{t}", .{d}) catch unreachable,
-            .focus => |d| std.fmt.bufPrint(&h.texts[i], "focus_{t}", .{d}) catch unreachable,
-            .resize => |d| std.fmt.bufPrint(&h.texts[i], "resize_{t}", .{d}) catch unreachable,
-            .tab => |n| std.fmt.bufPrint(&h.texts[i], "tab_{d}", .{n + 1}) catch unreachable,
+            .split => |d| std.mem.print(&h.texts[i], "split_{t}", .{d}) catch unreachable,
+            .focus => |d| std.mem.print(&h.texts[i], "focus_{t}", .{d}) catch unreachable,
+            .resize => |d| std.mem.print(&h.texts[i], "resize_{t}", .{d}) catch unreachable,
+            .tab => |n| std.mem.print(&h.texts[i], "tab_{d}", .{n + 1}) catch unreachable,
             else => @tagName(a),
         };
         h.rows[i] = .{ .keys = label, .text = text };
@@ -285,8 +285,9 @@ pub const HelpList = struct {
 };
 
 pub fn actionNamed(name: []const u8) ?Action {
-    inline for (@typeInfo(Action).@"union".fields) |f| {
-        if (f.type == void and std.mem.eql(u8, name, f.name)) return @unionInit(Action, f.name, {});
+    const info = @typeInfo(Action).@"union";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (field_type == void and std.mem.eql(u8, name, field_name)) return @unionInit(Action, field_name, {});
     }
     if (std.mem.eql(u8, name, "split_right")) return .{ .split = .right };
     if (std.mem.eql(u8, name, "split_down")) return .{ .split = .down };
@@ -588,14 +589,14 @@ test "key help stays open over other keys and closes on esc, q, or ?" {
     try expectModes("\x02?cvx", .help, &.{.{ .action = .help }});
     for ([_][]const u8{ "\x1b", "q", "?", "\x1b[47;2u" }) |close| {
         var buf: [16]u8 = undefined;
-        try expectModes(try std.fmt.bufPrint(&buf, "\x02?{s}", .{close}), .normal, &.{.{ .action = .help }});
+        try expectModes(try std.mem.print(&buf, "\x02?{s}", .{close}), .normal, &.{.{ .action = .help }});
     }
     try expectModes("\x02\x1b[47;2u", .help, &.{.{ .action = .help }});
 }
 
 test "shift+t and shift+w rename, and an open dialog takes keys and pastes" {
     try expectRun("\x02T\x02W\x02\x1b[119;2u", &.{}, &.{ .rename_tab, .rename_workspace, .rename_workspace });
-    var p: Prefix = .{ .mode = .{ .dialog = .{ .rename = .{ .target = .{ .tab = @enumFromInt(1) }, .field = .{} } } } };
+    var p: Prefix = .{ .mode = .{ .dialog = .{ .rename = .{ .target = .{ .tab = @fromBackingInt(1) }, .field = .{} } } } };
     try testing.expectEqualDeep(Outcome{ .dialog = ctrl_b }, p.feed(ctrl_b));
     try testing.expectEqualDeep(Outcome{ .dialog = .{ .key = .typed('q') } }, p.feed(.{ .key = .typed('q') }));
     try testing.expectEqualDeep(Outcome.none, p.feed(.{ .unknown = "\x1b[5n" }));

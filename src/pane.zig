@@ -216,7 +216,7 @@ pub const Pane = struct {
 
     fn full(self: *const Pane) bool {
         if (self.pending.items.len < pending_limit) return false;
-        std.log.warn("pane {d} is not reading its input; dropped a write", .{@intFromEnum(self.id)});
+        std.log.warn("pane {d} is not reading its input; dropped a write", .{@backingInt(self.id)});
         return true;
     }
 
@@ -355,9 +355,15 @@ pub const Pane = struct {
 /// Holds a process's command name: at most 15 bytes on Linux and 32 on macOS.
 pub const Comm = [64]u8;
 
-fn writePty(h: *Handler, data: []const u8) void {
+/// The pane whose stream owns `h`. Panes are allocated with their own
+/// alignment, which can exceed what the `stream` field alone guarantees.
+fn paneOf(h: *Handler) *Pane {
     const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    return @alignCast(@fieldParentPtr("stream", stream));
+}
+
+fn writePty(h: *Handler, data: []const u8) void {
+    const p = paneOf(h);
     p.write(data) catch |e| std.log.err("pane reply dropped: {t}", .{e});
 }
 
@@ -366,14 +372,12 @@ fn deviceAttributes(_: *Handler) vt.device_attributes.Attributes {
 }
 
 fn bell(h: *Handler) void {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    const p = paneOf(h);
     p.rang = true;
 }
 
 fn pwdChanged(h: *Handler) void {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    const p = paneOf(h);
     const hash = std.hash.Wyhash.hash(0, p.terminal.getPwd() orelse "");
     if (hash == p.pwd_hash) return;
     p.pwd_hash = hash;
@@ -381,23 +385,20 @@ fn pwdChanged(h: *Handler) void {
 }
 
 fn programStatus(h: *Handler, r: agent.Report) void {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    const p = paneOf(h);
     p.setAgent(agent.afterReport(p.agent, r, p.foregroundGroup()));
 }
 
 fn semanticPrompt(h: *Handler, event: Handler.SemanticPrompt) void {
     if (event.kind != .prompt_start) return;
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    const p = paneOf(h);
     p.setAgent(agent.afterPrompt(p.agent));
 }
 
 /// Keeps the program's clipboard write as OSC 52 for the outer terminal.
 /// Only text is forwarded; reads stay refused because no read effect is set.
 fn clipboardWrite(h: *Handler, w: vt.clipboard.Write) void {
-    const stream: *vt.TerminalStream = @fieldParentPtr("handler", h);
-    const p: *Pane = @fieldParentPtr("stream", stream);
+    const p = paneOf(h);
     // No contents clears the clipboard, which OSC 52 says with an empty payload.
     const data: []const u8 = if (w.contents.len == 0) "" else for (w.contents) |c| {
         if (vt.clipboard.isTextMime(c.mime)) break c.data;

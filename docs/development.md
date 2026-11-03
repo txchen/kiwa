@@ -14,8 +14,8 @@ mise exec -- zig build -Doptimize=ReleaseFast   # optimized, stripped release bi
 
 The default target is static `x86_64-linux-musl`. A cold build takes about
 3 minutes per optimize mode because ghostty-vt compiles with Kiwa. Do not use
-`--watch` or `-fincremental`; Zig 0.16 incremental compilation crashes on
-this project.
+`--watch` or `-fincremental`; Zig 0.17 incremental compilation fails on
+this project with "bad ELF magic".
 
 ## CI and binary releases
 
@@ -63,7 +63,7 @@ mise exec -- zig build -Dtarget=x86_64-linux-musl -Dcpu=baseline -Doptimize=Rele
 mise exec -- zig build -Dtarget=aarch64-linux-musl -Dcpu=baseline -Doptimize=ReleaseFast
 ```
 
-[ReleaseFast](https://ziglang.org/documentation/0.16.0/#ReleaseFast) optimizes
+[ReleaseFast](https://ziglang.org/documentation/0.17.0/#fast) optimizes
 both Kiwa and Ghostty for speed and disables runtime safety checks. Debug CI retains those checks. ReleaseSmall optimizes for
 size instead and is not used for published binaries. Release CPU targets
 are explicitly `baseline`, avoiding accidental dependence on the CI

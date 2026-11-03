@@ -106,7 +106,7 @@ pub fn sample(io: std.Io, pid: sys.pid_t) !e2e.Sample {
 /// Whether the process has exited. launchd, the server's parent, reaps it.
 pub fn exited(io: std.Io, pid: sys.pid_t) bool {
     _ = io;
-    const rc = std.c.kill(pid, @enumFromInt(0));
+    const rc = std.c.kill(pid, @fromBackingInt(0));
     return rc != 0 and std.c.errno(rc) == .SRCH;
 }
 
@@ -137,7 +137,7 @@ pub fn paneShell(gpa: std.mem.Allocator) ![:0]u8 {
 pub fn removePaneShell(path: [:0]const u8) void {
     sys.unlink(path);
     var buf: [sys.PATH_MAX]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&buf, "{s}", .{std.fs.path.dirname(path) orelse return}) catch return;
+    const dir = std.mem.printSentinel(&buf, "{s}", .{std.fs.path.dirname(path) orelse return}, 0) catch return;
     _ = std.c.rmdir(dir);
 }
 

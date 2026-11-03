@@ -53,7 +53,7 @@ pub fn encode(w: *std.Io.Writer, msg: Message) std.Io.Writer.Error!void {
         .list, .stats, .reload_config => 0,
     };
     try w.writeInt(u32, @intCast(1 + payload_len), .little);
-    try w.writeByte(@intFromEnum(@as(Tag, switch (msg) {
+    try w.writeByte(@backingInt(@as(Tag, switch (msg) {
         .hello => .hello,
         .resize => .resize,
         .detach => .detach,
@@ -101,7 +101,7 @@ pub fn frameLen(bytes: []const u8) DecodeError!?usize {
 pub fn parse(frame: []const u8) DecodeError!Message {
     const body = frame[4..];
     const payload = body[1..];
-    return switch (@as(Tag, @enumFromInt(body[0]))) {
+    return switch (@as(Tag, @fromBackingInt(@intCast(body[0])))) {
         .hello => blk: {
             if (payload.len < 6) return error.Malformed;
             break :blk .{ .hello = .{
@@ -196,11 +196,11 @@ const sample = [_]Message{
 };
 
 test "the sample has every message type" {
-    inline for (@typeInfo(Message).@"union".fields) |f| {
+    inline for (@typeInfo(Message).@"union".field_names) |name| {
         for (sample) |m| {
-            if (std.mem.eql(u8, @tagName(m), f.name)) break;
+            if (std.mem.eql(u8, @tagName(m), name)) break;
         } else {
-            std.debug.print("add a {s} message to the sample\n", .{f.name});
+            std.debug.print("add a {s} message to the sample\n", .{name});
             return error.MessageMissingFromSample;
         }
     }
@@ -242,13 +242,13 @@ test "several frames in one feed decode in order" {
 test "wire format is length, tag, payload" {
     const bytes = try encodeAll(testing.allocator, &.{.{ .resize = .{ .cols = 0x0102, .rows = 3 } }});
     defer testing.allocator.free(bytes);
-    try testing.expectEqualSlices(u8, &.{ 5, 0, 0, 0, @intFromEnum(Tag.resize), 2, 1, 3, 0 }, bytes);
+    try testing.expectEqualSlices(u8, &.{ 5, 0, 0, 0, @backingInt(Tag.resize), 2, 1, 3, 0 }, bytes);
 }
 
 test "oversized, empty, unknown, and short frames are errors" {
     try testing.expectError(error.FrameTooLarge, frameLen(&.{ 0xff, 0xff, 0xff, 0xff }));
     try testing.expectError(error.EmptyFrame, frameLen(&.{ 0, 0, 0, 0 }));
     try testing.expectError(error.UnknownTag, parse(&.{ 1, 0, 0, 0, 99 }));
-    try testing.expectError(error.Malformed, parse(&.{ 3, 0, 0, 0, @intFromEnum(Tag.resize), 1, 2 }));
-    try testing.expectError(error.Malformed, parse(&.{ 2, 0, 0, 0, @intFromEnum(Tag.hello), 1 }));
+    try testing.expectError(error.Malformed, parse(&.{ 3, 0, 0, 0, @backingInt(Tag.resize), 1, 2 }));
+    try testing.expectError(error.Malformed, parse(&.{ 2, 0, 0, 0, @backingInt(Tag.hello), 1 }));
 }

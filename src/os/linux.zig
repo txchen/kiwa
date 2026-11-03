@@ -53,7 +53,7 @@ pub fn stat(path: [*:0]const u8, follow: sys.Follow) Error!sys.Stat {
 
 /// A path that opens the terminal `fd` refers to again.
 pub fn terminalPath(fd: fd_t, buf: []u8) ?[:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/proc/self/fd/{d}", .{fd}) catch null;
+    return std.mem.printSentinel(buf, "/proc/self/fd/{d}", .{fd}, 0) catch null;
 }
 
 pub fn peerCred(sock: fd_t) Error!sys.Peer {
@@ -82,7 +82,7 @@ pub fn terminate(pid: pid_t, timeout_ms: u31) Error!sys.Terminated {
 
 pub fn processCwd(pid: pid_t, buf: []u8) ?[]const u8 {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/cwd", .{pid}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/proc/{d}/cwd", .{pid}, 0) catch return null;
     const n = sys.check(c.readlink(path, buf.ptr, buf.len)) catch return null;
     return buf[0..n];
 }
@@ -95,7 +95,7 @@ pub fn processName(pid: pid_t, buf: []u8) ?[]const u8 {
     if (comm.len == 0) return null;
     var exe_buf: [sys.PATH_MAX]u8 = undefined;
     var exe_path: [32]u8 = undefined;
-    const exe_link = std.fmt.bufPrintZ(&exe_path, "/proc/{d}/exe", .{pid}) catch return comm;
+    const exe_link = std.mem.printSentinel(&exe_path, "/proc/{d}/exe", .{pid}, 0) catch return comm;
     const n = sys.check(c.readlink(exe_link, &exe_buf, exe_buf.len)) catch return comm;
     const link = exe_buf[0..n];
     const deleted = " (deleted)";
@@ -119,7 +119,7 @@ fn namesFile(comm: []const u8, file: []const u8) bool {
 
 fn readProc(pid: pid_t, comptime file: []const u8, buf: []u8) ?[]const u8 {
     var path_buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/" ++ file, .{pid}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "/proc/{d}/" ++ file, .{pid}, 0) catch return null;
     const fd = sys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
     defer sys.close(fd);
     const n = sys.read(fd, buf) catch return null;
@@ -229,7 +229,7 @@ pub const Poller = struct {
                 error.WouldBlock => return seen,
                 else => return e,
             };
-            seen.add(@enumFromInt(info.signo));
+            seen.add(@fromBackingInt(@intCast(info.signo)));
         }
     }
 };
@@ -292,14 +292,14 @@ const testing = std.testing;
 
 test "a process that renames its main thread is named after its executable" {
     var saved: [16]u8 = undefined;
-    _ = linux.prctl(@intFromEnum(linux.PR.GET_NAME), @intFromPtr(&saved), 0, 0, 0);
-    defer _ = linux.prctl(@intFromEnum(linux.PR.SET_NAME), @intFromPtr(&saved), 0, 0, 0);
+    _ = linux.prctl(@backingInt(linux.PR.GET_NAME), @intFromPtr(&saved), 0, 0, 0);
+    defer _ = linux.prctl(@backingInt(linux.PR.SET_NAME), @intFromPtr(&saved), 0, 0, 0);
     const before = blk: {
         var buf: [64]u8 = undefined;
         break :blk try testing.allocator.dupe(u8, processName(linux.getpid(), &buf) orelse return error.NoName);
     };
     defer testing.allocator.free(before);
-    _ = linux.prctl(@intFromEnum(linux.PR.SET_NAME), @intFromPtr("MainThread"), 0, 0, 0);
+    _ = linux.prctl(@backingInt(linux.PR.SET_NAME), @intFromPtr("MainThread"), 0, 0, 0);
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings(before, processName(linux.getpid(), &buf) orelse return error.NoName);
 }

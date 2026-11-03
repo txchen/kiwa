@@ -15,11 +15,11 @@ pub const Config = struct {
 };
 
 pub fn path(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ![]const u8 {
-    if (env.get("XDG_CONFIG_HOME")) |x| if (std.fs.path.isAbsolute(x)) return std.fmt.allocPrint(gpa, "{s}/kiwa/config.toml", .{x});
+    if (env.get("XDG_CONFIG_HOME")) |x| if (std.fs.path.isAbsolute(x)) return gpa.print("{s}/kiwa/config.toml", .{x});
     const home = env.get("HOME") orelse return error.NoHome;
     if (home.len == 0) return error.NoHome;
     if (!std.fs.path.isAbsolute(home)) return error.HomeMustBeAbsolute;
-    return std.fmt.allocPrint(gpa, "{s}/.config/kiwa/config.toml", .{home});
+    return gpa.print("{s}/.config/kiwa/config.toml", .{home});
 }
 
 /// Exclusive creation preserves existing user files, including empty files.
@@ -89,7 +89,7 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
             if (text[text.len - 1] != ']') return error.InvalidTable;
             section = std.meta.stringToEnum(Section, trim(text[1 .. text.len - 1])) orelse return error.UnknownTable;
             if (section == .root) return error.UnknownTable;
-            const bit = @as(u8, 1) << @as(u3, @intCast(@intFromEnum(section)));
+            const bit = @as(u8, 1) << @as(u3, @intCast(@backingInt(section)));
             if (sections & bit != 0) return error.DuplicateTable;
             sections |= bit;
             continue;
@@ -147,7 +147,7 @@ pub fn parse(bytes: []const u8, line_number: *usize) !Config {
 pub fn withTheme(gpa: std.mem.Allocator, bytes: []const u8, name: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    const setting = try std.fmt.allocPrint(gpa, "theme = \"{s}\"", .{name});
+    const setting = try gpa.print("theme = \"{s}\"", .{name});
     defer gpa.free(setting);
     var in_ui = false;
     var done = false;
@@ -208,7 +208,7 @@ pub fn saveTheme(gpa: std.mem.Allocator, io: std.Io, name: []const u8, theme: []
     defer gpa.free(edited);
     var line: usize = 0;
     _ = try parse(edited, &line);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{name});
+    const tmp = try gpa.print("{s}.tmp", .{name});
     defer gpa.free(tmp);
     const cwd = std.Io.Dir.cwd();
     cwd.deleteFile(io, tmp) catch |e| switch (e) {

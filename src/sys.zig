@@ -7,7 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 
-const os = switch (builtin.os.tag) {
+const os = switch (builtin.target.os.tag) {
     .linux => @import("os/linux.zig"),
     .macos => @import("os/darwin.zig"),
     else => @compileError("Kiwa runs on Linux and macOS"),
@@ -372,7 +372,7 @@ pub const Signals = struct {
     }
 
     fn bit(sig: SIG) u64 {
-        return @as(u64, 1) << @intCast(@intFromEnum(sig) & 63);
+        return @as(u64, 1) << @intCast(@backingInt(sig) & 63);
     }
 };
 

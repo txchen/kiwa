@@ -417,8 +417,8 @@ fn kittyKey(code: u32) ?Named {
         57360 => .num_lock,
         57361 => .print_screen,
         57362 => .pause,
-        57376...57388 => |c| @enumFromInt(@intFromEnum(Named.f13) + (c - 57376)),
-        57399...57427 => |c| @enumFromInt(@intFromEnum(Named.numpad_0) + (c - 57399)),
+        57376...57388 => |c| @fromBackingInt(@intCast(@backingInt(Named.f13) + (c - 57376))),
+        57399...57427 => |c| @fromBackingInt(@intCast(@backingInt(Named.numpad_0) + (c - 57399))),
         57441 => .shift_left,
         57442 => .control_left,
         57443 => .alt_left,
@@ -567,12 +567,12 @@ fn mouseEvent(c: *const Csi) ?Event {
     if (c.count != 3) return null;
     const b = c.get(0, 0, 0);
     const index = (b & 3) | (((b >> 6) & 3) << 2);
-    if (index > @intFromEnum(Mouse.Button.b11)) return null;
+    if (index > @backingInt(Mouse.Button.b11)) return null;
     const x = c.get(1, 0, 1);
     const y = c.get(2, 0, 1);
     if (x == 0 or y == 0) return null;
     return .{ .mouse = .{
-        .button = @enumFromInt(index),
+        .button = @fromBackingInt(@intCast(index)),
         .action = if (c.final == 'm') .release else if (b & 32 != 0) .motion else .press,
         .x = std.math.cast(u16, x - 1) orelse std.math.maxInt(u16),
         .y = std.math.cast(u16, y - 1) orelse std.math.maxInt(u16),

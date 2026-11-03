@@ -65,7 +65,7 @@ pub fn attach(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, paths
 
     const sock = connectOrStart(gpa, env, paths) catch |e| {
         var buf: [512]u8 = undefined;
-        try printErr(std.fmt.bufPrint(&buf, "kiwa: cannot reach the server ({t}); see {s}\n", .{ e, paths.log }) catch "kiwa: cannot reach the server\n");
+        try printErr(std.mem.print(&buf, "kiwa: cannot reach the server ({t}); see {s}\n", .{ e, paths.log }) catch "kiwa: cannot reach the server\n");
         return 1;
     };
     defer sys.close(sock);
@@ -189,7 +189,7 @@ fn startServer(gpa: std.mem.Allocator, env: *const std.process.Environ.Map, path
     var server_env = try env.clone(gpa);
     defer server_env.deinit();
     var fd_text: [12]u8 = undefined;
-    try server_env.put(server.ready_fd_env, try std.fmt.bufPrint(&fd_text, "{d}", .{pipe[1]}));
+    try server_env.put(server.ready_fd_env, try std.mem.print(&fd_text, "{d}", .{pipe[1]}));
     const block = try server_env.createPosixBlock(gpa, .{});
     defer block.deinit(gpa);
     const argv = [_:null]?[*:0]const u8{ "kiwa", "__server", null };
@@ -227,7 +227,7 @@ pub fn killServer(paths: paths_mod.Paths) !u8 {
     };
     var buf: [128]u8 = undefined;
     if (peer.uid != sys.getuid()) {
-        try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) belongs to another user\n", .{peer.pid}));
+        try printErr(try std.mem.print(&buf, "kiwa: the server (pid {d}) belongs to another user\n", .{peer.pid}));
         return 1;
     }
     const stopped = sys.terminate(peer.pid, kill_timeout_ms) catch |e| switch (e) {
@@ -235,7 +235,7 @@ pub fn killServer(paths: paths_mod.Paths) !u8 {
         else => return e,
     };
     if (stopped == .timed_out) {
-        try printErr(try std.fmt.bufPrint(&buf, "kiwa: the server (pid {d}) did not exit within {d} s\n", .{ peer.pid, kill_timeout_ms / 1000 }));
+        try printErr(try std.mem.print(&buf, "kiwa: the server (pid {d}) did not exit within {d} s\n", .{ peer.pid, kill_timeout_ms / 1000 }));
         return 1;
     }
     return 0;

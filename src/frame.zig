@@ -73,7 +73,7 @@ pub const Style = packed struct(u89) {
         }
 
         pub fn fromVt(c: vt.Style.Color) Color {
-            return switch (c) {
+            return switch (c.value()) {
                 .none => .none,
                 .palette => |i| .palette(i),
                 .rgb => |v| .rgb(v.r, v.g, v.b),
@@ -151,7 +151,7 @@ pub const Extras = struct {
     pub fn intern(e: *Extras, gpa: std.mem.Allocator, extra: []const u21, link: Link) !Id {
         e.scratch.clearRetainingCapacity();
         var le: [2]u8 = undefined;
-        std.mem.writeInt(u16, &le, @intFromEnum(link), .little);
+        std.mem.writeInt(u16, &le, @backingInt(link), .little);
         try e.scratch.appendSlice(gpa, &le);
         for (extra) |cp| {
             var buf: [4]u8 = undefined;
@@ -159,17 +159,17 @@ pub const Extras = struct {
             try e.scratch.appendSlice(gpa, buf[0..n]);
         }
         if (e.scratch.items.len == 2 and link == .none) return .none;
-        return @enumFromInt(try internKey(&e.map, gpa, e.scratch.items));
+        return @fromBackingInt(@intCast(try internKey(&e.map, gpa, e.scratch.items)));
     }
 
     pub fn internLink(e: *Extras, gpa: std.mem.Allocator, uri_bytes: []const u8) !Link {
-        return @enumFromInt(try internKey(&e.links, gpa, uri_bytes));
+        return @fromBackingInt(@intCast(try internKey(&e.links, gpa, uri_bytes)));
     }
 
     /// The grapheme's extra codepoints as UTF-8.
     pub fn bytes(e: *const Extras, id: Id) []const u8 {
         if (id == .none) return "";
-        return e.map.keys()[@intFromEnum(id) - 1][2..];
+        return e.map.keys()[@backingInt(id) - 1][2..];
     }
 
     pub fn linkOf(e: *const Extras, id: Id) Link {
@@ -177,12 +177,12 @@ pub const Extras = struct {
             @branchHint(.likely);
             return .none;
         }
-        return @enumFromInt(std.mem.readInt(u16, e.map.keys()[@intFromEnum(id) - 1][0..2], .little));
+        return @fromBackingInt(@intCast(std.mem.readInt(u16, e.map.keys()[@backingInt(id) - 1][0..2], .little)));
     }
 
     pub fn uri(e: *const Extras, link: Link) []const u8 {
         if (link == .none) return "";
-        return e.links.keys()[@intFromEnum(link) - 1];
+        return e.links.keys()[@backingInt(link) - 1];
     }
 
     /// Returns the key's index plus one, or 0 when the map is full.
@@ -234,7 +234,7 @@ pub const Frame = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     cells: []Cell = &.{},
-    dirty: std.DynamicBitSetUnmanaged = .{},
+    dirty: std.bit_set.Dynamic = .{},
     cursor: Cursor = .{},
 
     pub fn deinit(f: *Frame, gpa: std.mem.Allocator) void {
@@ -283,7 +283,7 @@ pub const Frame = struct {
         f.dirty.unsetAll();
     }
 
-    pub fn dirtyRows(f: *const Frame) std.DynamicBitSetUnmanaged.Iterator(.{}) {
+    pub fn dirtyRows(f: *const Frame) std.bit_set.Dynamic.Iterator(.{}) {
         return f.dirty.iterator(.{});
     }
 
@@ -358,7 +358,7 @@ pub const Frame = struct {
         /// The rows the render state reports changed.
         changed,
         /// Every row but these, whose cells the frame already holds.
-        except: *const std.DynamicBitSetUnmanaged,
+        except: *const std.bit_set.Dynamic,
     };
 
     /// Copies a pane's rows into `rect`. The other rows keep their cells.
@@ -474,12 +474,12 @@ inline fn fromRender(gpa: std.mem.Allocator, g: *Extras, raw: vt.Cell, style: vt
 pub const DrawnRows = struct {
     ids: std.ArrayList(vt.RenderState.Row.Id) = .empty,
     /// The viewport rows ghostty marked changed since the last render update.
-    changed: std.DynamicBitSetUnmanaged = .{},
+    changed: std.bit_set.Dynamic = .{},
     /// Whether every row may have changed.
     all_changed: bool = true,
     /// After `update` found a shift: the rows whose cells a frame drawn
     /// from the last record holds once its band is scrolled by the shift.
-    carried: std.DynamicBitSetUnmanaged = .{},
+    carried: std.bit_set.Dynamic = .{},
 
     /// A shift that keeps fewer rows than this does not pay for a scroll.
     const min_kept = 2;
@@ -588,7 +588,7 @@ test "a full grapheme table hands out no id instead of wrapping" {
     for (0..Extras.max_ids) |i| {
         last = try g.intern(gpa, &.{ 0x300 + @as(u21, @intCast(i % 0x100)), @intCast(0x1000 + i / 0x100) }, .none);
     }
-    try testing.expectEqual(Extras.max_ids, @intFromEnum(last));
+    try testing.expectEqual(Extras.max_ids, @backingInt(last));
     try testing.expectEqual(Extras.max_ids, g.count());
     try testing.expectEqual(.none, try g.intern(gpa, &.{0x301}, .none));
     try testing.expectEqual(Extras.max_ids, g.count());
@@ -892,8 +892,8 @@ test "random output composed by shift and carried rows matches composing every r
     for (0..runs) |i| {
         var buf: [64]u8 = undefined;
         const op: []const u8 = switch (r.uintLessThan(u8, 10)) {
-            0...3 => try std.fmt.bufPrint(&buf, "{c}{c}\r\n", .{ r.intRangeAtMost(u8, 'a', 'z'), r.intRangeAtMost(u8, 'a', 'z') }),
-            4 => try std.fmt.bufPrint(&buf, "\x1b[{d};{d}H{c}", .{ r.intRangeAtMost(u8, 1, 5), r.intRangeAtMost(u8, 1, 8), r.intRangeAtMost(u8, 'A', 'Z') }),
+            0...3 => try std.mem.print(&buf, "{c}{c}\r\n", .{ r.intRangeAtMost(u8, 'a', 'z'), r.intRangeAtMost(u8, 'a', 'z') }),
+            4 => try std.mem.print(&buf, "\x1b[{d};{d}H{c}", .{ r.intRangeAtMost(u8, 1, 5), r.intRangeAtMost(u8, 1, 8), r.intRangeAtMost(u8, 'A', 'Z') }),
             5 => "\x1b[31m\xe4\xb8\xad\x1b[0m",
             6 => "\r\n\r\n\r\n",
             7 => "\x1b[2;4r\x1b[4;1H\n\x1b[r",

@@ -529,7 +529,7 @@ const testing = std.testing;
 const alloc = testing.allocator;
 
 fn pid(n: u32) PaneId {
-    return @enumFromInt(n);
+    return @fromBackingInt(@intCast(n));
 }
 
 const screen: Rect = .{ .cols = 80, .rows = 24 };

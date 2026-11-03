@@ -53,7 +53,7 @@ pub fn resolve(arena: std.mem.Allocator, env: Env) ResolveError!Paths {
     }
     var socket_dir: ?[:0]const u8 = null;
     const socket: [:0]const u8 = if (env.kiwa_socket) |s|
-        try arena.dupeZ(u8, s)
+        try arena.dupeSentinel(u8, s, 0)
     else blk: {
         const dir = if (env.xdg_runtime_dir) |r|
             try std.fmt.allocPrintSentinel(arena, "{s}/kiwa", .{r}, 0)
@@ -64,7 +64,7 @@ pub fn resolve(arena: std.mem.Allocator, env: Env) ResolveError!Paths {
     };
 
     const state_dir: [:0]const u8 = if (env.kiwa_state_dir) |d|
-        try arena.dupeZ(u8, d)
+        try arena.dupeSentinel(u8, d, 0)
     else if (env.xdg_state_home) |x|
         try std.fmt.allocPrintSentinel(arena, "{s}/kiwa/{s}", .{ x, session_name }, 0)
     else if (env.home) |h|
@@ -97,7 +97,7 @@ pub fn makePath(gpa: std.mem.Allocator, path: []const u8) DirError!void {
     var i: usize = 1;
     while (i <= path.len) : (i += 1) {
         if (i != path.len and path[i] != '/') continue;
-        const prefix = try gpa.dupeZ(u8, path[0..i]);
+        const prefix = try gpa.dupeSentinel(u8, path[0..i], 0);
         defer gpa.free(prefix);
         try mkdir(prefix);
     }
@@ -118,7 +118,7 @@ pub fn lstat(path: [*:0]const u8) error{StatFailed}!sys.Stat {
 /// Whether `path` names a directory, following symlinks.
 pub fn isDir(path: []const u8) bool {
     var buf: [sys.PATH_MAX]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return false;
     const st = sys.stat(z, .follow) catch return false;
     return st.isDir();
 }

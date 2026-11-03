@@ -17,17 +17,27 @@ fn kiwaOptions(b: *std.Build, protocol_skew: u16, fuzz_percent: u8) *std.Build.S
     return options;
 }
 
-fn kiwaModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, vt: *std.Build.Module, options: *std.Build.Step.Options) *std.Build.Module {
+fn kiwaModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, vt: *std.Build.Module, options: *std.Build.Step.Options) *std.Build.Module {
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .strip = optimize != .Debug,
+        .strip = optimize != .debug,
     });
     mod.addImport("ghostty-vt", vt);
     mod.addOptions("build_options", options);
     return mod;
+}
+
+/// The `-Doptimize` spelling, which the bench report names.
+fn optimizeName(optimize: std.lang.Optimize) []const u8 {
+    return switch (optimize) {
+        .debug => "Debug",
+        .safe => "ReleaseSafe",
+        .fast => "ReleaseFast",
+        .small => "ReleaseSmall",
+    };
 }
 
 pub fn build(b: *std.Build) void {
@@ -50,7 +60,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run kiwa").dependOn(&run.step);
 
     const unit = b.addTest(.{ .root_module = mod });
@@ -65,7 +75,7 @@ pub fn build(b: *std.Build) void {
     // The outer terminal model is always optimized. In Debug, ghostty-vt
     // verifies a whole page after every row a scroll moves, which makes
     // each scroll of a large pane cost tens of milliseconds.
-    const outer_vt = b.dependency("ghostty", .{ .target = target, .optimize = .ReleaseSafe }).module("ghostty-vt");
+    const outer_vt = b.dependency("ghostty", .{ .target = target, .optimize = .safe }).module("ghostty-vt");
     e2e_mod.addImport("ghostty-vt", outer_vt);
     e2e_mod.addImport("kiwa_sys", b.createModule(.{
         .root_source_file = b.path("src/sys.zig"),
@@ -88,10 +98,10 @@ pub fn build(b: *std.Build) void {
     };
     for (e2e_steps) |spec| {
         const e2e_run = b.addRunArtifact(e2e_exe);
-        e2e_run.addArtifactArg(exe);
-        e2e_run.addArtifactArg(skewed_exe);
+        e2e_run.addArtifactArg2(exe, .{});
+        e2e_run.addArtifactArg2(skewed_exe, .{});
         e2e_run.addArg(spec.kind);
-        if (b.args) |args| e2e_run.addArgs(args);
+        e2e_run.addPassthruArgs();
         e2e_run.has_side_effects = true;
         b.step(spec.name, spec.description).dependOn(&e2e_run.step);
     }
@@ -107,11 +117,11 @@ pub fn build(b: *std.Build) void {
     };
     for (benches) |spec| {
         const bench = b.addSystemCommand(&.{"python3"});
-        bench.addFileArg(b.path("tools/bench.py"));
-        bench.addArtifactArg(exe);
-        bench.addArgs(&.{ "--build", @tagName(optimize) });
+        bench.addFileArg2(b.path("tools/bench.py"), .{});
+        bench.addArtifactArg2(exe, .{});
+        bench.addArgs(&.{ "--build", optimizeName(optimize) });
         if (spec.check) bench.addArg("--check");
-        if (b.args) |args| bench.addArgs(args);
+        bench.addPassthruArgs();
         bench.has_side_effects = true;
         b.step(spec.name, spec.description).dependOn(&bench.step);
     }

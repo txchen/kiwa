@@ -111,7 +111,7 @@ pub fn label(buf: []u8, cwd: []const u8, home: ?[]const u8, command: ?[]const u8
     for ([_][]const u8{ "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu" }) |known| {
         if (std.mem.eql(u8, executable, known)) return dir;
     }
-    return std.fmt.bufPrint(buf, "{s} · {s}", .{ executable, dir }) catch dir;
+    return std.mem.print(buf, "{s} · {s}", .{ executable, dir }) catch dir;
 }
 
 test "tab labels show the directory for shells and pair it with foreground programs" {

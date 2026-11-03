@@ -145,7 +145,7 @@ pub const Confirm = struct {
             .tab => "tab",
             .workspace => "workspace",
         };
-        return std.fmt.bufPrint(buf, "close {s}? {s} is running", .{ what, c.program[0..c.program_len] }) catch unreachable;
+        return std.mem.print(buf, "close {s}? {s} is running", .{ what, c.program[0..c.program_len] }) catch unreachable;
     }
 
     fn key(k: input.Key) Dialog.Outcome {
@@ -366,7 +366,7 @@ fn drawField(line: []frame_mod.Cell, gpa: std.mem.Allocator, g: *frame_mod.Extra
 const testing = std.testing;
 
 fn renameOf(text: []const u8) Dialog {
-    return .{ .rename = .{ .target = .{ .tab = @enumFromInt(1) }, .field = .init(text) } };
+    return .{ .rename = .{ .target = .{ .tab = @fromBackingInt(1) }, .field = .init(text) } };
 }
 
 fn fieldText(d: *const Dialog) []const u8 {
@@ -429,7 +429,7 @@ test "the rename box is centered over the tab area with its title, field, hint, 
 }
 
 test "a close confirmation names what runs; y confirms, and n or esc cancels" {
-    var d: Dialog = .{ .confirm = .init(.{ .tab = @enumFromInt(3) }, "vim") };
+    var d: Dialog = .{ .confirm = .init(.{ .tab = @fromBackingInt(3) }, "vim") };
     var buf: Confirm.Buf = undefined;
     try testing.expectEqualStrings("close tab? vim is running", d.confirm.message(&buf));
     try testing.expectEqual(.none, d.feed(.{ .key = .typed('x') }));
@@ -451,7 +451,7 @@ test "a close confirmation names what runs; y confirms, and n or esc cancels" {
     try testing.expectEqual(@as(u21, 'c'), f.row(11)[40].cp);
     try testing.expectEqual(@as(u21, 'y'), f.row(12)[40].cp);
 
-    const long: Confirm = .init(.{ .workspace = @enumFromInt(1) }, "a-very-long-command-name");
+    const long: Confirm = .init(.{ .workspace = @fromBackingInt(1) }, "a-very-long-command-name");
     try testing.expectEqualStrings("close workspace? a-very-long-comm is running", long.message(&buf));
 }
 

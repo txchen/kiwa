@@ -175,7 +175,7 @@ mise exec -- zig build -Doptimize=ReleaseFast
 
 The binary is `zig-out/bin/kiwa`. The default target is static `x86_64-linux-musl`. On an Apple silicon Mac, add `-Dtarget=aarch64-macos.13.0` to build and test commands.
 
-End-to-end tests need git, Python 3, less, Vim, htop, fzf, and ncurses utilities and terminfo. They use private sockets and state directories, not your running session. Do not use `--watch` or `-fincremental`; Zig 0.16 incremental compilation crashes on this project.
+End-to-end tests need git, Python 3, less, Vim, htop, fzf, and ncurses utilities and terminfo. They use private sockets and state directories, not your running session. Do not use `--watch` or `-fincremental`; Zig 0.17 incremental compilation fails on this project.
 
 To reproduce the comparison on Linux with Python 3 and tmux installed:
 

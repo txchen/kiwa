@@ -72,7 +72,7 @@ const testing = std.testing;
 const alloc = testing.allocator;
 
 fn pid(n: u32) PaneId {
-    return @enumFromInt(n);
+    return @fromBackingInt(@intCast(n));
 }
 
 const workspaces = [_]chrome.Workspace{ .{ .name = "kiwa", .active = true }, .{ .name = "notes" } };

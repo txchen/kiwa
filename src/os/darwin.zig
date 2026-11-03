@@ -174,7 +174,7 @@ pub const Poller = struct {
         try sys.blockSignals(signals);
         const kq = try kqueue();
         errdefer sys.close(kq);
-        for (signals) |sig| try change(kq, event(@intFromEnum(sig), c.EVFILT.SIGNAL, c.EV.ADD, 0, 0));
+        for (signals) |sig| try change(kq, event(@backingInt(sig), c.EVFILT.SIGNAL, c.EV.ADD, 0, 0));
         return .{ .kq = kq };
     }
 
@@ -230,7 +230,7 @@ pub const Poller = struct {
             const hangup = ev.flags & (c.EV.EOF | c.EV.ERROR) != 0;
             p.events[len] = switch (ev.filter) {
                 c.EVFILT.SIGNAL => {
-                    seen.add(@enumFromInt(@as(u32, @intCast(ev.ident))));
+                    seen.add(@fromBackingInt(@intCast(ev.ident)));
                     continue;
                 },
                 c.EVFILT.TIMER => .timer,

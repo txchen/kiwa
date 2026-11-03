@@ -185,7 +185,7 @@ fn along(ev: input.Mouse, axis: layout.Axis) i32 {
 const testing = std.testing;
 
 fn pid(n: u32) PaneId {
-    return @enumFromInt(n);
+    return @fromBackingInt(@intCast(n));
 }
 
 fn report(button: input.Mouse.Button, action: input.Mouse.Action, x: u16, y: u16) input.Mouse {

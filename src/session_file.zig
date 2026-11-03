@@ -41,7 +41,7 @@ fn moveAside(io: std.Io, arena: std.mem.Allocator, dir: Dir, why: anyerror) !Loa
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     const ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-    const bad = try std.fmt.allocPrint(arena, bad_prefix ++ "{d}", .{ns});
+    const bad = try arena.print(bad_prefix ++ "{d}", .{ns});
     dir.rename(name, dir, bad, io) catch return .{ .unusable = .{ .why = why, .moved_to = null } };
     // Old files only cost disk space, so a failure here is not worth reporting.
     pruneBad(io, arena, dir) catch {};
@@ -135,7 +135,7 @@ test "an unusable file is moved aside, and only the newest three are kept" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     for ([_][]const u8{ "1", "2", "3", "9999999999" }) |secs| {
-        const old = try std.fmt.allocPrint(arena, bad_prefix ++ "{s}", .{secs});
+        const old = try arena.print(bad_prefix ++ "{s}", .{secs});
         try tmp.dir.writeFile(testing.io, .{ .sub_path = old, .data = "old" });
     }
     try tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = "{\"version\": 1, \"workspaces\": [" });

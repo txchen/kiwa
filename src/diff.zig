@@ -174,7 +174,7 @@ pub const Scratch = struct {
     }
 };
 
-const RowSet = std.DynamicBitSetUnmanaged;
+const RowSet = std.bit_set.Dynamic;
 
 pub const DiffError = Writer.Error || std.mem.Allocator.Error;
 
@@ -423,7 +423,7 @@ const Out = struct {
         } else {
             // The id groups the pieces of one link that rows or partial
             // rewrites split, so the outer terminal highlights all of it.
-            try o.w.print("\x1b]8;id=k{d};{s}\x1b\\", .{ @intFromEnum(link), o.g.uri(link) });
+            try o.w.print("\x1b]8;id=k{d};{s}\x1b\\", .{ @backingInt(link), o.g.uri(link) });
         }
         o.link = link;
     }
@@ -500,7 +500,7 @@ const Out = struct {
     fn cursor(o: *Out, old: ?Cursor, new: Cursor) Writer.Error!void {
         if (old == null or old.?.shape != new.shape) {
             try o.begin();
-            try o.w.print("\x1b[{d} q", .{@intFromEnum(new.shape)});
+            try o.w.print("\x1b[{d} q", .{@backingInt(new.shape)});
         }
         try o.moveTo(new.x, new.y);
         if (old == null or old.?.visible != new.visible) {
@@ -989,7 +989,7 @@ fn randomCursor(r: Rng, f: *const Frame) Cursor {
         .x = r.uintLessThan(u16, f.cols),
         .y = r.uintLessThan(u16, f.rows),
         .visible = r.uintLessThan(u8, 4) != 0,
-        .shape = @enumFromInt(r.uintLessThan(u8, 7)),
+        .shape = @fromBackingInt(@intCast(r.uintLessThan(u8, 7))),
     };
 }
 

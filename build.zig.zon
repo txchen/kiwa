@@ -2,11 +2,11 @@
     .name = .kiwa,
     .version = "0.4.2",
     .fingerprint = 0xd0aee14efdeba142,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .ghostty = .{
-            .url = "https://github.com/ghostty-org/ghostty/archive/a4aacd918ba9e79929ff608034c60a4341773ef0.tar.gz",
-            .hash = "ghostty-1.3.2-dev-5UdBC4OoeQWywtCHiTRpl2ePMPF3P18YRi2hTQ4mJlgd",
+            .url = "https://github.com/ghostty-org/ghostty/archive/6fba0873efb7765e9d0f79de449063f3214b3d75.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBC3qmiwUaDnWW3NcVmwYFp7aOAfOnu9pvkZewWeQb",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "tools", "README.md" },

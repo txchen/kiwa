@@ -460,12 +460,12 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         var path_buf: [4096]u8 = undefined;
         const path = if (v.home.len > 0 and std.mem.startsWith(u8, v.directory, v.home) and
             (v.directory.len == v.home.len or v.directory[v.home.len] == '/'))
-            std.fmt.bufPrint(&path_buf, "~{s}", .{v.directory[v.home.len..]}) catch v.directory
+            std.mem.print(&path_buf, "~{s}", .{v.directory[v.home.len..]}) catch v.directory
         else
             v.directory;
         fit(f.rowMut(y + 1)[1..][0..inner], 0, path, plain);
         var counts: [80]u8 = undefined;
-        fit(f.rowMut(y + 2)[1..][0..inner], 0, std.fmt.bufPrint(&counts, "{d} {s} · {d} {s}", .{ v.tabs.len, if (v.tabs.len == 1) "tab" else "tabs", v.pane_count, if (v.pane_count == 1) "pane" else "panes" }) catch unreachable, dim);
+        fit(f.rowMut(y + 2)[1..][0..inner], 0, std.mem.print(&counts, "{d} {s} · {d} {s}", .{ v.tabs.len, if (v.tabs.len == 1) "tab" else "tabs", v.pane_count, if (v.pane_count == 1) "pane" else "panes" }) catch unreachable, dim);
     }
 
     var entries: Entries = .init(v, list, true);
@@ -480,7 +480,7 @@ fn drawSidebar(f: *Frame, v: View, sidebar_width: u16) void {
         var num: [24]u8 = undefined;
         var number_style = style;
         number_style.fg_color = v.styles.workspace_number;
-        const x = put(line, 1, std.fmt.bufPrint(&num, "{d} ", .{i + 1}) catch unreachable, number_style);
+        const x = put(line, 1, std.mem.print(&num, "{d} ", .{i + 1}) catch unreachable, number_style);
         var name_style = style;
         name_style.flags.bold = ws.active;
         // The name stops one column short of the marker.
@@ -529,7 +529,7 @@ fn drawAgent(line: []Cell, a: Agent, style: Style, st: *const Styles) void {
     var number = style;
     number.fg_color = st.workspace_number;
     var num: [24]u8 = undefined;
-    const x = put(line, 5, std.fmt.bufPrint(&num, "{d} ", .{a.tab + 1}) catch unreachable, number);
+    const x = put(line, 5, std.mem.print(&num, "{d} ", .{a.tab + 1}) catch unreachable, number);
     var label = style;
     label.flags.bold = a.focused;
     // One blank column before the divider, as workspace names keep.
@@ -570,7 +570,7 @@ fn drawCollapsed(f: *Frame, v: View) void {
         const line = f.rowMut(e.y)[0..width];
         for (line) |*c| c.style = style;
         var num: [24]u8 = undefined;
-        const text = std.fmt.bufPrint(&num, "{d}", .{i + 1}) catch unreachable;
+        const text = std.mem.print(&num, "{d}", .{i + 1}) catch unreachable;
         _ = put(line[0 .. width - 1], if (text.len >= 2) 0 else 1, text, style);
         if (cursor) line[0] = .{ .cp = nav_mark, .style = style };
         if (markerCp(ws.activity)) |cp| {
@@ -656,7 +656,7 @@ fn drawTabs(row: []Cell, tabs: []const Tab, st: *const Styles) void {
         for (cell) |*c| c.style = style;
         var num: [24]u8 = undefined;
         if (slot.minimal) {
-            _ = put(cell, 0, std.fmt.bufPrint(&num, "{d}[Z]", .{slot.index + 1}) catch unreachable, style);
+            _ = put(cell, 0, std.mem.print(&num, "{d}[Z]", .{slot.index + 1}) catch unreachable, style);
             continue;
         }
         // A bold number, in the accent on inactive tabs, marks where each
@@ -664,7 +664,7 @@ fn drawTabs(row: []Cell, tabs: []const Tab, st: *const Styles) void {
         var num_style = style;
         num_style.flags.bold = true;
         if (!t.active) num_style.fg_color = st.accent;
-        _ = put(cell, 1, std.fmt.bufPrint(&num, "{d}", .{slot.index + 1}) catch unreachable, num_style);
+        _ = put(cell, 1, std.mem.print(&num, "{d}", .{slot.index + 1}) catch unreachable, num_style);
         const after = 2 + digits(slot.index + 1);
         const end = slot.cols - 1 - @as(usize, if (t.activity == .none) 0 else 2);
         const name_end = end - @as(usize, if (t.zoomed) 4 else 0);
@@ -726,7 +726,7 @@ pub fn drawHelpRows(f: *Frame, area: Rect, offset: usize, help_rows: []const pre
 /// its viewport is scrolled `back` lines into `history`.
 pub fn drawScrollMarker(f: *Frame, inner: Rect, back: usize, history: usize, st: *const Styles) void {
     var buf: [48]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "[{d}/{d}]", .{ back, history }) catch return;
+    const text = std.mem.print(&buf, "[{d}/{d}]", .{ back, history }) catch return;
     if (inner.rows == 0 or text.len > inner.cols) return;
     const row = f.rowMut(inner.y)[inner.x..][0..inner.cols];
     const x = inner.cols - text.len;
@@ -1332,10 +1332,10 @@ fn expectRow(s: *const Screen, y: usize, want: []const u8) !void {
 }
 
 const kiwa_agents = [_]Agent{
-    .{ .label = "pi", .state = .working, .pane = @enumFromInt(1) },
-    .{ .label = "pi", .tab = 3, .state = .done, .pane = @enumFromInt(3), .focused = true },
+    .{ .label = "pi", .state = .working, .pane = @fromBackingInt(1) },
+    .{ .label = "pi", .tab = 3, .state = .done, .pane = @fromBackingInt(3), .focused = true },
 };
-const notes_agents = [_]Agent{.{ .label = "claude-code", .state = .blocked, .pane = @enumFromInt(2) }};
+const notes_agents = [_]Agent{.{ .label = "claude-code", .state = .blocked, .pane = @fromBackingInt(2) }};
 const with_agents = [_]Workspace{
     .{ .name = "kiwa", .branch = "osc7501", .active = true, .agents = &kiwa_agents },
     .{ .name = "notes", .agents = &notes_agents },
@@ -1362,16 +1362,16 @@ test "agents show under their workspace with their state's icon and tab number" 
     try testing.expect(s.at(7, 4).style.flags.bold);
     try testing.expectEqualDeep(plain.bg_color, s.at(5, 6).style.bg_color);
 
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(1) }), hit(v, 80, 24, 6, 3));
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(3) }), hit(v, 80, 24, 1, 4));
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(2) }), hit(v, 80, 24, 20, 6));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @fromBackingInt(1) }), hit(v, 80, 24, 6, 3));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @fromBackingInt(3) }), hit(v, 80, 24, 1, 4));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @fromBackingInt(2) }), hit(v, 80, 24, 20, 6));
     try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 0 }), hit(v, 80, 24, 5, 2));
     try testing.expectEqualDeep(@as(?Hit, .{ .workspace = 1 }), hit(v, 80, 24, 5, 5));
     try expectHit(v, &s, "/code/kiwa", .workspace_directory);
 }
 
 test "the navigate cursor can sit on an agent row, which it marks and reverses alone" {
-    const v: View = .{ .workspaces = &with_agents, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 0, .agent = @enumFromInt(3) } } };
+    const v: View = .{ .workspaces = &with_agents, .tabs = &tabs2, .mode = .{ .navigate = .{ .workspace = 0, .agent = @fromBackingInt(3) } } };
     var s = try render(80, 24, v);
     defer s.deinit();
     try testing.expectEqual(@as(u21, nav_mark), s.at(0, 4).cp);
@@ -1388,11 +1388,11 @@ test "the navigate cursor can sit on an agent row, which it marks and reverses a
 
 test "each blocked kind, error, and idle has its own icon and color" {
     const agents = [_]Agent{
-        .{ .label = "a", .state = .blocked, .kind = .permission, .pane = @enumFromInt(1) },
-        .{ .label = "b", .state = .blocked, .kind = .question, .pane = @enumFromInt(2) },
-        .{ .label = "c", .state = .blocked, .kind = .auth, .pane = @enumFromInt(3) },
-        .{ .label = "x", .state = .err, .pane = @enumFromInt(4) },
-        .{ .label = "y", .state = .idle, .pane = @enumFromInt(5) },
+        .{ .label = "a", .state = .blocked, .kind = .permission, .pane = @fromBackingInt(1) },
+        .{ .label = "b", .state = .blocked, .kind = .question, .pane = @fromBackingInt(2) },
+        .{ .label = "c", .state = .blocked, .kind = .auth, .pane = @fromBackingInt(3) },
+        .{ .label = "x", .state = .err, .pane = @fromBackingInt(4) },
+        .{ .label = "y", .state = .idle, .pane = @fromBackingInt(5) },
     };
     const ws = [_]Workspace{.{ .name = "kiwa", .agents = &agents }};
     var s = try render(80, 24, .{ .workspaces = &ws, .tabs = &tabs2 });
@@ -1417,9 +1417,9 @@ test "agent rows count toward the list, so the active workspace stays visible, a
     try expectRow(&s, 1, " 5 w");
     try expectRow(&s, 4, " 6 w");
     try expectRow(&s, 6, "   ✓ 4 pi");
-    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @enumFromInt(3) }), hit(v, 80, 10, 5, 6));
+    try testing.expectEqualDeep(@as(?Hit, .{ .agent = @fromBackingInt(3) }), hit(v, 80, 10, 5, 6));
 
-    const long = [_]Agent{.{ .label = "a-very-long-agent-name", .tab = 1, .state = .working, .pane = @enumFromInt(1) }};
+    const long = [_]Agent{.{ .label = "a-very-long-agent-name", .tab = 1, .state = .working, .pane = @fromBackingInt(1) }};
     const ws = [_]Workspace{.{ .name = "kiwa", .active = true, .agents = &long }};
     var narrow = try render(80, 24, .{ .workspaces = &ws, .tabs = &tabs2, .sidebar_width = min_sidebar_cols });
     defer narrow.deinit();

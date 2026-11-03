@@ -11,7 +11,7 @@ const skewed_version = protocol.version + @import("skewed_build_options").protoc
 const builtin = @import("builtin");
 const libc = std.c;
 
-const os = switch (builtin.os.tag) {
+const os = switch (builtin.target.os.tag) {
     .linux => @import("os/linux.zig"),
     .macos => @import("os/darwin.zig"),
     else => @compileError("the end-to-end tests run on Linux and macOS"),
@@ -136,7 +136,7 @@ const Ctx = struct {
 
     /// The pid of the server whose environment names this case's socket.
     fn serverPid(ctx: *Ctx) !?sys.pid_t {
-        const want = try std.fmt.allocPrint(ctx.gpa, "KIWA_SOCKET={s}\x00", .{ctx.socket});
+        const want = try ctx.gpa.print("KIWA_SOCKET={s}\x00", .{ctx.socket});
         defer ctx.gpa.free(want);
         var procs: os.Processes = try .init(ctx.gpa, ctx.io);
         defer procs.deinit();
@@ -287,7 +287,7 @@ const Outer = struct {
     /// Sends one SGR mouse report for zero-based cell (`x`, `y`).
     fn mouseReport(o: *Outer, code: u8, x: usize, y: usize, final: u8) !void {
         var buf: [32]u8 = undefined;
-        try o.send(try std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ code, x + 1, y + 1, final }));
+        try o.send(try std.mem.print(&buf, "\x1b[<{d};{d};{d}{c}", .{ code, x + 1, y + 1, final }));
     }
 
     fn click(o: *Outer, x: usize, y: usize) !void {
@@ -779,7 +779,7 @@ fn killServerGivesUpOnAServerThatStays(ctx: *Ctx) !void {
     std.debug.print("    kill-server printed: {s}", .{ran.output});
     try expect(ran.code == 1, "kill-server exits 1");
     try expect(waited >= 5 * std.time.ns_per_s and waited < 7 * std.time.ns_per_s, "kill-server waits 5 s, then gives up");
-    const want = try std.fmt.allocPrint(ctx.gpa, "kiwa: the server (pid {d}) did not exit within 5 s\n", .{pid});
+    const want = try ctx.gpa.print("kiwa: the server (pid {d}) did not exit within 5 s\n", .{pid});
     defer ctx.gpa.free(want);
     try expect(std.mem.eql(u8, ran.output, want), "kill-server reports the pid and the timeout");
 }
@@ -798,7 +798,7 @@ fn colorsAndWideChars(ctx: *Ctx) !void {
     const cells = rs.row_data.items(.cells)[y];
     const raw = cells.items(.raw)[x..];
     try expect(raw[0].style_id != 0, "\"red\" has a style");
-    const fg = cells.items(.style)[x].fg_color;
+    const fg = cells.items(.style)[x].fg_color.value();
     try expect(fg == .palette and fg.palette == 1, "\"red\" is drawn in palette color 1");
     try expect(raw[3].style_id == 0, "the space after \"red\" has the default style");
     try expect(raw[4].content.codepoint.data == 0x4e2d and raw[4].wide == .wide, "\u{4e2d} is one wide cell");
@@ -993,7 +993,7 @@ const raw_reader =
 ;
 
 fn kittyPaneGetsKittyKeys(ctx: *Ctx, keyboard: Outer.Keyboard) !void {
-    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/raw.py", .{ctx.dir});
+    const script = try ctx.gpa.print("{s}/raw.py", .{ctx.dir});
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = raw_reader });
     const o = try attachedAs(ctx, keyboard);
@@ -1036,7 +1036,7 @@ fn skewedClientIsToldToRestart(ctx: *Ctx) !void {
     try ctx.outers.append(ctx.gpa, o);
     try expect(try o.waitExit() == 1, "the skewed client exits 1");
     var buf: [64]u8 = undefined;
-    const reason = try std.fmt.bufPrint(&buf, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, skewed_version });
+    const reason = try std.mem.print(&buf, "detached: version mismatch (server {d}, client {d})", .{ protocol.version, skewed_version });
     try expect(try o.hasLine(reason), "the skewed client prints the reason with both versions");
     try expect(try o.hasLine(restart_hint), "the skewed client prints the restart hint on its own line");
     var t: sys.termios = undefined;
@@ -1126,7 +1126,7 @@ fn stalledClientRecovers(ctx: *Ctx) !void {
         sleepMs(100);
     }
     _ = try o.pump(500);
-    const stop = try std.fmt.allocPrint(ctx.gpa, "{s}/stop", .{ctx.dir});
+    const stop = try ctx.gpa.print("{s}/stop", .{ctx.dir});
     defer ctx.gpa.free(stop);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = stop, .data = "" });
     try o.send("printf '\\033[r'; clear; echo recovered\r");
@@ -1169,7 +1169,7 @@ fn scrollingCostsBytesPerLine(ctx: *Ctx, margins: bool) !void {
     o.capture = null;
     for (20..41) |i| {
         var buf: [32]u8 = undefined;
-        try o.waitLine(try std.fmt.bufPrint(&buf, "line {d} scrolls by", .{i}));
+        try o.waitLine(try std.mem.print(&buf, "line {d} scrolls by", .{i}));
     }
     std.debug.print("    39 lines, margins {}: {d} outer bytes, {d} per line\n", .{ margins, seen.items.len, seen.items.len / 39 });
     try expect(std.mem.indexOf(u8, seen.items, "S\x1b[r") != null, "the outer terminal scrolled");
@@ -1400,8 +1400,10 @@ const Grid = struct {
     /// Whether the cell has a sidebar selection or the tab accent.
     fn highlighted(g: *const Grid, x: usize, y: usize) bool {
         const s = g.style(x, y);
-        if (s.bg_color == .rgb) return s.bg_color.rgb.r == 50 and s.bg_color.rgb.g == 55 and s.bg_color.rgb.b == 76;
-        return s.bg_color == .palette and s.bg_color.palette == 6 and s.fg_color == .palette and s.fg_color.palette == 0;
+        const bg = s.bg_color.value();
+        const fore = s.fg_color.value();
+        if (bg == .rgb) return bg.rgb.r == 50 and bg.rgb.g == 55 and bg.rgb.b == 76;
+        return bg == .palette and bg.palette == 6 and fore == .palette and fore.palette == 0;
     }
 
     /// The width of Kiwa's sidebar, found by its divider on the top row; 0
@@ -1427,10 +1429,10 @@ const Grid = struct {
         return std.mem.trimEnd(u8, buf.items, " ");
     }
 
-    fn fg(g: *const Grid, x: usize, y: usize) vt.Style.Color {
+    fn fg(g: *const Grid, x: usize, y: usize) vt.Style.Color.Value {
         const cells = g.rs.row_data.items(.cells)[y];
         if (cells.items(.raw)[x].style_id == 0) return .none;
-        return cells.items(.style)[x].fg_color;
+        return cells.items(.style)[x].fg_color.value();
     }
 
     /// Where ASCII `needle` starts inside `b`, top row first.
@@ -1735,9 +1737,9 @@ fn workspaceDirectoriesCanChange(ctx: *Ctx) !void {
     try o.press(named(.enter, .{}));
     try o.waitGone(" new workspace ");
     try o.waitText("alpha");
-    const a = try std.fmt.allocPrint(ctx.gpa, "{s}/repo-a", .{ctx.dir});
+    const a = try ctx.gpa.print("{s}/repo-a", .{ctx.dir});
     defer ctx.gpa.free(a);
-    const b = try std.fmt.allocPrint(ctx.gpa, "{s}/repo-b", .{ctx.dir});
+    const b = try ctx.gpa.print("{s}/repo-b", .{ctx.dir});
     defer ctx.gpa.free(b);
     try o.send("export KEPT=alive; clear; pwd\r");
     try o.waitLine(a);
@@ -1795,7 +1797,7 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     const left, const right = tabArea(120, 24).splitRight();
     try waitBoxes(o, &.{ left, right });
     try o.send("clear; pwd\r");
-    const sub = try std.fmt.allocPrint(ctx.gpa, "{s}/sub", .{ctx.dir});
+    const sub = try ctx.gpa.print("{s}/sub", .{ctx.dir});
     defer ctx.gpa.free(sub);
     try waitTextIn(o, sub, right);
     // A reported OSC 7 directory wins over the shell's actual one.
@@ -1803,7 +1805,7 @@ fn newPanesStartInTheFocusedDirectory(ctx: *Ctx) !void {
     _ = try o.pump(200);
     try prefixed(o, "-");
     try o.send("pwd\r");
-    const osc = try std.fmt.allocPrint(ctx.gpa, "{s}/o d", .{ctx.dir});
+    const osc = try ctx.gpa.print("{s}/o d", .{ctx.dir});
     defer ctx.gpa.free(osc);
     try o.waitText(osc);
     try prefixed(o, "c");
@@ -1825,10 +1827,10 @@ fn processRuns(ctx: *Ctx, cmdline: []const u8) !bool {
 /// Returns its command line for `processRuns`.
 fn startSleep(ctx: *Ctx, o: *Outer) ![]u8 {
     const arg = 4_100_000 + @as(u32, @intCast(sys.getpid()));
-    const cmdline = try std.fmt.allocPrint(ctx.gpa, "sleep\x00{d}\x00", .{arg});
+    const cmdline = try ctx.gpa.print("sleep\x00{d}\x00", .{arg});
     errdefer ctx.gpa.free(cmdline);
     var cmd: [64]u8 = undefined;
-    try o.send(try std.fmt.bufPrint(&cmd, "sleep {d}\r", .{arg}));
+    try o.send(try std.mem.print(&cmd, "sleep {d}\r", .{arg}));
     const deadline = now() + 5 * std.time.ns_per_s;
     while (!try processRuns(ctx, cmdline)) {
         if (now() > deadline) return error.SleepDidNotStart;
@@ -1956,7 +1958,7 @@ fn hiddenProducers(ctx: *Ctx, count: usize, duration_ms: u32, advance: u32) !voi
     for (0..count) |i| {
         if (i > 0) try o.send(if (i % 2 == 1) "\x02v" else "\x02-");
         var cmd: [96]u8 = undefined;
-        try o.send(try std.fmt.bufPrint(&cmd, "clear; i=0; while :; do echo {d}:$i; i=$((i+1)); sleep 0.033; done\r", .{i}));
+        try o.send(try std.mem.print(&cmd, "clear; i=0; while :; do echo {d}:$i; i=$((i+1)); sleep 0.033; done\r", .{i}));
     }
     try o.waitFor("every producer", Ahead{ .base = @splat(0), .by = 5, .count = count }, producersAhead);
     // The loops' foreground flips between the shell and `sleep`; a fixed
@@ -2310,7 +2312,10 @@ const program_status_query =
     \\while not data.endswith(b"c"):
     \\    data += os.read(0, 64)
     \\termios.tcsetattr(0, termios.TCSADRAIN, old)
-    \\print("reply", repr(data))
+    \\osc, _, rest = data.partition(b"\x1b\\")
+    \\print("answered first", osc.startswith(b"\x1b]7501;") and rest.startswith(b"\x1b[?"))
+    \\for pair in osc[len(b"\x1b]7501;"):].split(b":"):
+    \\    print("pair", pair.decode())
 ;
 
 /// Sends one OSC 7501 report from the pane's shell.
@@ -2319,12 +2324,16 @@ fn report(o: *Outer, comptime pairs: []const u8) !void {
 }
 
 fn programStatusShowsInTheSidebar(ctx: *Ctx) !void {
-    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/query.py", .{ctx.dir});
+    const script = try ctx.gpa.print("{s}/query.py", .{ctx.dir});
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = program_status_query });
     const o = try attachedWithPrompt(ctx);
     try o.send("python3 query.py\r");
-    try o.waitText("reply b'\\x1b]7501;?\\x1b\\\\\\x1b[?");
+    // The reply comes before DA1's and lists what Kiwa accepts (revision 0.4).
+    try o.waitLine("answered first True");
+    try o.waitLine("pair ?");
+    try o.waitLine("pair states=idle,working,done,blocked,error");
+    try o.waitLine("pair kinds=permission,question,auth");
     try expect(!try o.contains("   · 1 "), "a query alone makes no record");
 
     try report(o, "state=working:app=pi");
@@ -2406,7 +2415,7 @@ fn navigatingToAnAgentShowsItsPane(ctx: *Ctx) !void {
 }
 
 fn writeAgentScript(ctx: *Ctx) !void {
-    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/agent.sh", .{ctx.dir});
+    const script = try ctx.gpa.print("{s}/agent.sh", .{ctx.dir});
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = "printf '\\033]7501;state=working:app=fake\\033\\\\'\nsleep 1\n" });
 }
@@ -2539,7 +2548,7 @@ fn sidebarMenuAndDetails(ctx: *Ctx) !void {
     try o.press(named(.enter, .{}));
     try o.waitText("vsplit (left/right)");
     try o.press(named(.escape, .{}));
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    const path = try ctx.gpa.print("{s}/.config/kiwa/config.toml", .{ctx.dir});
     defer ctx.gpa.free(path);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[bindings]\n'prefix+g' = 'new_tab'\n" });
     try clickSidebarText(o, "menu", 0);
@@ -2583,13 +2592,13 @@ const BgAt = struct { x: usize, y: usize, rgb: [3]u8 };
 fn bgIs(o: *Outer, at: BgAt) !bool {
     var g: Grid = try .load(o);
     defer g.deinit();
-    const bg = g.style(at.x, at.y).bg_color;
+    const bg = g.style(at.x, at.y).bg_color.value();
     return bg == .rgb and bg.rgb.r == at.rgb[0] and bg.rgb.g == at.rgb[1] and bg.rgb.b == at.rgb[2];
 }
 
 fn themePickerPreviewsAndSaves(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    const path = try ctx.gpa.print("{s}/.config/kiwa/config.toml", .{ctx.dir});
     defer ctx.gpa.free(path);
     // The tab row's empty right end shows the theme's panel color.
     const panel_x = area.right() - 1;
@@ -2625,10 +2634,10 @@ fn themePickerPreviewsAndSaves(ctx: *Ctx) !void {
 }
 
 fn configStartupAndRestore(ctx: *Ctx) !void {
-    const dir = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa", .{ctx.dir});
+    const dir = try ctx.gpa.print("{s}/.config/kiwa", .{ctx.dir});
     defer ctx.gpa.free(dir);
     try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/config.toml", .{dir});
+    const path = try ctx.gpa.print("{s}/config.toml", .{dir});
     defer ctx.gpa.free(path);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = "[keys]\nprefix = 'ctrl+a'\n[ui]\nsidebar_width = 30\n[terminal]\nscrollback_lines = 1000\n" });
     try expect(try ctx.runWith("config", "guide") == 0, "guide needs no server");
@@ -2647,7 +2656,7 @@ fn configStartupAndRestore(ctx: *Ctx) !void {
 }
 
 fn paneStyleConfig(ctx: *Ctx, text: []const u8) !void {
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    const path = try ctx.gpa.print("{s}/.config/kiwa/config.toml", .{ctx.dir});
     defer ctx.gpa.free(path);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = text });
 }
@@ -2669,7 +2678,7 @@ fn framesDrawn(o: *Outer, boxes: []const Box) !bool {
         for (boxes) |b| {
             if (b.contains(x, y)) break;
         } else {
-            if (g.cp(x, y) != ' ' or g.style(x, y).bg_color != .none) return false;
+            if (g.cp(x, y) != ' ' or g.style(x, y).bg_color.tag != .none) return false;
         }
     };
     return true;
@@ -2839,7 +2848,7 @@ fn paneStyleZoomMarker(ctx: *Ctx) !void {
 }
 
 fn paneStyleMouseCapture(ctx: *Ctx) !void {
-    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/framed-mouse.py", .{ctx.dir});
+    const script = try ctx.gpa.print("{s}/framed-mouse.py", .{ctx.dir});
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data =
         \\import os, tty
@@ -2871,7 +2880,7 @@ fn paneStyleMouseCapture(ctx: *Ctx) !void {
     try o.wheel(false, framed_right.x, y);
     try o.send("!");
     try o.waitText("received-end");
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/mouse-input", .{ctx.dir});
+    const path = try ctx.gpa.print("{s}/mouse-input", .{ctx.dir});
     defer ctx.gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(4096));
     defer ctx.gpa.free(bytes);
@@ -2936,7 +2945,7 @@ fn paneStyleQuiet(ctx: *Ctx) !void {
 
 fn configReloadPreservesPanes(ctx: *Ctx) !void {
     const o = try attachedWithPrompt(ctx);
-    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/.config/kiwa/config.toml", .{ctx.dir});
+    const path = try ctx.gpa.print("{s}/.config/kiwa/config.toml", .{ctx.dir});
     defer ctx.gpa.free(path);
     const initial = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.gpa, .limited(65536));
     defer ctx.gpa.free(initial);
@@ -3095,7 +3104,7 @@ const mouse_reader =
 ;
 
 fn mouseReachesTrackingPrograms(ctx: *Ctx) !void {
-    const script = try std.fmt.allocPrint(ctx.gpa, "{s}/mouse.py", .{ctx.dir});
+    const script = try ctx.gpa.print("{s}/mouse.py", .{ctx.dir});
     defer ctx.gpa.free(script);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = script, .data = mouse_reader });
     const o = try attachedWithPrompt(ctx);
@@ -3409,7 +3418,7 @@ fn branchLineFollowsHead(ctx: *Ctx) !void {
     try waitSidebarRow(o, 2, "   feature/x");
     std.debug.print("    the branch line changed {d} ms after the switch was typed\n", .{(now() - start) / std.time.ns_per_ms});
     try o.send("git switch -q --detach\r");
-    const detached = try std.fmt.allocPrint(ctx.gpa, "   {s}", .{std.mem.trimEnd(u8, id, "\n")});
+    const detached = try ctx.gpa.print("   {s}", .{std.mem.trimEnd(u8, id, "\n")});
     defer ctx.gpa.free(detached);
     try waitSidebarRow(o, 2, detached);
 }
@@ -3470,7 +3479,7 @@ fn quietRepositoryDoesNotSpin(ctx: *Ctx) !void {
 
 /// A file in this case's state directory.
 fn statePath(ctx: *Ctx, comptime name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(ctx.gpa, "{s}/state/" ++ name, .{ctx.dir});
+    return ctx.gpa.print("{s}/state/" ++ name, .{ctx.dir});
 }
 
 /// What identifies one write of `session.json`: a rename gives it a new
@@ -3561,7 +3570,7 @@ fn renameTo(o: *Outer, comptime dialog: []const u8, comptime name: []const u8) !
 /// Runs `pwd` in the focused pane and waits for `dir` inside `box`.
 fn pwdIn(ctx: *Ctx, o: *Outer, comptime sub: []const u8, box: Box) !void {
     try o.send("clear; pwd\r");
-    const dir = try std.fmt.allocPrint(ctx.gpa, "{s}" ++ sub, .{ctx.dir});
+    const dir = try ctx.gpa.print("{s}" ++ sub, .{ctx.dir});
     defer ctx.gpa.free(dir);
     try waitTextIn(o, dir, box);
 }
@@ -3651,7 +3660,7 @@ fn restoreFallsBackToTheWorkspaceRoot(ctx: *Ctx) !void {
     const pid = (try ctx.serverPid()) orelse return error.ServerNotFound;
     try expect(try ctx.run("kill-server") == 0, "kill-server exits 0");
     try ctx.waitServerGone(pid);
-    const gone = try std.fmt.allocPrint(ctx.gpa, "{s}/gone", .{ctx.dir});
+    const gone = try ctx.gpa.print("{s}/gone", .{ctx.dir});
     defer ctx.gpa.free(gone);
     const saved = try waitSaved(ctx, gone);
     ctx.gpa.free(saved.text);
@@ -4005,7 +4014,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     // On macOS /tmp is a link to /private/tmp, the path that panes report.
     var real_buf: [sys.PATH_MAX]u8 = undefined;
     const real = libc.realpath(made, &real_buf) orelse return error.NoRealPath;
-    const dir = try gpa.dupeZ(u8, std.mem.sliceTo(real, 0));
+    const dir = try gpa.dupeSentinel(u8, std.mem.sliceTo(real, 0), 0);
     defer gpa.free(dir);
 
     var env: std.process.Environ.Map = .init(gpa);
@@ -4017,14 +4026,14 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     try env.put("PS1", prompt);
     try env.put("TERM", "xterm-256color");
     // Fake values that the server must strip from the pane's environment.
-    const fake_tmux = try std.fmt.allocPrint(gpa, "{s}/no-such-tmux,1,0", .{dir});
+    const fake_tmux = try gpa.print("{s}/no-such-tmux,1,0", .{dir});
     defer gpa.free(fake_tmux);
     try env.put("TMUX", fake_tmux);
     try env.put("TMUX_PANE", "%0");
-    const socket = try std.fmt.allocPrint(gpa, "{s}/kiwa.sock", .{dir});
+    const socket = try gpa.print("{s}/kiwa.sock", .{dir});
     defer gpa.free(socket);
     try env.put("KIWA_SOCKET", socket);
-    const state = try std.fmt.allocPrint(gpa, "{s}/state", .{dir});
+    const state = try gpa.print("{s}/state", .{dir});
     defer gpa.free(state);
     try env.put("KIWA_STATE_DIR", state);
     // Git in the case reads none of the user's configuration.
@@ -4059,7 +4068,7 @@ fn runCase(gpa: std.mem.Allocator, io: std.Io, parent_env: *const std.process.En
     }
     run(&ctx) catch |e| {
         std.debug.print("    error: {t}\n", .{e});
-        const log = try std.fmt.allocPrint(gpa, "{s}/server.log", .{state});
+        const log = try gpa.print("{s}/server.log", .{state});
         defer gpa.free(log);
         var buf: [4096]u8 = undefined;
         if (std.Io.Dir.cwd().readFile(io, log, &buf)) |text| {

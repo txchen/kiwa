@@ -10,7 +10,7 @@ const sys = @import("sys.zig");
 
 pub const std_options: std.Options = .{
     // ghostty-vt warns about every unknown sequence; keep server.log for real errors.
-    .log_level = if (builtin.mode == .Debug) .debug else .err,
+    .log_level = if (builtin.mode == .debug) .debug else .err,
 };
 
 const usage =
@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (!std.mem.eql(u8, op, "check") and !std.mem.eql(u8, op, "bindings")) return fail(usage);
         var line: usize = 0;
         const cfg = config.load(init.gpa, init.io, name, &line) catch |e| {
-            return fail(try std.fmt.allocPrint(init.arena.allocator(), "{s}:{d}: {t}\n", .{ name, line, e }));
+            return fail(try init.arena.allocator().print("{s}:{d}: {t}\n", .{ name, line, e }));
         };
         if (std.mem.eql(u8, op, "check")) {
             try sys.writeAll(1, "Configuration valid (missing file uses built-in defaults).\n");
@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !u8 {
         var list: prefix.HelpList = .{};
         list.build(&cfg.keys);
         for (list.rows[0..list.len]) |row| {
-            try sys.writeAll(1, try std.fmt.allocPrint(init.arena.allocator(), "{s} = {s}\n", .{ row.keys, row.text }));
+            try sys.writeAll(1, try init.arena.allocator().print("{s} = {s}\n", .{ row.keys, row.text }));
         }
         return 0;
     }
@@ -78,9 +78,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (cmd.len == 0) {
         const name = try config.path(init.arena.allocator(), init.environ_map);
-        config.ensure(init.gpa, init.io, name) catch |e| return fail(try std.fmt.allocPrint(init.arena.allocator(), "kiwa: creating {s}: {t}\n", .{ name, e }));
+        config.ensure(init.gpa, init.io, name) catch |e| return fail(try init.arena.allocator().print("kiwa: creating {s}: {t}\n", .{ name, e }));
         var line: usize = 0;
-        _ = config.load(init.gpa, init.io, name, &line) catch |e| return fail(try std.fmt.allocPrint(init.arena.allocator(), "{s}:{d}: {t}\n", .{ name, line, e }));
+        _ = config.load(init.gpa, init.io, name, &line) catch |e| return fail(try init.arena.allocator().print("{s}:{d}: {t}\n", .{ name, line, e }));
         return client.attach(init.gpa, init.environ_map, resolved);
     }
     if (std.mem.eql(u8, cmd, "__server")) return server.run(init.gpa, init.io, init.environ_map, resolved);

@@ -461,6 +461,6 @@ test "every invalid document is refused with its reason" {
             return error.TestUnexpectedResult;
         }
     }
-    const deep = "[" ** (max_depth + 1) ++ "]" ** (max_depth + 1);
-    try testing.expectError(error.TooDeep, parse(arena, deep));
+    const deep = @as([max_depth + 1]u8, @splat('[')) ++ @as([max_depth + 1]u8, @splat(']'));
+    try testing.expectError(error.TooDeep, parse(arena, &deep));
 }

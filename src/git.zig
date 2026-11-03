@@ -18,16 +18,16 @@ pub fn findGitDir(gpa: Allocator, start: []const u8) Allocator.Error!?[:0]u8 {
     var buf: [sys.PATH_MAX]u8 = undefined;
     var dir: ?[]const u8 = start;
     while (dir) |d| : (dir = std.fs.path.dirname(d)) {
-        const dot_git = std.fmt.bufPrintZ(&buf, "{s}/.git", .{std.mem.trimEnd(u8, d, "/")}) catch continue;
+        const dot_git = std.mem.printSentinel(&buf, "{s}/.git", .{std.mem.trimEnd(u8, d, "/")}, 0) catch continue;
         const st = sys.stat(dot_git, .follow) catch continue;
         switch (st.kind()) {
-            std.c.S.IFDIR => return try gpa.dupeZ(u8, dot_git),
+            std.c.S.IFDIR => return try gpa.dupeSentinel(u8, dot_git, 0),
             std.c.S.IFREG => {
                 var contents: [sys.PATH_MAX + 16]u8 = undefined;
                 const target = parseGitFile(readFile(dot_git, &contents) orelse return null) orelse return null;
                 const resolved = try std.fs.path.resolve(gpa, &.{ d, target });
                 defer gpa.free(resolved);
-                return try gpa.dupeZ(u8, resolved);
+                return try gpa.dupeSentinel(u8, resolved, 0);
             },
             else => continue,
         }
@@ -115,7 +115,7 @@ pub const Watcher = struct {
         }
 
         fn headPath(r: *const Repo, buf: *[sys.PATH_MAX]u8) ?[:0]const u8 {
-            return std.fmt.bufPrintZ(buf, "{s}/HEAD", .{r.git_dir}) catch null;
+            return std.mem.printSentinel(buf, "{s}/HEAD", .{r.git_dir}, 0) catch null;
         }
     };
 
@@ -155,7 +155,7 @@ pub const Watcher = struct {
             gpa.free(git_dir);
             return null;
         };
-        const id: Watch = @enumFromInt(w.next_id);
+        const id: Watch = @fromBackingInt(@intCast(w.next_id));
         w.next_id += 1;
         w.repos.putAssumeCapacity(id, .{ .git_dir = git_dir, .dev = st.dev, .ino = st.ino, .handle = handle });
         errdefer {
@@ -343,7 +343,7 @@ test "a .git file points to the Git directory, relative to the file's directory 
     defer testing.allocator.free(wt_sub);
     try expectGitDir(target, wt_sub);
 
-    const line = try std.fmt.allocPrint(testing.allocator, "gitdir: {s}\n", .{target});
+    const line = try testing.allocator.print("gitdir: {s}\n", .{target});
     defer testing.allocator.free(line);
     try t.write("abs/.git", line);
     const abs = try t.join("abs");
@@ -358,7 +358,7 @@ test "HEAD names a branch, a detached commit's short id, or nothing" {
     try testing.expectEqualStrings("main", parseHead("ref: refs/heads/main\n").?);
     try testing.expectEqualStrings("feature/x", parseHead("ref: refs/heads/feature/x").?);
     try testing.expectEqualStrings("0123abc", parseHead("0123abcdef0123456789abcdef0123456789abcd\n").?);
-    try testing.expectEqualStrings("89abcde", parseHead("89abcdef" ++ "0" ** 56 ++ "\n").?);
+    try testing.expectEqualStrings("89abcde", parseHead("89abcdef" ++ @as([56]u8, @splat('0')) ++ "\n").?);
     try testing.expectEqual(null, parseHead(""));
     try testing.expectEqual(null, parseHead("ref: refs/heads/\n"));
     try testing.expectEqual(null, parseHead("ref: refs/heads/a\x1b[2Jb\n"));

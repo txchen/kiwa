@@ -141,7 +141,7 @@ pub const Menu = struct {
 const testing = std.testing;
 
 fn pane(n: u32) Subject {
-    return .{ .pane = @enumFromInt(n) };
+    return .{ .pane = @fromBackingInt(@intCast(n)) };
 }
 
 test "every subject has a table: rename and close a workspace or tab; rename, split, zoom, and close from a pane" {

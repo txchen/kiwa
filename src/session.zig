@@ -114,7 +114,7 @@ pub const Session = struct {
 
     pub fn nextId(s: *Session, comptime T: type) T {
         defer s.next_id += 1;
-        return @enumFromInt(s.next_id);
+        return @fromBackingInt(@intCast(s.next_id));
     }
 
     /// Adds a workspace rooted at `root_dir` with one tab and selects it.
@@ -228,7 +228,7 @@ pub const Session = struct {
     /// The new pane takes focus.
     pub fn split(s: *Session, area: Rect, axis: layout.Axis) !PaneId {
         const t = s.activeTab();
-        const pane: PaneId = @enumFromInt(s.next_id);
+        const pane: PaneId = @fromBackingInt(@intCast(s.next_id));
         try t.layout.split(s.gpa, area, t.focused, axis, pane);
         _ = s.nextId(PaneId);
         t.focused = pane;
@@ -539,11 +539,11 @@ test "ids are never reused after closes" {
     const first = try s.newWorkspace("/a");
     for (0..5) |_| {
         const ids = [_]u32{
-            @intFromEnum(try s.newTab()),
-            @intFromEnum(s.activeTab().id),
-            @intFromEnum(try s.split(screen, .right)),
-            @intFromEnum(try s.newWorkspace("/b")),
-            @intFromEnum(s.active),
+            @backingInt(try s.newTab()),
+            @backingInt(s.activeTab().id),
+            @backingInt(try s.split(screen, .right)),
+            @backingInt(try s.newWorkspace("/b")),
+            @backingInt(s.active),
         };
         for (ids) |id| try testing.expect(try seen.fetchPut(testing.allocator, id, {}) == null);
         try testing.expectEqual(.workspace, (try s.closeWorkspace(s.active, &closed)).?);
@@ -701,7 +701,7 @@ test "revealing a pane selects its workspace and tab, focuses it, and leaves zoo
     try testing.expect(!s.revealPane(a));
     try testing.expect(s.revealPane(b));
     try testing.expectEqual(b, s.focused());
-    try testing.expect(!s.revealPane(@enumFromInt(999)));
+    try testing.expect(!s.revealPane(@fromBackingInt(999)));
 }
 
 test "only the visible tab is placed, and a zoomed pane fills the area" {
