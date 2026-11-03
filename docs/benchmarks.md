@@ -2,6 +2,78 @@
 
 [Back to the README](../README.md) · [Benchmark script](../tools/bench.py)
 
+## Ghostty `6fba087` and Zig 0.17, November 3, 2026
+
+Kiwa moved from ghostty-vt `a4aacd9` and Zig 0.16 to Ghostty `main` at
+`6fba087` (1.4.1-dev) and Zig 0.17. The change also replaces `rowsEqual`,
+the frame diff's row compare, with a loop that checks four cells per
+branch. Under Zig 0.17, `std.mem.eql` was no longer inlined there, and
+the scrolling scenario ran 0.8% more server instructions. Both ReleaseFast
+binaries were measured on the October machine, an Intel N97 with kernel
+`7.2.9-1-cachyos` and the `powersave` governor:
+
+- before: `master` at `f7808b5`, release 0.4.2
+- after: this change
+
+The machine ran slower than in October: tmux's spinner took 1.973% of one
+core, against 0.544% on October 6. Compare the two columns below with
+each other, not with older sections.
+
+CPU and memory came from `tools/bench.py` with five runs:
+
+```sh
+python3 tools/bench.py <before> --build ReleaseFast --programs kiwa --runs 5
+python3 tools/bench.py <after> --build ReleaseFast --programs kiwa,tmux --runs 5 --check
+```
+
+The two runs were about 90 minutes apart. Every `--check` gate passed
+against tmux 3.8.
+
+| Scenario | CPU % before | CPU % after | Outer bytes before / after | Server RSS MiB before / after |
+|---|---|---|---|---|
+| 1 idle pane | 0.000 | 0.000 | 0 / 0 | 2.2 / 2.4 |
+| 60 Hz one-cell spinner | 0.679 | 0.676 | 1,442 / 1,442 | 2.2 / 2.4 |
+| 30 lines/s of 80 bytes, with margins | 0.721 | 0.697 | 52,752 / 52,752 | 2.9 / 3.0 |
+| 30 lines/s of 80 bytes, without margins | 0.708 | 0.694 | 68,872 / 68,872 | 2.9 / 3.0 |
+| 30 lines/s with 3 OSC 8 links each | 1.359 | 0.956 | 131,734 / 129,845 | 3.6 / 4.0 |
+| 10 idle panes | 0.000 | 0.000 | 0 / 0 | 3.9 / 4.0 |
+| 1 idle pane, detached | 0.000 | 0.000 | - | 2.1 / 2.2 |
+| 10 idle panes, detached | 0.000 | 0.000 | - | 3.8 / 3.9 |
+| 10 hidden producers, focused pane idle | 2.270 | 2.049 | 0 / 0 | 10.4 / 10.5 |
+| 10 hidden producers, detached | 2.118 | 2.005 | - | 10.4 / 10.5 |
+
+The idle scenarios still use no CPU time and make no context switches.
+Client RSS went from 1.3 to 1.1 MiB.
+
+CPU percentages vary by a few percent between runs, so the server's
+user-space instructions were also counted. Each count ran
+`perf stat -e instructions:u` on the server for 10 s, after the bench
+driver's 6-second warmup. The before and after binaries alternated for
+three rounds, and each count repeated to within 0.05 million:
+
+| Scenario | Million instructions before | Million instructions after | Change |
+|---|---|---|---|
+| 60 Hz one-cell spinner | 12.5 | 11.7 | -7% |
+| 30 lines/s of 80 bytes, with margins | 63.1 | 53.9 | -15% |
+| 30 lines/s of 80 bytes, without margins | 57.0 | 51.5 | -10% |
+| 30 lines/s with 3 OSC 8 links each | 169.9 | 90.0 | -47% |
+| 10 hidden producers, focused pane idle | 10.8 | 8.4 | -22% |
+
+For parse throughput, a pane ran `cat` on a 50 MiB file of lines with SGR
+colors and CJK text. Over three alternating runs, the server took 1.32 to
+1.33 s of CPU before and 1.23 to 1.25 s after.
+
+The link scenario sends fewer bytes because it repaints the whole pane
+less often. After the first frame on attach, a 15-second capture had seven
+whole-pane repaints of about 10 KB before, at irregular intervals, and two
+after. With digits ignored, every other frame had the same bytes in both
+builds. The `e2e-perf` cases pass on both builds.
+The only change in their output is the scrolling case with margins, which
+went from 53 to 50 outer bytes per line.
+
+The executable grew from 2,311,712 to 2,401,400 bytes, and
+`kiwa-x86_64-linux-musl.tar.gz` from 911,805 to 940,652 bytes.
+
 ## Kiwa rerun, October 9, 2026
 
 Only Kiwa was measured. The tmux, Zellij, and Herdr numbers below are still
