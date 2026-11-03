@@ -32,8 +32,23 @@ pub const Cell = packed struct(u128) {
     }
 };
 
+/// Compares four cells per step and branches once per step. The frame diff
+/// calls this for every row of every frame, so it is the hottest loop in a
+/// scrolling pane. With a baseline x86_64 CPU, `std.mem.eql` branches on
+/// every 16 bytes, and Zig 0.17 stopped inlining it here.
 pub fn rowsEqual(a: []const Cell, b: []const Cell) bool {
-    return std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b));
+    if (a.len != b.len) return false;
+    const V = @Vector(4 * @sizeOf(Cell), u8);
+    var i: usize = 0;
+    while (i + 4 <= a.len) : (i += 4) {
+        const x: V = std.mem.asBytes(a[i..][0..4]).*;
+        const y: V = std.mem.asBytes(b[i..][0..4]).*;
+        if (@reduce(.Or, x != y)) return false;
+    }
+    for (a[i..], b[i..]) |x, y| {
+        if (!x.eql(y)) return false;
+    }
+    return true;
 }
 
 /// A cell's SGR attributes.
@@ -577,6 +592,20 @@ pub fn paneCursor(rect: Rect, rs: *const vt.RenderState, shape_is_default: bool)
 
 const testing = std.testing;
 const fuzz = @import("fuzz.zig");
+
+test "rows compare equal only when every cell matches, in and after the four-cell steps" {
+    var a: [11]Cell = @splat(.blank);
+    var b: [11]Cell = @splat(.blank);
+    for (0..a.len + 1) |len| {
+        try testing.expect(rowsEqual(a[0..len], b[0..len]));
+        for (0..len) |i| {
+            b[i].style.flags.bold = true;
+            try testing.expect(!rowsEqual(a[0..len], b[0..len]));
+            b[i] = .blank;
+        }
+    }
+    try testing.expect(!rowsEqual(a[0..4], b[0..5]));
+}
 
 test "a full grapheme table hands out no id instead of wrapping" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
