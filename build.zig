@@ -1,11 +1,16 @@
 const std = @import("std");
 const zon = @import("build.zig.zon");
 
+/// What `kiwa --version` names as the Ghostty source: the commit of a
+/// GitHub archive, or the `vt-X.Y.Z` tag of a libghostty-vt release
+/// tarball.
 const ghostty_commit = commit: {
     const url = zon.dependencies.ghostty.url;
-    const start = std.mem.indexOf(u8, url, "/archive/").? + "/archive/".len;
-    const end = std.mem.indexOfPos(u8, url, start, ".tar.gz").?;
-    break :commit url[start..end];
+    const name = url[std.mem.lastIndexOfScalar(u8, url, '/').? + 1 ..];
+    const stem = name[0..std.mem.indexOf(u8, name, ".tar.gz").?];
+    const release = "libghostty-vt-";
+    if (std.mem.startsWith(u8, stem, release)) break :commit "vt-" ++ stem[release.len..];
+    break :commit stem;
 };
 
 fn kiwaOptions(b: *std.Build, protocol_skew: u16, fuzz_percent: u8) *std.Build.Step.Options {

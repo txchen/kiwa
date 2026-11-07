@@ -117,7 +117,7 @@ Mouse selection copies to your clipboard when the outer terminal allows OSC 52 w
 ```sh
 kiwa              # attach or start
 kiwa ls           # list workspaces and tabs
-kiwa --version    # print version and pinned Ghostty commit
+kiwa --version    # print version and pinned Ghostty release or commit
 kiwa --remote dev # attach to Kiwa on the SSH host dev
 ```
 

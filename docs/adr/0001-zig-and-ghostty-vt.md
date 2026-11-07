@@ -8,14 +8,19 @@ replies, title and cwd events, and key and mouse encoding. Its parse cost for
 a 60 Hz one-cell spinner is about 0.0013% of one core.
 
 Kiwa started on Zig 0.16. It moved to Zig 0.17 on November 3, 2026, because
-Ghostty's `main` requires 0.17 and Kiwa tracks a `main` commit rather than
-waiting for a tagged libghostty release.
+Ghostty's `main` requires 0.17 and Kiwa tracked a `main` commit rather than
+waiting for a tagged libghostty release. On November 6, 2026, Ghostty tagged
+libghostty-vt 1.0.0 (`vt-1.0.0`), and Kiwa moved to that release's source
+tarball.
 
 ## Consequences
 
-- Ghostty is pinned to one commit in `build.zig.zon`. Its Zig API is not
-  stable, so each upgrade is a deliberate change with its own verification.
-- Kiwa uses the Zig version that its pinned Ghostty commit requires. A
+- Ghostty is pinned in `build.zig.zon`, to a libghostty-vt release tarball
+  from `release.files.ghostty.org` or, between releases, to a commit. The
+  1.x stability promise covers only the C ABI. Kiwa imports the Zig module,
+  whose API is not stable, so each upgrade is a deliberate change with its
+  own verification.
+- Kiwa uses the Zig version that its pinned Ghostty source requires. A
   Ghostty upgrade can therefore bring a Zig upgrade with it.
 - The build must forward `target` and `optimize` to the Ghostty dependency.
   Without them, ghostty-vt compiles in Debug and parsing is about 270x slower.
